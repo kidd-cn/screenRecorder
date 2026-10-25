@@ -5,13 +5,20 @@ import Foundation
 
 /// AVAssetWriter 落盘会话：视频走 `AVAssetWriterInputPixelBufferAdaptor`，
 /// 音频走直通（`outputSettings = nil` + 由 `AVAudioFormat` 构造的格式提示，写入样本必须与之一致），
-/// 输出 MP4。生命周期：init（排他创建输出文件）→ addVideoInput / addAudioInput → startWriting
+/// 输出 MP4。生命周期：init（预检 + claim 占位）→ addVideoInput / addAudioInput → startWriting
 /// → appendVideo / appendAudio（首个到轨样本自动 startSession 锚定时间轴）→ finish。
 ///
-/// 不覆盖既有录像（硬约束）：init 用 `open(O_CREAT | O_EXCL)` 原子占位目标路径，
-/// 与任何并发创建者竞争时必有一方失败——失败方抛 `outputAlreadyExists`。
-/// 从机制上排除「AVAssetWriter 静默截断覆盖既有录像」的路径；占位后未写入任何样本即放弃的，
-/// 由 `discardIfNoContent()` / `finish()` 删除空壳文件。
+/// 不覆盖既有录像（硬约束）——预检 + claim 双保险：
+/// 1. init 预检 `outputURL` 本体已存在 → 直接抛 `outputAlreadyExists`；
+/// 2. 对 `outputURL.path + ".claim"` 做 `open(O_CREAT | O_EXCL)` 原子占位——两个会话竞争同一
+///    目标时必有一方 claim 失败（`outputBusy`）；真实文件由 AVAssetWriter 自行创建。
+/// macOS 27 起 writer **拒绝写入已存在文件**（-11823），占位真实路径会让 startWriting 直接
+/// `.failed`，故占位只落在 `.claim` 上；macOS 13–26 上 writer 会截断覆盖，预检 + claim 把
+/// 已知竞争窗口封死（旧平台 writer 打开真实文件前，本体要么不存在、要么已被预检拦下）。
+///
+/// claim 生命周期：writer init 失败 / `discardIfNoContent()` / `finish()` 各终结路径 /
+/// `deinit` 兜底，全部移除 claim；空壳清理语义不变——零内容路径（nothingWritten / discard）
+/// 连同 writer 可能已建的本体文件一并删除，目录不留垃圾。
 ///
 /// 线程模型：append* 在采集回调队列调用（热路径），finish / 只读属性可在任意线程；
 /// 所有 `AVAssetWriter` 触碰经 `stateLock` 串行化（每帧一次锁，开销可忽略）。
@@ -19,6 +26,7 @@ import Foundation
 final class AssetWriterSession {
     enum AssetWriterSessionError: LocalizedError {
         case outputAlreadyExists(URL)
+        case outputBusy(URL)
         case cannotCreateOutputFile(path: String, errno: Int32)
         case cannotCreateWriter(underlying: Error)
         case cannotAddVideoInput
@@ -26,7 +34,7 @@ final class AssetWriterSession {
         case cannotMakeAudioFormatHint(OSStatus)
         case noVideoInput
         case noAudioInput
-        case writerNotWriting(status: AVAssetWriter.Status)
+        case writerNotWriting(status: AVAssetWriter.Status, underlying: Error?)
         case appendFailedVideo(underlying: Error?)
         case appendFailedAudio(underlying: Error?)
         case nothingWritten
@@ -36,8 +44,10 @@ final class AssetWriterSession {
             switch self {
             case .outputAlreadyExists(let url):
                 return "输出文件已存在，拒绝覆盖：\(url.path)"
+            case .outputBusy(let url):
+                return "目标被其他录制会话占用（claim 已存在）：\(url.path).claim（若为上次异常退出的残留可手动删除）"
             case .cannotCreateOutputFile(let path, let errnoCode):
-                return "无法排他创建输出文件 \(path)（errno=\(errnoCode)，目录未创建？）"
+                return "无法排他创建 \(path)（errno=\(errnoCode)，输出目录未创建？）"
             case .cannotCreateWriter(let underlying):
                 return "AVAssetWriter 创建失败：\(underlying)"
             case .cannotAddVideoInput:
@@ -50,8 +60,8 @@ final class AssetWriterSession {
                 return "视频输入未装配（appendVideo 早于 addVideoInput/startWriting）"
             case .noAudioInput:
                 return "音频输入未装配（appendAudio 早于 addAudioInput）"
-            case .writerNotWriting(let status):
-                return "AVAssetWriter 不在写入状态（status=\(status.rawValue)）"
+            case .writerNotWriting(let status, let underlying):
+                return "AVAssetWriter 不在写入状态（status=\(status.rawValue)）：\(underlying.map(String.init(describing:)) ?? "无底层错误")"
             case .appendFailedVideo(let underlying):
                 return "视频帧写入失败：\(underlying.map(String.init(describing:)) ?? "未知原因")"
             case .appendFailedAudio(let underlying):
@@ -64,7 +74,7 @@ final class AssetWriterSession {
         }
     }
 
-    /// 输出文件 URL（init 时已排他占位）。
+    /// 输出文件 URL（writer 自建；init 时经预检 + claim 保证不覆盖既有录像）。
     let outputURL: URL
 
     /// 会话时间轴锚点：首个到轨样本的 PTS（即 startSession 的 atSourceTime）。
@@ -76,9 +86,20 @@ final class AssetWriterSession {
     /// 因编码器未就绪而丢弃的视频帧数（实时录制语义：宁丢帧不阻塞采集队列）。
     private(set) var droppedVideoFrameCount = 0
 
+    /// 诊断只读：writer 当前状态（测试断言 .writing/.failed 与排障用）。
+    var writerStatus: AVAssetWriter.Status {
+        stateLock.withStateLock { writer.status }
+    }
+
+    /// 诊断只读：writer 最近一次错误（status=.failed 时的原因，排障透出用）。
+    var writerError: Error? {
+        stateLock.withStateLock { writer.error }
+    }
+
     private let pixelSize: CGSize
     private let codec: SettingsStore.VideoCodec
     private let writer: AVAssetWriter
+    private let claimURL: URL
     private var videoInput: AVAssetWriterInput?
     private var videoAdaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var audioInput: AVAssetWriterInput?
@@ -88,29 +109,43 @@ final class AssetWriterSession {
     private var anchor: CMTime = .invalid
     private let stateLock = NSLock()
 
-    /// 排他创建输出文件并装配 writer；目标路径已存在时抛
-    /// `outputAlreadyExists`（绝不覆盖既有录像）。目录须由调用方先行创建
+    /// 预检目标 + claim 原子占位 + 装配 writer；本体已存在抛 `outputAlreadyExists`，
+    /// claim 已被占抛 `outputBusy`（绝不覆盖既有录像）。目录须由调用方先行创建
     ///（全代码库唯一创建点是 `RecordingFileStore.ensureDirectory`）。
     init(config: RecordingConfiguration, pixelSize: CGSize) throws {
         self.pixelSize = pixelSize
         self.codec = config.codec
         self.outputURL = config.outputURL
 
-        let fd = open(config.outputURL.path, O_CREAT | O_EXCL, 0o644)
+        // 第一道保险：目标本体已存在（上次成片、用户文件）→ 直接拒绝
+        guard !FileManager.default.fileExists(atPath: config.outputURL.path) else {
+            throw AssetWriterSessionError.outputAlreadyExists(config.outputURL)
+        }
+        // 第二道保险：claim 原子占位（O_CREAT|O_EXCL 与任何竞争者必有一方失败）
+        let claimPath = config.outputURL.path + ".claim"
+        let fd = open(claimPath, O_CREAT | O_EXCL, 0o644)
         guard fd != -1 else {
             if errno == EEXIST {
-                throw AssetWriterSessionError.outputAlreadyExists(config.outputURL)
+                throw AssetWriterSessionError.outputBusy(config.outputURL)
             }
-            throw AssetWriterSessionError.cannotCreateOutputFile(path: config.outputURL.path, errno: errno)
+            throw AssetWriterSessionError.cannotCreateOutputFile(path: claimPath, errno: errno)
         }
         close(fd)
+        claimURL = URL(fileURLWithPath: claimPath)
 
         do {
+            // 真实文件由 writer 自建（macOS 27 拒写已存在文件——占位真实路径会让 startWriting
+            // 直接 .failed；13–26 上 writer 打开本体前已有预检 + claim 双保险封住覆盖窗口）
             writer = try AVAssetWriter(url: config.outputURL, fileType: .mp4)
         } catch {
-            try? FileManager.default.removeItem(at: config.outputURL) // 清掉自家占位空壳
+            // 不能调 self.removeClaim()——两段式初始化未完成前禁用实例方法，走纯本地路径
+            try? FileManager.default.removeItem(at: URL(fileURLWithPath: claimPath))
             throw AssetWriterSessionError.cannotCreateWriter(underlying: error)
         }
+    }
+
+    deinit {
+        removeClaim() // 会话被半途遗弃时的兜底，防 claim 残留
     }
 
     // MARK: - 输入装配
@@ -195,7 +230,7 @@ final class AssetWriterSession {
                 throw AssetWriterSessionError.noVideoInput
             }
             guard writer.status == .writing else {
-                throw AssetWriterSessionError.writerNotWriting(status: writer.status)
+                throw AssetWriterSessionError.writerNotWriting(status: writer.status, underlying: writer.error)
             }
             if !sessionStarted {
                 writer.startSession(atSourceTime: pts)
@@ -223,7 +258,7 @@ final class AssetWriterSession {
                 throw AssetWriterSessionError.noAudioInput
             }
             guard writer.status == .writing else {
-                throw AssetWriterSessionError.writerNotWriting(status: writer.status)
+                throw AssetWriterSessionError.writerNotWriting(status: writer.status, underlying: writer.error)
             }
             let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
             if !sessionStarted {
@@ -243,21 +278,23 @@ final class AssetWriterSession {
     // MARK: - 收尾
 
     /// 收尾成片：等待各输入就绪（有界 2s）→ markAsFinished → finishWriting → 校验产物状态。
-    /// 从未写入任何样本时删除排他占位文件并抛 `nothingWritten`（目录不留空壳）。
+    /// 从未写入任何样本时删除本体与 claim 并抛 `nothingWritten`（目录不留空壳）。
     func finish() async throws -> URL {
         let inputs: [AVAssetWriterInput] = try stateLock.withStateLock {
             guard didStartWriting, wroteAnySamples else {
-                try? FileManager.default.removeItem(at: outputURL)
+                try? FileManager.default.removeItem(at: outputURL) // writer 可能已建空壳本体
+                removeClaim()
                 throw AssetWriterSessionError.nothingWritten
             }
             return [videoInput, audioInput].compactMap { $0 }
         }
         for input in inputs {
             // 实时追加此刻已停止（上层先停采集再收尾），输入通常即刻就绪；
-            // 有界等待防 writer 内部拥塞挂死，超时仍 markAsFinished（宁可略截断不可挂起）。
+            // 有界等待防 writer 内部拥塞挂死，超时仍 markAsFinished（宁可略截断不可挂起）；
+            // 任务被取消时提前放弃等待，尽快完成收尾。
             var waited = 0
-            while !input.isReadyForMoreMediaData && waited < 200 {
-                Thread.sleep(forTimeInterval: 0.01)
+            while !input.isReadyForMoreMediaData && waited < 200 && !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 10_000_000)
                 waited += 1
             }
             input.markAsFinished()
@@ -265,19 +302,26 @@ final class AssetWriterSession {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             writer.finishWriting { continuation.resume() }
         }
+        removeClaim() // 会话终结（无论成败）即解除占用
         guard writer.status == .completed else {
             throw AssetWriterSessionError.finishFailed(status: writer.status, underlying: writer.error)
         }
         return outputURL
     }
 
-    /// 放弃从未开始写入的会话：删除排他占位文件。已 startWriting 时静默 no-op
-    ///（有内容的会话不可弃，收尾走 `finish()`）。
+    /// 放弃从未开始写入的会话：删除 writer 可能已建的本体空壳与 claim 占位。
+    /// 已 startWriting 时静默 no-op（有内容的会话不可弃，收尾走 `finish()`）。
     func discardIfNoContent() {
         stateLock.withStateLock {
             guard !didStartWriting else { return }
             try? FileManager.default.removeItem(at: outputURL)
+            removeClaim()
         }
+    }
+
+    /// 移除 claim 占位文件（幂等）；claim 只表达「该 URL 正在被装配」，会话终结即失效。
+    private func removeClaim() {
+        try? FileManager.default.removeItem(at: claimURL)
     }
 }
 
