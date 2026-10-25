@@ -2,9 +2,43 @@ import SwiftUI
 
 @main
 struct ScreenRecorderApp: App {
+    @StateObject private var settings: SettingsStore
+    @StateObject private var controller: CaptureController
+    private let fileStore: RecordingFileStore
+    private let floatingBarPanel: FloatingControlBarPanel
+
+    init() {
+        // 装配点（T11）：SettingsStore / FileStore / Coordinator / Controller / 浮条面板 / 通知。
+        let settings = SettingsStore()
+        let fileStore = RecordingFileStore(baseDirectory: settings.outputDirectory)
+        let coordinator = RecordingSessionCoordinator()
+        let notifier = UNRecordingNotifier()
+        let controller = CaptureController(
+            session: coordinator,
+            store: fileStore,
+            countdownSeconds: settings.countdownSeconds,
+            onFinishedFile: { url in
+                Task { @MainActor in notifier.notifySaved(fileURL: url) }
+            }
+        )
+        controller.notifier = notifier
+        // 磁盘监控 / 流失败出口 → 状态机（DiskSpaceMonitor 与 onStreamFailure 均主队列保证）
+        coordinator.onInterruption = { error in
+            Task { @MainActor in controller.handleSessionFailure(error) }
+        }
+        coordinator.onDiskSpaceWarning = {
+            Task { @MainActor in controller.showDiskSpaceWarning() }
+        }
+
+        _settings = StateObject(wrappedValue: settings)
+        _controller = StateObject(wrappedValue: controller)
+        self.fileStore = fileStore
+        self.floatingBarPanel = FloatingControlBarPanel(controller: controller)
+    }
+
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView()
+            MenuBarView(controller: controller, settings: settings, fileStore: fileStore)
         } label: {
             Image(systemName: "record.circle")
         }
