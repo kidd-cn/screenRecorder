@@ -37,7 +37,7 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(micVolume, forKey: Self.micVolumeKey) }
     }
 
-    /// 默认 ~/Movies/ScreenRecorder，不存在时惰性创建
+    /// 默认 ~/Movies/ScreenRecorder（目录创建由 RecordingFileStore.ensureDirectory 负责）
     @Published var outputDirectory: URL {
         didSet { defaults.set(outputDirectory.path, forKey: Self.outputDirectoryKey) }
     }
@@ -73,11 +73,6 @@ final class SettingsStore: ObservableObject {
         self.countdownSeconds = userDefaults.object(forKey: Self.countdownSecondsKey) as? Int ?? 5
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false
         self.clickHighlightEnabled = userDefaults.object(forKey: Self.clickHighlightEnabledKey) as? Bool ?? true
-        createOutputDirectoryIfNeeded()
-    }
-
-    private func createOutputDirectoryIfNeeded() {
-        try? FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
     }
 
     private static let fpsKey = "fps"
