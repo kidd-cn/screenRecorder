@@ -117,9 +117,10 @@ struct PermissionOnboardingView: View {
                 target.camera = .notDetermined
             }
             status = await PermissionChecker.requestMissing(from: target)
-            guard !Task.isCancelled else { return } // 视图已消失，不再触发回调
-            isRequesting = false
-            notifyIfAllGranted()
+            isRequesting = false // 取消也必须复位，否则控件永久禁用
+            if !Task.isCancelled {
+                notifyIfAllGranted() // 视图已消失时不再触发回调
+            }
         }
     }
 
