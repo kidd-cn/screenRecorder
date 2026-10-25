@@ -104,6 +104,32 @@ final class PauseMediaClockTests: XCTestCase {
         XCTAssertEqual(clock.shiftedPTS(t(30.033), for: .video), t(20.033), "恢复后首个帧必须放行（20.033 > 10）")
     }
 
+    /// 暂停丢弃计数（修复轮 1 Minor #2）：只在暂停期间递增、按轨独立；恢复后的放行、
+    /// 回跳丢弃与非数值 PTS 都不计入——与 AssetWriterSession.droppedVideoFrameCount
+    /// （编码器未就绪）互斥可区分，成片时长偏差时的诊断归因依据。
+    func testPausedDropCountersTrackPausedDropsOnly() {
+        var clock = PauseMediaClock()
+        XCTAssertEqual(clock.pausedDroppedVideoFrameCount, 0)
+        XCTAssertEqual(clock.pausedDroppedAudioPacketCount, 0)
+
+        clock.pause(at: t(10))
+        XCTAssertNil(clock.shiftedPTS(t(10.033), for: .video))
+        XCTAssertNil(clock.shiftedPTS(t(10.066), for: .video))
+        XCTAssertNil(clock.shiftedPTS(t(10.1), for: .audio))
+        XCTAssertEqual(clock.pausedDroppedVideoFrameCount, 2, "暂停中的视频帧逐帧计数")
+        XCTAssertEqual(clock.pausedDroppedAudioPacketCount, 1, "暂停中的音频包逐包计数")
+
+        clock.resume(at: t(40))
+        XCTAssertNotNil(clock.shiftedPTS(t(40.033), for: .video)) // 放行不计入
+        XCTAssertNotNil(clock.shiftedPTS(t(40.1), for: .audio))   // 放行不计入
+        XCTAssertNil(clock.shiftedPTS(t(30), for: .video))        // 视频回跳丢弃不计入（0 ≤ 10.033）
+        XCTAssertNil(clock.shiftedPTS(t(35), for: .audio))        // 音频回跳丢弃不计入（5 ≤ 10.1）
+        clock.pause(at: t(50))
+        XCTAssertNil(clock.shiftedPTS(.invalid, for: .video))     // 非数值 PTS 不计入暂停丢弃
+        XCTAssertEqual(clock.pausedDroppedVideoFrameCount, 2)
+        XCTAssertEqual(clock.pausedDroppedAudioPacketCount, 1)
+    }
+
     // MARK: - 音频 CMSampleBuffer 平移复制
 
     private let audioFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!

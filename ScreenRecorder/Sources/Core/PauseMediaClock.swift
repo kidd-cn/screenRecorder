@@ -24,6 +24,12 @@ struct PauseMediaClock {
     /// 每轨最近一次放行的平移 PTS（`.invalid` = 尚未放行过）。
     private var lastShiftedVideo = CMTime.invalid
     private var lastShiftedAudio = CMTime.invalid
+    /// 暂停期间丢弃的视频帧数（修复轮 1 Minor #2 诊断计数）：与
+    /// `AssetWriterSession.droppedVideoFrameCount`（编码器未就绪丢弃）互斥可区分，
+    /// T11 真机验收「成片时长 ≈ 预期」偏差时归因用。回跳丢弃与非数值 PTS 不计入。
+    private(set) var pausedDroppedVideoFrameCount = 0
+    /// 暂停期间丢弃的音频包数（诊断口径同上）。
+    private(set) var pausedDroppedAudioPacketCount = 0
 
     init() {}
 
@@ -48,8 +54,18 @@ struct PauseMediaClock {
     /// 指定轨下一次 append 应使用的 PTS；返回 nil = 丢弃该样本（暂停中、PTS 非数值，
     /// 或平移后相对该轨不单调）。放行时推进该轨单调基线——各采样回调队列串行且按
     /// 原始 PTS 序交付，尝试顺序即样本顺序，基线因此恒为该轨已放行的最大平移值。
+    /// 暂停中的丢弃计入暂停诊断计数（非数值 PTS 除外——那不是暂停丢弃）。
     mutating func shiftedPTS(_ raw: CMTime, for track: Track) -> CMTime? {
-        guard !isPaused, raw.isNumeric else { return nil }
+        guard raw.isNumeric else { return nil }
+        guard !isPaused else {
+            switch track {
+            case .video:
+                pausedDroppedVideoFrameCount += 1
+            case .audio:
+                pausedDroppedAudioPacketCount += 1
+            }
+            return nil
+        }
         let shifted = tracker.shifted(raw)
         switch track {
         case .video:

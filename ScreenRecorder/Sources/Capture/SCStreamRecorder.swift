@@ -123,7 +123,14 @@ final class SCStreamRecorder: NSObject {
             }
             try await stream.startCapture()
         } catch {
-            // 采集没跑起来：不会有任何帧到达，停混音 + 清理排他占位文件再上抛。
+            // 采集没跑起来：不会有任何帧到达。先撤销已发布的会话引用（修复轮 1 Minor #1：
+            // 引用不清会让 pause() 在 start() 失败后被接受，违背「start() 未完成一律 no-op」
+            // 契约；同时复位暂停时钟，封住发布→撤销竞态窗口内进入的暂停），再停混音 +
+            // 清理排他占位文件后上抛。
+            stateLock.withStateLock {
+                writerSession = nil
+                mediaClock = PauseMediaClock()
+            }
             activeMixer?.stop()
             session.discardIfNoContent()
             throw error
@@ -173,6 +180,18 @@ final class SCStreamRecorder: NSObject {
             guard mediaClock.isPaused else { return }
             mediaClock.resume(at: CMClock.hostTimeClock.time)
         }
+    }
+
+    /// 暂停期间丢弃的视频帧数（诊断只读，修复轮 1 Minor #2）：与
+    /// `AssetWriterSession.droppedVideoFrameCount`（编码器未就绪丢弃）互斥可区分，
+    /// T11 真机验收「成片时长 ≈ 预期」偏差时的归因依据；回跳丢弃与非数值 PTS 不计入。
+    var pausedDroppedVideoFrameCount: Int {
+        stateLock.withStateLock { mediaClock.pausedDroppedVideoFrameCount }
+    }
+
+    /// 暂停期间丢弃的音频包数（诊断口径同上）。
+    var pausedDroppedAudioPacketCount: Int {
+        stateLock.withStateLock { mediaClock.pausedDroppedAudioPacketCount }
     }
 
     /// 停采集并收尾成片。幂等（重复调用 no-op）；完成后 `finishedFileURL` 反映结果，
