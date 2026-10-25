@@ -1,0 +1,442 @@
+import Combine
+import CoreGraphics
+import Foundation
+import ScreenCaptureKit
+
+// MARK: - 状态与协议（brief Produces 逐字）
+
+/// 录制会话状态机状态。
+enum CaptureState: Equatable {
+    case idle
+    case countdown(secondsLeft: Int)
+    case recording
+    case paused
+    case finishing
+}
+
+/// 采集会话抽象：真实实现 `RecordingSessionCoordinator` 包
+/// SCStreamRecorder + DiskSpaceMonitor + PowerAssertionKeeper；测试注入 FakeSession。
+protocol CaptureSessionManaging {
+    func begin(_ config: RecordingConfiguration) async throws
+    func pause()
+    func resume()
+    func finish() async -> URL?
+}
+
+/// 通知出口抽象（本任务新增的注入缝）：生产实现 `UNRecordingNotifier`（App 层），
+/// 测试注入 spy——UNUserNotificationCenter 在无头测试进程不可用，必须可替换。
+@MainActor
+protocol RecordingNotifying: AnyObject {
+    func notifySaved(fileURL: URL)
+    func notifyFailure(message: String)
+    func notifyDiskSpaceWarning()
+}
+
+/// 会话级领域错误：begin 前置磁盘检查与磁盘停阈值中断（区别于采集管线原始错误，
+/// 后者原样透传给 `CaptureController.handleSessionFailure` 做文案归类）。
+enum CaptureSessionError: Equatable, LocalizedError {
+    /// begin 前置检查失败：空间不足，不开录（T5 派发指针）。
+    case insufficientDiskSpace(freeBytes: Int64, requiredBytes: Int64)
+    /// 录制中跌破 stop 阈值：自动收尾保存。
+    case diskSpaceCritical
+
+    var errorDescription: String? {
+        switch self {
+        case .insufficientDiskSpace(let free, let required):
+            let freeText = ByteCountFormatter.string(fromByteCount: free, countStyle: .file)
+            let requiredText = ByteCountFormatter.string(fromByteCount: required, countStyle: .file)
+            return "磁盘剩余空间不足（剩 \(freeText)，低于安全阈值 \(requiredText)），无法开始录制"
+        case .diskSpaceCritical:
+            return "磁盘剩余空间严重不足"
+        }
+    }
+}
+
+// MARK: - RecordingSessionCoordinator
+
+/// 真实采集会话（brief：包 SCStreamRecorder + writer + monitor + keeper；writer 会话在
+/// SCStreamRecorder 内部创建）。职责只有装配与生命周期：begin 里即时磁盘检查 + 启动
+/// DiskSpaceMonitor + activate 电源断言 + 建 recorder 接失败通道；finish 里 stopMonitoring +
+/// deactivate + recorder.stop 收尾。单会话实例：一次 begin/finish 对应一场录制。
+///
+/// 磁盘监控接线（T5 携带指针）：轮询 timer 首触发在 pollInterval 之后，启动时的即时检查由
+/// begin 直接读 provider（低于 stop 阈值抛 `insufficientDiskSpace`，不开录）；录制中
+/// onStop → `onInterruption(diskSpaceCritical)`、onWarn → `onDiskSpaceWarning`，
+/// 均由 DiskSpaceMonitor 保证主队列投递，装配层接至 CaptureController。
+/// 「stop-supersedes-warn」：warn 出口只通知不改状态，收尾优先级与去重由控制器状态机
+/// 把守（见 `CaptureController.showDiskSpaceWarning` / `handleSessionFailure`）。
+final class RecordingSessionCoordinator: CaptureSessionManaging {
+    /// 会话中断出口（流失败 / 磁盘停阈值），主队列保证。
+    /// 装配层接至 `CaptureController.handleSessionFailure`（onStreamFailure 的 T18 台账指针）。
+    var onInterruption: ((Error) -> Void)?
+    /// 低空间警告出口（warn 阈值），主队列保证。装配层接至 `showDiskSpaceWarning`。
+    var onDiskSpaceWarning: (() -> Void)?
+
+    private let keeper = PowerAssertionKeeper()
+    private let diskProvider: DiskFreeSpaceProviding
+    private let warnBelow: Int64
+    private let stopBelow: Int64
+    private var recorder: SCStreamRecorder?
+    private var monitor: DiskSpaceMonitor?
+
+    init(diskProvider: DiskFreeSpaceProviding = VolumeFreeSpaceProvider(),
+         warnBelow: Int64 = 2_000_000_000,
+         stopBelow: Int64 = 500_000_000) {
+        self.diskProvider = diskProvider
+        self.warnBelow = warnBelow
+        self.stopBelow = stopBelow
+    }
+
+    func begin(_ config: RecordingConfiguration) async throws {
+        // 即时磁盘检查：空间不足直接失败，不开录（T5 指针：轮询首触发在 pollInterval 后）
+        if let free = diskProvider.freeBytes(at: config.outputURL), free < stopBelow {
+            throw CaptureSessionError.insufficientDiskSpace(freeBytes: free, requiredBytes: stopBelow)
+        }
+        let monitor = DiskSpaceMonitor(
+            provider: diskProvider,
+            url: config.outputURL,
+            warnBelow: warnBelow,
+            stopBelow: stopBelow
+        )
+        monitor.onWarn = { [weak self] in self?.onDiskSpaceWarning?() }
+        monitor.onStop = { [weak self] in self?.onInterruption?(CaptureSessionError.diskSpaceCritical) }
+        monitor.startMonitoring()
+        self.monitor = monitor
+
+        keeper.activate(reason: "屏幕录制进行中")
+
+        let recorder = SCStreamRecorder(config: config)
+        // 失败通道（T18 台账指针）：recorder 首失败经此上报，上层负责 stop 保存路径
+        recorder.onStreamFailure = { [weak self] error in self?.onInterruption?(error) }
+        self.recorder = recorder
+        do {
+            try await recorder.start()
+        } catch {
+            // 回滚：停监控 + 释放断言 + 摘除失败 recorder；占位/claim 清理由 recorder 内部完成
+            self.recorder = nil
+            monitor.stopMonitoring()
+            self.monitor = nil
+            keeper.deactivate()
+            throw error
+        }
+    }
+
+    func pause() { recorder?.pause() }
+
+    func resume() { recorder?.resume() }
+
+    func finish() async -> URL? {
+        monitor?.stopMonitoring()
+        monitor = nil
+        keeper.deactivate()
+        guard let recorder else { return nil } // begin 未成功：无会话可收尾
+        self.recorder = nil
+        await recorder.stop()
+        // 暂停丢弃诊断（T10 交付：stop 后快照仍可读）——有丢弃时留日志供成片时长归因
+        let droppedVideo = recorder.pausedDroppedVideoFrameCount
+        let droppedAudio = recorder.pausedDroppedAudioPacketCount
+        if droppedVideo > 0 || droppedAudio > 0 {
+            NSLog("RecordingSessionCoordinator: 暂停期间丢弃 video 帧 %d / audio 包 %d（成片时长归因）", droppedVideo, droppedAudio)
+        }
+        if let lastError = recorder.lastError {
+            NSLog("RecordingSessionCoordinator: 本次录制失败原因：\(lastError)")
+        }
+        return recorder.finishedFileURL
+    }
+}
+
+// MARK: - CaptureController
+
+/// 录制状态机（@MainActor ObservableObject）：菜单开始录制 → 倒计时（可打断）→ 录制/暂停 →
+/// 收尾；浮条（`.recording`/`.paused` 显示）与失败自动保存均由本类驱动。所有状态转换与
+/// 收尾任务都在主 actor 上串行——session.begin/finish 不存在并发调用。
+///
+/// 生命周期边界（本任务裁定，简报留白处）：
+/// 1. `start` 仅 `.idle` 可发起；其余状态 no-op（单会话语义）。
+/// 2. `pause`/`resume`/`stop`/`cancelAndDiscard` 只在语义合法状态生效，非法一律 no-op
+///    （与 SCStreamRecorder 的 no-op 契约同风格，调用方无需跟踪内部生命周期）。
+/// 3. `.finishing` 为去抖闸位：`stop`/`cancelAndDiscard`/`handleSessionFailure` 入口先同步置位
+///    再派收尾 Task，重复触发（含失败通道重入）在同步段即被拒绝，收尾恰好一次。
+/// 4. 倒计时期间 `cancelAndDiscard` → 静默取消回 `.idle`（begin 未发）；begin 已发出后
+///    （`hasBegun`）则记 `pendingDiscard`，begin 返回后立即走丢弃收尾——begin/finish 经主
+///    actor 串行化，永不并发。
+/// 5. 失败通道在 `.countdown` 且 begin 在途到达时记 `pendingFailure`，begin 返回后按失败
+///    路径收尾；begin 自身失败（如磁盘不足）直接回 `.idle` 并通知，无会话可收尾。
+/// 6. `onFinishedFile` 回调约定：在主队列（主 actor）同步调用——`finalize` 内先置 `.idle`
+///    再回调，二者之间无挂起点，观察者看到 `.idle` 时回调必然已完成。
+/// 7. 失败自动保存语义：`handleSessionFailure` 走 stop 保存路径，成片保留并回调
+///    `onFinishedFile`，同时通知失败原因（权限类失败引导重启/重授权，见 failureMessage）。
+@MainActor
+final class CaptureController: ObservableObject {
+    @Published private(set) var state: CaptureState = .idle
+    /// 录制累计时长（秒，不含暂停段）：`.recording` 时经 Task 计时器每 0.5s 刷新。
+    @Published private(set) var elapsed: TimeInterval = 0
+
+    /// 通知出口（App 装配点注入；测试默认不注入时失败/警告静默）。
+    var notifier: RecordingNotifying?
+
+    /// 测试缝：会话内等待（倒计时步进 1s / elapsed 计时器 0.5s）。生产 = `Task.sleep`，
+    /// 所在 Task 被取消时抛错打断；测试注入受控推进。
+    var waitForTick: @Sendable (TimeInterval) async throws -> Void = { seconds in
+        try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+    }
+    /// 测试缝：单调时钟（秒）。生产 = 系统运行时长（不受用户改时间影响）。
+    var monotonicNow: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// 测试缝：屏幕录制 TCC 预检。生产 = `CGPreflightScreenCaptureAccess()`。
+    var screenPermissionProbe: @Sendable () -> Bool = { CGPreflightScreenCaptureAccess() }
+
+    private let session: CaptureSessionManaging
+    private let store: RecordingFileStore
+    private let countdownSeconds: Int
+    private let onFinishedFile: (URL) -> Void
+
+    private var countdownTask: Task<Bool, Never>?
+    private var elapsedTimerTask: Task<Void, Never>?
+    private var accumulatedActive: TimeInterval = 0
+    private var segmentStartUptime: TimeInterval?
+    /// 倒计时结束后 begin 已发出（此后 cancelAndDiscard 退化为收尾丢弃而非静默取消）。
+    private var hasBegun = false
+    /// begin 在途期间的丢弃/失败意图：begin 返回后立即执行（边界 4/5）。
+    private var pendingDiscard = false
+    private var pendingFailure: Error?
+
+    init(session: CaptureSessionManaging,
+         store: RecordingFileStore,
+         countdownSeconds: Int,
+         onFinishedFile: @escaping (URL) -> Void) {
+        self.session = session
+        self.store = store
+        self.countdownSeconds = countdownSeconds
+        self.onFinishedFile = onFinishedFile
+    }
+
+    // MARK: 启动
+
+    /// 启动录制：`countdownSeconds > 0` 时先走逐秒倒计时（每步可被 `cancelAndDiscard` 打断回
+    /// `.idle`），随后 begin 并进入 `.recording`。倒计时只是状态机（视觉覆盖层为 Task 12）。
+    func start(mode: CaptureMode, config: RecordingConfiguration) async {
+        guard state == .idle else { return }
+        var config = config
+        config.mode = mode // start 的 mode 参数为准（简报签名 mode 与 config 并列）
+        hasBegun = false
+        pendingDiscard = false
+        pendingFailure = nil
+        if countdownSeconds > 0 {
+            let task = Task { await self.runCountdown(totalSeconds: countdownSeconds) }
+            countdownTask = task
+            let completed = await task.value
+            countdownTask = nil
+            // 打断路径已把状态改走（.idle / .finishing），此处不得再进 begin
+            guard completed, case .countdown = state else { return }
+        }
+        await beginAndEnterRecording(config)
+    }
+
+    /// 逐秒递减展示；返回 false = 被打断（取消或状态被外部改走）。
+    private func runCountdown(totalSeconds: Int) async -> Bool {
+        for left in stride(from: max(totalSeconds, 1), through: 1, by: -1) {
+            state = .countdown(secondsLeft: left)
+            do { try await waitForTick(1) } catch { return false }
+            if Task.isCancelled { return false }
+            guard case .countdown = state else { return false }
+        }
+        return true
+    }
+
+    private func beginAndEnterRecording(_ config: RecordingConfiguration) async {
+        hasBegun = true
+        do {
+            try await session.begin(config)
+        } catch {
+            // begin 失败：无会话可收尾（占位/claim 清理由 recorder 内部完成），回 idle 并通知
+            state = .idle
+            notifier?.notifyFailure(message: failureMessage(for: error, savedFile: nil))
+            return
+        }
+        if pendingDiscard {
+            await finalize(discard: true)
+            return
+        }
+        if let failure = pendingFailure {
+            pendingFailure = nil
+            state = .recording
+            enterRecordingPhase()
+            handleSessionFailure(failure)
+            return
+        }
+        enterRecordingPhase()
+    }
+
+    private func enterRecordingPhase() {
+        accumulatedActive = 0
+        segmentStartUptime = monotonicNow()
+        elapsed = 0
+        state = .recording
+        startElapsedTimer()
+    }
+
+    // MARK: 浮条动作
+
+    /// 暂停：仅 `.recording` 生效；elapsed 冻结（暂停段不累计）。
+    func pause() {
+        guard state == .recording else { return }
+        session.pause()
+        accumulatedActive = computedElapsed
+        segmentStartUptime = nil
+        refreshElapsed()
+        state = .paused
+    }
+
+    /// 恢复：仅 `.paused` 生效。
+    func resume() {
+        guard state == .paused else { return }
+        session.resume()
+        segmentStartUptime = monotonicNow()
+        state = .recording
+    }
+
+    /// 停止并保存：仅 `.recording`/`.paused` 生效；`.finishing` 期间重复触发为 no-op（边界 3）。
+    func stop() {
+        guard state == .recording || state == .paused else { return }
+        state = .finishing
+        Task { await finalize(discard: false) }
+    }
+
+    /// 丢弃（浮条二次确认后调用）：倒计时（begin 前）→ 静默取消回 `.idle`；录制/暂停 → 收尾
+    /// 并删除成片、不回调 `onFinishedFile`；begin 在途 → 记 `pendingDiscard`（边界 4）；
+    /// `.idle`/`.finishing` → no-op。
+    func cancelAndDiscard() {
+        switch state {
+        case .countdown:
+            guard !hasBegun else {
+                pendingDiscard = true
+                state = .finishing
+                return
+            }
+            countdownTask?.cancel()
+            state = .idle
+        case .recording, .paused:
+            state = .finishing
+            Task { await finalize(discard: true) }
+        case .idle, .finishing:
+            break
+        }
+    }
+
+    /// 失败通道（T18 台账指针）：`onStreamFailure`（主队列保证）/ 磁盘停阈值到达时自动走
+    /// stop 保存路径——成片保留、回调 `onFinishedFile`、通知失败原因；不弹崩溃。
+    /// `.finishing` 重入 no-op（防重复收尾，与「stop-supersedes-warn」一致）。
+    func handleSessionFailure(_ error: Error) {
+        switch state {
+        case .recording, .paused:
+            state = .finishing
+            Task { await finalizeAfterFailure(error) }
+        case .countdown:
+            // begin 在途（流刚起即停等竞态窗口）：begin 返回后按失败路径收尾（边界 5）
+            if hasBegun { pendingFailure = error }
+        case .idle, .finishing:
+            break
+        }
+    }
+
+    /// 低空间警告（warn 阈值）：仅活动会话提示；不触碰状态。「stop-supersedes-warn」：
+    /// 收尾中/已收尾（`.finishing`/`.idle`）不再警告——用户或磁盘 stop 已接管，警告路径
+    /// 既不阻塞收尾也不重复收尾。
+    func showDiskSpaceWarning() {
+        guard state == .recording || state == .paused else { return }
+        notifier?.notifyDiskSpaceWarning()
+    }
+
+    // MARK: 收尾
+
+    private func finalize(discard: Bool) async {
+        guard state == .finishing else { return }
+        stopElapsedTimer()
+        let url = await session.finish()
+        resetElapsed()
+        state = .idle
+        if let url {
+            if discard {
+                store.delete(url)
+            } else {
+                onFinishedFile(url) // 边界 6：主队列同步回调
+            }
+        }
+    }
+
+    private func finalizeAfterFailure(_ error: Error) async {
+        guard state == .finishing else { return }
+        stopElapsedTimer()
+        let url = await session.finish()
+        resetElapsed()
+        state = .idle
+        if let url {
+            onFinishedFile(url) // 失败自动保存：成片保留
+        }
+        notifier?.notifyFailure(message: failureMessage(for: error, savedFile: url))
+    }
+
+    // MARK: elapsed（不含暂停时长）
+
+    private var computedElapsed: TimeInterval {
+        accumulatedActive + (segmentStartUptime.map { max(0, monotonicNow() - $0) } ?? 0)
+    }
+
+    private func refreshElapsed() {
+        let value = computedElapsed
+        if elapsed != value { elapsed = value } // 等值守卫：暂停期间不空发 objectWillChange
+    }
+
+    private func resetElapsed() {
+        accumulatedActive = 0
+        segmentStartUptime = nil
+        elapsed = 0
+    }
+
+    private func startElapsedTimer() {
+        elapsedTimerTask?.cancel()
+        elapsedTimerTask = Task { [weak self] in
+            while let self, !Task.isCancelled {
+                do { try await self.waitForTick(0.5) } catch { break }
+                if Task.isCancelled { break }
+                self.refreshElapsed()
+            }
+        }
+    }
+
+    private func stopElapsedTimer() {
+        elapsedTimerTask?.cancel()
+        elapsedTimerTask = nil
+    }
+
+    // MARK: 失败文案（TCC 失效引导，T6 台账指针）
+
+    /// 失败通知文案：权限类失败（TCC 授权失效 / 进程陈旧，常见于重编译后签名失配）引导
+    /// 重启 App + 重新授权，不与普通失败混文案。
+    func failureMessage(for error: Error, savedFile: URL?) -> String {
+        let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        let savedNote = savedFile != nil ? "已录制内容已自动保存。" : "本次未能保存成片。"
+        if isPermissionRelated(error) {
+            return "屏幕录制权限已失效：请退出并重启本应用；若重启后仍失败，请在系统设置中重新授权屏幕录制。\(savedNote)原因：\(reason)"
+        }
+        return "录制中断。\(savedNote)原因：\(reason)"
+    }
+
+    /// 权限类失败判定：SCStream 权限族错误码，或运行时预检已无屏幕录制授权。
+    /// 预检 true 不代表能力完好（陈旧授权场景以错误码为准，T6 实测：预检与实际捕获能力可能不一致）。
+    func isPermissionRelated(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.domain == SCStreamErrorDomain, Self.permissionRelatedSCCodes.contains(nsError.code) {
+            return true
+        }
+        return !screenPermissionProbe()
+    }
+
+    /// SCStream 权限族错误码（SCError.h）：userDeclined=-3801 / failedToStart=-3802 /
+    /// missingEntitlements=-3803。
+    private static let permissionRelatedSCCodes: Set<Int> = [
+        SCStreamError.Code.userDeclined.rawValue,
+        SCStreamError.Code.failedToStart.rawValue,
+        SCStreamError.Code.missingEntitlements.rawValue,
+    ]
+}
