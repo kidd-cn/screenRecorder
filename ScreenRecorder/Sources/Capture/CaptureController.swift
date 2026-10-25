@@ -256,7 +256,7 @@ final class CaptureController: ObservableObject {
         } catch {
             // begin 失败：无会话可收尾（占位/claim 清理由 recorder 内部完成），回 idle 并通知
             state = .idle
-            notifier?.notifyFailure(message: failureMessage(for: error, savedFile: nil))
+            notifier?.notifyFailure(message: failureMessage(for: error, savedFile: nil, didStart: false))
             return
         }
         if pendingDiscard {
@@ -367,6 +367,10 @@ final class CaptureController: ObservableObject {
             } else {
                 onFinishedFile(url) // 边界 6：主队列同步回调
             }
+        } else if !discard {
+            // 修复轮 1 Minor #1：正常停止但未产出成片（零样本 nothingWritten 等）不再静默；
+            // 丢弃路径无产出即本意，保持安静。
+            notifier?.notifyFailure(message: "录制已停止，但本次未能保存成片（可能未捕获到任何内容）。")
         }
     }
 
@@ -418,9 +422,16 @@ final class CaptureController: ObservableObject {
     // MARK: 失败文案（TCC 失效引导，T6 台账指针）
 
     /// 失败通知文案：权限类失败（TCC 授权失效 / 进程陈旧，常见于重编译后签名失配）引导
-    /// 重启 App + 重新授权，不与普通失败混文案。
-    func failureMessage(for error: Error, savedFile: URL?) -> String {
+    /// 重启 App + 重新授权，不与普通失败混文案。`didStart = false`（begin 失败，从未开始）
+    /// 用「未能开始」语义，不写「录制中断」（修复轮 1 Minor #3）。
+    func failureMessage(for error: Error, savedFile: URL?, didStart: Bool = true) -> String {
         let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        guard didStart else {
+            if isPermissionRelated(error) {
+                return "未能开始录制：屏幕录制权限未就绪，请退出并重启本应用；若重启后仍失败，请在系统设置中重新授权屏幕录制。原因：\(reason)"
+            }
+            return "未能开始录制。原因：\(reason)"
+        }
         let savedNote = savedFile != nil ? "已录制内容已自动保存。" : "本次未能保存成片。"
         if isPermissionRelated(error) {
             return "屏幕录制权限已失效：请退出并重启本应用；若重启后仍失败，请在系统设置中重新授权屏幕录制。\(savedNote)原因：\(reason)"

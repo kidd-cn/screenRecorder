@@ -235,6 +235,28 @@ final class CaptureControllerTests: XCTestCase {
         XCTAssertEqual(session.resumeCount, 0)
     }
 
+    // MARK: - 修复轮 1（Minor #6）：stop/cancelAndDiscard 于 .idle 的显式 no-op 钉测
+
+    func testStopInIdleIsNoOp() {
+        let controller = makeController(countdownSeconds: 0)
+
+        controller.stop()
+
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(session.finishCount, 0)
+        XCTAssertTrue(finishedFiles.isEmpty)
+    }
+
+    func testCancelAndDiscardInIdleIsNoOp() {
+        let controller = makeController(countdownSeconds: 0)
+
+        controller.cancelAndDiscard()
+
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(session.finishCount, 0)
+        XCTAssertTrue(finishedFiles.isEmpty)
+    }
+
     // MARK: - brief Step 1：倒计时路径
 
     func testCountdownDecrementAndCancelPreventsBegin() async {
@@ -318,6 +340,47 @@ final class CaptureControllerTests: XCTestCase {
         XCTAssertEqual(session.finishCount, 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "丢弃：成片文件应被删除")
         XCTAssertTrue(finishedFiles.isEmpty, "丢弃：onFinishedFile 不得回调")
+    }
+
+    // MARK: - 修复轮 1（Minor #1）：正常停止但未产出成片不再静默
+
+    func testStopWithoutProducedFileNotifiesMiss() async {
+        let controller = makeController(countdownSeconds: 0)
+        session.finishedURL = nil // finish() 无成片（零样本 nothingWritten 等）
+        await controller.start(mode: .display(1), config: makeConfig())
+
+        controller.stop()
+
+        await waitForState(.idle, of: controller)
+        XCTAssertEqual(session.finishCount, 1)
+        XCTAssertTrue(finishedFiles.isEmpty)
+        XCTAssertEqual(notifier.failureMessages.count, 1, "正常停止但无成片：必须通知，不得静默")
+        XCTAssertTrue(notifier.failureMessages[0].contains("未能保存成片"))
+    }
+
+    func testDiscardWithoutProducedFileStaysSilent() async {
+        let controller = makeController(countdownSeconds: 0)
+        session.finishedURL = nil
+        await controller.start(mode: .display(1), config: makeConfig())
+
+        controller.cancelAndDiscard() // 丢弃本意即无产出：不通知
+
+        await waitForState(.idle, of: controller)
+        XCTAssertTrue(notifier.failureMessages.isEmpty)
+    }
+
+    // MARK: - 修复轮 1（Minor #3）：begin 失败文案为「未能开始」语义
+
+    func testBeginFailureMessageUsesNotStartedWording() async {
+        let controller = makeController(countdownSeconds: 0)
+        session.beginError = CaptureSessionError.insufficientDiskSpace(freeBytes: 100, requiredBytes: 500_000_000)
+
+        await controller.start(mode: .display(1), config: makeConfig())
+
+        XCTAssertEqual(controller.state, .idle)
+        XCTAssertEqual(notifier.failureMessages.count, 1)
+        XCTAssertTrue(notifier.failureMessages[0].contains("未能开始"), "begin 失败文案：实际 \(notifier.failureMessages[0])")
+        XCTAssertFalse(notifier.failureMessages[0].contains("录制中断"), "从未开始不得写成中断")
     }
 
     // MARK: - 失败通道（T18 依赖）：handleSessionFailure 自动保存

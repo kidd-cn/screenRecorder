@@ -62,15 +62,19 @@ struct FloatingControlBar: View {
         .padding(.vertical, 10)
         .background(Capsule().fill(.regularMaterial).shadow(radius: 3))
         .onAppear { updateBreathing() }
-        .onChange(of: controller.state) { _ in updateBreathing() }
+        .onChange(of: controller.state) { newState in
+            updateBreathing()
+            // 修复轮 1 Minor #5：离开录制/暂停（浮条即将隐藏或收尾）即解除丢弃武装，
+            // 防止「武装后浮条隐藏 → 新录制重现浮条」时一击即丢。
+            if newState != .recording && newState != .paused {
+                disarmDiscard()
+            }
+        }
     }
 
-    /// 丢弃二次确认：首次点击武装（3s 无操作自动解除），再次点击才真正丢弃。
     private func handleDiscardTap() {
         if discardArmed {
-            disarmTask?.cancel()
-            disarmTask = nil
-            discardArmed = false
+            disarmDiscard()
             controller.cancelAndDiscard()
         } else {
             discardArmed = true
@@ -80,6 +84,12 @@ struct FloatingControlBar: View {
                 if !Task.isCancelled { discardArmed = false }
             }
         }
+    }
+
+    private func disarmDiscard() {
+        disarmTask?.cancel()
+        disarmTask = nil
+        discardArmed = false
     }
 
     private func updateBreathing() {

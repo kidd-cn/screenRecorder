@@ -1,14 +1,19 @@
 import SwiftUI
 
-@main
-struct ScreenRecorderApp: App {
-    @StateObject private var settings: SettingsStore
-    @StateObject private var controller: CaptureController
-    private let fileStore: RecordingFileStore
+/// App 装配容器（修复轮 1 Important #1）：整条有状态装配链（settings / fileStore /
+/// coordinator / notifier / controller / 浮条面板）收敛在单个 `@StateObject` 持有的对象里。
+/// SwiftUI 不保证 App struct 只 init 一次——若散装为 App 的普通 `let`，重跑 init 会造出
+/// 第二个浮条面板（双浮条叠影）与孤儿 coordinator/fileStore（菜单经 #2 取 URL、controller
+/// 收尾 #1）。`@StateObject` 保证 wrappedValue 只构造一次并随 App 生命周期存活。
+@MainActor
+final class AppAssembly: ObservableObject {
+    let settings: SettingsStore
+    let controller: CaptureController
+    let fileStore: RecordingFileStore
+    /// 面板自持 controller.$state 订阅驱动显隐；装配层只需持有保活。
     private let floatingBarPanel: FloatingControlBarPanel
 
     init() {
-        // 装配点（T11）：SettingsStore / FileStore / Coordinator / Controller / 浮条面板 / 通知。
         let settings = SettingsStore()
         let fileStore = RecordingFileStore(baseDirectory: settings.outputDirectory)
         let coordinator = RecordingSessionCoordinator()
@@ -30,15 +35,28 @@ struct ScreenRecorderApp: App {
             Task { @MainActor in controller.showDiskSpaceWarning() }
         }
 
-        _settings = StateObject(wrappedValue: settings)
-        _controller = StateObject(wrappedValue: controller)
+        self.settings = settings
+        self.controller = controller
         self.fileStore = fileStore
         self.floatingBarPanel = FloatingControlBarPanel(controller: controller)
+    }
+}
+
+@main
+struct ScreenRecorderApp: App {
+    @StateObject private var assembly: AppAssembly
+
+    init() {
+        _assembly = StateObject(wrappedValue: AppAssembly())
     }
 
     var body: some Scene {
         MenuBarExtra {
-            MenuBarView(controller: controller, settings: settings, fileStore: fileStore)
+            MenuBarView(
+                controller: assembly.controller,
+                settings: assembly.settings,
+                fileStore: assembly.fileStore
+            )
         } label: {
             Image(systemName: "record.circle")
         }
