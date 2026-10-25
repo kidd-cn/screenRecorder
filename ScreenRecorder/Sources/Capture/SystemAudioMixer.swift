@@ -615,6 +615,27 @@ enum AudioSampleBridge {
         return sampleBuffer
     }
 
+    /// 以新 PTS 复制 CMSampleBuffer（Task 10 暂停平移用）：数据块与样本时长原样保留，
+    /// 仅替换时间信息（decodeTimeStamp 置 `.invalid`，音轨无独立解码时间）。复制为浅拷贝
+    ///（共享底层 block buffer），失败返回 nil（调用方丢弃该包）。
+    static func sampleBuffer(copying original: CMSampleBuffer, presentationTimeStamp pts: CMTime) -> CMSampleBuffer? {
+        var timing = CMSampleTimingInfo(
+            duration: CMSampleBufferGetDuration(original),
+            presentationTimeStamp: pts,
+            decodeTimeStamp: .invalid
+        )
+        var copy: CMSampleBuffer?
+        let status = CMSampleBufferCreateCopyWithNewTiming(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: original,
+            sampleTimingEntryCount: 1,
+            sampleTimingArray: &timing,
+            sampleBufferOut: &copy
+        )
+        guard status == noErr, let copy else { return nil }
+        return copy
+    }
+
     /// SCStream 音频 CMSampleBuffer → AVAudioPCMBuffer：格式取自样本自带格式描述，
     /// 数据经 AudioBufferList 原样拷贝（交错/非交错通吃）。失败返回 nil（丢样本）。
     static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
