@@ -143,4 +143,136 @@ final class AssetWriterSessionTests: XCTestCase {
         XCTAssertFalse(fileManager.fileExists(atPath: finishURL.path), "nothingWritten 路径未清理本体")
         XCTAssertFalse(fileManager.fileExists(atPath: finishURL.path + ".claim"), "nothingWritten 路径未清理 claim")
     }
+
+    // MARK: - Task 8：AAC 音轨与音画锚点
+
+    private let audioFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
+
+    /// 构造非交错 PCM 的 CMSampleBuffer（与 SystemAudioMixer 输出口径一致）。
+    private func makeAudioSample(pcm: AVAudioPCMBuffer, pts: CMTime) throws -> CMSampleBuffer {
+        var asbd = pcm.format.streamDescription.pointee
+        var description: CMFormatDescription?
+        let status = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &description
+        )
+        XCTAssertEqual(status, noErr)
+        guard let description else { throw XCTSkip("CMFormatDescription 创建失败") }
+        guard let sample = AudioSampleBridge.makeSampleBuffer(
+            pcm: pcm, skipFrames: 0, pts: pts, formatDescription: description
+        ) else {
+            throw XCTSkip("CMSampleBuffer 打包失败")
+        }
+        return sample
+    }
+
+    /// 成片音轨必须是 AAC（MP4 + AAC 是规格硬要求），且音频 PTS 相对视频锚点的位置
+    /// 在成片时间轴上得到尊重（音画起点同步的 writer 层验证）。
+    /// 实测口径（macOS 27）：track timeRange 以成片时间 0 为基准；内容落点用 AVAssetReader
+    /// 解码后的首个非静音样本时间验证。AAC priming 实测引入 ~3ms 偏移，断言窗口放宽。
+    func testAudioTrackIsAACAndLateStartLandsAtItsPTS() async throws {
+        let session = try makeSession(named: "录屏_test_aac.mp4")
+        let url = session.outputURL
+        try session.addVideoInput(with: nil)
+        try session.addAudioInput(with: audioFormat)
+        session.startWriting()
+        let status = await waitForNonUnknownStatus(session)
+        XCTAssertEqual(status, .writing, "writer 未进入 .writing：\(String(describing: session.writerError))")
+
+        // 视频锚定 1000.0s：60 帧 @30fps（2s）
+        let base = CMTime(value: 48_000_000, timescale: 48_000)
+        guard let pixelBuffer = makePixelBuffer() else { return XCTFail("CVPixelBuffer 创建失败") }
+        for frame in 0..<60 {
+            let pts = CMTimeAdd(base, CMTime(value: CMTimeValue(frame), timescale: 30))
+            try? await Task.sleep(nanoseconds: 2_000_000)
+            try session.appendVideo(pixelBuffer, at: pts)
+        }
+        // 音频从 1000.5s 起步（晚于锚点）：12 段 × 1024 帧 @48k（0.256s），恒幅 0.25
+        let audioStart = CMTimeAdd(base, CMTime(value: 24_000, timescale: 48_000))
+        for chunk in 0..<12 {
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: audioFormat, frameCapacity: 1024) else {
+                return XCTFail("AVAudioPCMBuffer 创建失败")
+            }
+            pcm.frameLength = 1024
+            for index in 0..<1024 {
+                pcm.floatChannelData![0][index] = 0.25
+                pcm.floatChannelData![1][index] = -0.25
+            }
+            let pts = CMTimeAdd(audioStart, CMTime(value: CMTimeValue(chunk * 1024), timescale: 48_000))
+            try? await Task.sleep(nanoseconds: 2_000_000)
+            try session.appendAudio(makeAudioSample(pcm: pcm, pts: pts))
+        }
+
+        let finishedURL = try await session.finish()
+        XCTAssertEqual(finishedURL, url)
+
+        let asset = AVURLAsset(url: url)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        XCTAssertEqual(videoTracks.count, 1)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "成片必须有音频轨")
+
+        let descriptions = try await audioTracks[0].load(.formatDescriptions)
+        XCTAssertFalse(descriptions.isEmpty)
+        for description in descriptions {
+            XCTAssertEqual(
+                CMFormatDescriptionGetMediaSubType(description),
+                FourCharCode(kAudioFormatMPEG4AAC),
+                "音轨编码必须是 AAC"
+            )
+        }
+        let videoRange = try await videoTracks[0].load(.timeRange)
+        XCTAssertEqual(videoRange.duration.seconds, 2.0, accuracy: 0.1, "视频时长 2s")
+        let audioRange = try await audioTracks[0].load(.timeRange)
+        // 轨道编辑从成片 0 起（头部为锚点前的静音间隙），时长 = 间隙 0.5s + 内容 0.256s
+        XCTAssertEqual(audioRange.duration.seconds, 0.756, accuracy: 0.1, "音频轨道时长应覆盖 0.5s 间隙 + 0.256s 内容")
+
+        // 内容落点：解码音轨，首个非静音样本应落在成片时间 0.5s（±0.1，AAC priming ~3ms）
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true,
+            AVLinearPCMIsNonInterleaved: false,
+        ])
+        reader.add(output)
+        XCTAssertTrue(reader.startReading())
+        var firstLoud: Double?
+        while firstLoud == nil, let sample = output.copyNextSampleBuffer() {
+            let frames = CMSampleBufferGetNumSamples(sample)
+            guard frames > 0, let block = CMSampleBufferGetDataBuffer(sample) else { continue }
+            var totalLength = 0
+            var dataPointer: UnsafeMutablePointer<Int8>?
+            CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
+            guard let dataPointer else { continue }
+            let floats = dataPointer.withMemoryRebound(to: Float.self, capacity: totalLength / 4) { $0 }
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            for frame in 0..<frames where floats[frame * 2] > 0.1 {
+                firstLoud = pts + Double(frame) / audioFormat.sampleRate
+                break
+            }
+        }
+        let loud = try XCTUnwrap(firstLoud, "音轨解码后无任何非静音样本")
+        XCTAssertEqual(loud, 0.5, accuracy: 0.1, "音频内容应从成片时间 0.5s（其 PTS 相对锚点的位置）开始")
+    }
+
+    private func makePixelBuffer() -> CVPixelBuffer? {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, 64, 64, kCVPixelFormatType_32BGRA, nil, &pixelBuffer
+        )
+        guard status == kCVReturnSuccess, let pixelBuffer else { return nil }
+        CVPixelBufferLockBaseAddress(pixelBuffer, [])
+        if let base = CVPixelBufferGetBaseAddress(pixelBuffer) {
+            memset(base, 0, CVPixelBufferGetDataSize(pixelBuffer))
+        }
+        CVPixelBufferUnlockBaseAddress(pixelBuffer, [])
+        return pixelBuffer
+    }
 }

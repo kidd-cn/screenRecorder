@@ -4,10 +4,12 @@ import CoreMedia
 import Foundation
 import ScreenCaptureKit
 
-/// SCStream 采集 → `AssetWriterSession` 落盘的录制会话（Task 7 仅视频路径；
-/// audio 样本在 Task 8 接 SystemAudioMixer 前直接丢弃）。
-/// 生命周期：`start()`（解析目标 + 建流 + 开采集）→ video 队列首帧装配 writer 输入并
-/// startWriting → 逐帧 append（Task 15 合成管线接管前直通）→ `stop()`（停流 + 收尾成片）。
+/// SCStream 采集 → `AssetWriterSession` 落盘的录制会话。
+/// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧 append（Task 15 合成管线接管前直通）。
+/// 音频路径（Task 8，仅 captureSystemAudio 时）：SCStream audio 队列样本 → `SystemAudioMixer`
+/// 混音（engine 渲染 → AAC 轨），混音器启动失败时降级为纯视频轨继续录制。
+/// 生命周期：`start()`（解析目标 + 建流 + 开采集）→ video 队列首帧装配 writer（视频 + 有则音频
+/// 输入）→ 逐路 append → `stop()`（停流 + 停混音 + 收尾成片）。
 ///
 /// 失败通道：append 失败与 `stream(_:didStopWithError:)` 经 `onStreamFailure`（主队列保证）
 /// 上报，首次失败生效；上层收到后负责调用 `stop()` 完成安全收尾（本类不自动停流）。
@@ -44,6 +46,8 @@ final class SCStreamRecorder: NSObject {
     private let stateLock = NSLock()
     private var stream: SCStream?
     private var writerSession: AssetWriterSession?
+    /// 系统声音混音器（captureSystemAudio 且启动成功时非 nil；engine 由混音器持有）。
+    private var mixer: SystemAudioMixer?
     /// 仅 videoQueue 触碰：writer 输入是否已在首帧装配完毕。
     private var writerArmed = false
 
@@ -58,6 +62,21 @@ final class SCStreamRecorder: NSObject {
     func start() async throws {
         let target = try await resolveTarget()
         let session = try AssetWriterSession(config: config, pixelSize: target.pixelSize)
+        // 混音器在开流前启动：engine 先热起来，系统声音样本从第一刻起就不缺位；
+        // 启动失败（如无输出设备的极端环境）降级为纯视频轨，不阻断录制。
+        var activeMixer: SystemAudioMixer?
+        if config.captureSystemAudio {
+            let engine = AVAudioEngine()
+            let mixer = SystemAudioMixer()
+            do {
+                try mixer.start(engine: engine) { [weak self] sampleBuffer in
+                    self?.handleMixedAudio(sampleBuffer)
+                }
+                activeMixer = mixer
+            } catch {
+                NSLog("SCStreamRecorder: 混音器启动失败，本次录制仅视频轨：\(error)")
+            }
+        }
         do {
             let streamConfig = SCStreamConfiguration()
             streamConfig.width = Int(target.pixelSize.width.rounded())
@@ -82,10 +101,12 @@ final class SCStreamRecorder: NSObject {
             stateLock.withStateLock {
                 self.stream = stream
                 self.writerSession = session
+                self.mixer = activeMixer
             }
             try await stream.startCapture()
         } catch {
-            // 采集没跑起来：不会有任何帧到达，清理排他占位文件再上抛。
+            // 采集没跑起来：不会有任何帧到达，停混音 + 清理排他占位文件再上抛。
+            activeMixer?.stop()
             session.discardIfNoContent()
             throw error
         }
@@ -100,13 +121,19 @@ final class SCStreamRecorder: NSObject {
             return owned
         }
         if let stream {
-            // 先摘输出再停流：终止回调派发后再收尾 writer。
+            // 先摘输出再停流：终止回调派发后再收尾混音与 writer。
             try? stream.removeStreamOutput(self, type: .screen)
             if config.captureSystemAudio {
                 try? stream.removeStreamOutput(self, type: .audio)
             }
             try? await stream.stopCapture()
         }
+        let mixer: SystemAudioMixer? = stateLock.withStateLock {
+            let owned = self.mixer
+            self.mixer = nil
+            return owned
+        }
+        mixer?.stop()
         let session: AssetWriterSession? = stateLock.withStateLock {
             let owned = self.writerSession
             self.writerSession = nil
@@ -183,27 +210,65 @@ extension SCStreamRecorder: SCStreamOutput {
         case .screen:
             handleVideoSample(sampleBuffer)
         case .audio:
-            break // Task 8 前丢弃样本，之后送 SystemAudioMixer
+            handleStreamAudio(sampleBuffer)
         default:
             break // .microphone（macOS 15+）及未来新增类型：Task 9 接麦克风前一律丢弃
         }
     }
 
-    /// video 队列串行执行：首帧装配 writer（addVideoInput + startWriting，需首帧格式描述），
-    /// 之后逐帧直 append（Task 15 合成管线接管前的直通路径）。
+    /// audio 队列串行执行：CMSampleBuffer → AVAudioPCMBuffer → 混音器环形缓冲。
+    private func handleStreamAudio(_ sampleBuffer: CMSampleBuffer) {
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+              let pcm = AudioSampleBridge.pcmBuffer(from: sampleBuffer) else { return }
+        let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+        mixer?.enqueueSystemAudio(pcm)
+    }
+
+    /// engine 渲染线程回调：混音器输出的 masterFormat CMSampleBuffer → appendAudio。
+    /// 锚点兜底门控：视频首帧锚定会话时间轴，锚点前（含 gate 生效前已在途的）样本一律丢弃——
+    /// 早于锚点 PTS 的样本不被 writer 可靠拒绝（macOS 27 实测被静默钳到成片起点），
+    /// 上层必须自行丢弃，否则录制前的系统声音会混进成片。
+    private func handleMixedAudio(_ sampleBuffer: CMSampleBuffer) {
+        let session: AssetWriterSession? = stateLock.withStateLock { writerSession }
+        guard let session else { return } // stop() 已收走会话：丢弃尾部样本
+        let anchor = session.isReadyForVideoMediaTime
+        guard anchor.isValid, anchor.isNumeric else { return } // 视频未锚定：录制尚未开始，丢弃
+        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard pts.isNumeric, CMTimeCompare(pts, anchor) >= 0 else { return }
+        do {
+            try session.appendAudio(sampleBuffer)
+        } catch {
+            recordFailure(error)
+        }
+    }
+
+    /// video 队列串行执行：首帧装配 writer（addVideoInput + 有混音器则 addAudioInput +
+    /// startWriting，需首帧格式描述），之后逐帧直 append（Task 15 合成管线接管前的直通路径）；
+    /// 首帧 append 确立锚点后，把锚点交给混音器做音频裁剪。
     private func handleVideoSample(_ sampleBuffer: CMSampleBuffer) {
         guard CMSampleBufferDataIsReady(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let session: AssetWriterSession? = stateLock.withStateLock { writerSession }
         guard let session else { return } // stop() 已收走会话：丢弃尾部帧
         do {
-            if !writerArmed {
+            let didArm = !writerArmed
+            if didArm {
                 let formatHint = CMSampleBufferGetFormatDescription(sampleBuffer)
                 try session.addVideoInput(with: formatHint)
+                let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+                if let mixer {
+                    try session.addAudioInput(with: mixer.masterFormat)
+                }
                 session.startWriting()
                 writerArmed = true
             }
             try session.appendVideo(pixelBuffer, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            if didArm {
+                // 锚点已由首帧 append 确立（appendVideo 内部先 startSession 再判定就绪），
+                // 此刻才能取到有效锚点交给混音器做帧级裁剪。
+                let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+                mixer?.setGatePTS(session.isReadyForVideoMediaTime)
+            }
         } catch {
             recordFailure(error)
         }

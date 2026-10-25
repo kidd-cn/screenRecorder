@@ -4,9 +4,10 @@ import CoreVideo
 import Foundation
 
 /// AVAssetWriter 落盘会话：视频走 `AVAssetWriterInputPixelBufferAdaptor`，
-/// 音频走直通（`outputSettings = nil` + 由 `AVAudioFormat` 构造的格式提示，写入样本必须与之一致），
-/// 输出 MP4。生命周期：init（预检 + claim 占位）→ addVideoInput / addAudioInput → startWriting
-/// → appendVideo / appendAudio（首个到轨样本自动 startSession 锚定时间轴）→ finish。
+/// 音频走 AAC 编码（`AVFormatIDKey: kAudioFormatMPEG4AAC` 的 outputSettings + PCM 格式提示，
+/// appendAudio 写入 PCM 样本、writer 负责编码），输出 MP4。生命周期：init（预检 + claim 占位）
+/// → addVideoInput / addAudioInput → startWriting → appendVideo / appendAudio
+///（首个到轨样本自动 startSession 锚定时间轴）→ finish。
 ///
 /// 不覆盖既有录像（硬约束）——预检 + claim 双保险：
 /// 1. init 预检 `outputURL` 本体已存在 → 直接抛 `outputAlreadyExists`；
@@ -183,8 +184,9 @@ final class AssetWriterSession {
         }
     }
 
-    /// 添加音频输入（直通：outputSettings 为 nil 时必须提供格式提示）。
-    /// `format` 应与后续 appendAudio 的样本格式一致（系统声音管线的 masterFormat 由此登记）。
+    /// 添加音频输入（成片音轨为 AAC——MP4 容器 + AAC 音频是规格硬要求）：
+    /// outputSettings 按 `format`（后续 appendAudio 的 PCM 口径，即系统声音管线的 masterFormat）
+    /// 装配采样率/声道，writer 负责把追加的 PCM 样本编码为 AAC；格式提示描述 PCM 源格式。
     /// 重复调用幂等（首次生效）。必须在 `startWriting()` 之前调用。
     func addAudioInput(with format: AVAudioFormat) throws {
         try stateLock.withStateLock {
@@ -203,7 +205,14 @@ final class AssetWriterSession {
             guard status == noErr, let hint = hintOut else {
                 throw AssetWriterSessionError.cannotMakeAudioFormatHint(status)
             }
-            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil, sourceFormatHint: hint)
+            let outputSettings: [String: Any] = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: format.sampleRate,
+                AVNumberOfChannelsKey: Int(format.channelCount),
+                AVEncoderBitRateKey: format.channelCount >= 2 ? 128_000 : 96_000,
+                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+            ]
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: outputSettings, sourceFormatHint: hint)
             input.expectsMediaDataInRealTime = true
             guard writer.canAdd(input) else { throw AssetWriterSessionError.cannotAddAudioInput }
             writer.add(input)
@@ -249,9 +258,11 @@ final class AssetWriterSession {
         }
     }
 
-    /// 追加一段音频样本（CMSampleBuffer 直通）。同样参与自动锚定（首个到轨样本定锚）；
-    /// 后到轨样本若 PTS 早于锚点会被 writer 拒绝并抛错——音画起点对齐由上层管线保证。
-    /// 编码器未就绪时丢弃该样本（表现为瞬时静音缺口）。
+    /// 追加一段音频样本（PCM CMSampleBuffer，格式须与 addAudioInput 登记的一致，AAC 编码由
+    /// writer 完成）。同样参与自动锚定（首个到轨样本定锚）；后到轨样本若 PTS 早于锚点，
+    /// writer 不保证拒绝（macOS 27 实测静默钳到成片起点，旧平台有拒绝抛错表现）——两种行为
+    /// 都破坏音画对齐，早于锚点的样本必须由上层管线先行丢弃（系统声音路径：混音器 gate
+    /// 裁剪 + append 前锚点兜底）。编码器未就绪时丢弃该样本（表现为瞬时静音缺口）。
     func appendAudio(_ sampleBuffer: CMSampleBuffer) throws {
         try stateLock.withStateLock {
             guard let input = audioInput else {
