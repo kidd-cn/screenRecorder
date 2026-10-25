@@ -1,0 +1,37 @@
+name: ScreenRecorder
+options:
+  createIntermediateGroups: true
+targets:
+  ScreenRecorder:
+    type: application
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - ScreenRecorder/Sources
+    info:
+      path: ScreenRecorder/Info.plist
+      properties:
+        LSUIElement: true
+        NSMicrophoneUsageDescription: 用于录制会议和教程
+        NSCameraUsageDescription: 用于录制会议和教程
+        NSScreenRecordingUsageDescription: 用于录制会议和教程
+        LSApplicationCategoryType: public.app-category.productivity
+  ScreenRecorderTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "13.0"
+    sources:
+      - ScreenRecorderTests
+    dependencies:
+      - target: ScreenRecorder
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+schemes:
+  ScreenRecorder:
+    build:
+      targets:
+        ScreenRecorder: all
+    test:
+      targets:
+        - ScreenRecorderTests
