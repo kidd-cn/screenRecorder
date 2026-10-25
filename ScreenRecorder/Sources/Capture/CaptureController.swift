@@ -152,7 +152,8 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 /// 收尾任务都在主 actor 上串行——session.begin/finish 不存在并发调用。
 ///
 /// 生命周期边界（本任务裁定，简报留白处）：
-/// 1. `start` 仅 `.idle` 可发起；其余状态 no-op（单会话语义）。
+/// 1. `start` 仅 `.idle` 可发起，且全程持 `startInFlight` 同步闩（guard 与首个 await 之间
+///    state 仍为 `.idle`，并发第二次 start 在同步段即被拒绝）；其余状态 no-op（单会话语义）。
 /// 2. `pause`/`resume`/`stop`/`cancelAndDiscard` 只在语义合法状态生效，非法一律 no-op
 ///    （与 SCStreamRecorder 的 no-op 契约同风格，调用方无需跟踪内部生命周期）。
 /// 3. `.finishing` 为去抖闸位：`stop`/`cancelAndDiscard`/`handleSessionFailure` 入口先同步置位
@@ -196,6 +197,9 @@ final class CaptureController: ObservableObject {
     private var segmentStartUptime: TimeInterval?
     /// 倒计时结束后 begin 已发出（此后 cancelAndDiscard 退化为收尾丢弃而非静默取消）。
     private var hasBegun = false
+    /// start 全程同步闩（guard 与首个 await 之间的窗口里，state 仍是 .idle——并发第二次
+    /// start 必须在同步段即被拒绝，否则可能双 begin）。defer 覆盖 start 整个执行期。
+    private var startInFlight = false
     /// begin 在途期间的丢弃/失败意图：begin 返回后立即执行（边界 4/5）。
     private var pendingDiscard = false
     private var pendingFailure: Error?
@@ -215,7 +219,9 @@ final class CaptureController: ObservableObject {
     /// 启动录制：`countdownSeconds > 0` 时先走逐秒倒计时（每步可被 `cancelAndDiscard` 打断回
     /// `.idle`），随后 begin 并进入 `.recording`。倒计时只是状态机（视觉覆盖层为 Task 12）。
     func start(mode: CaptureMode, config: RecordingConfiguration) async {
-        guard state == .idle else { return }
+        guard state == .idle, !startInFlight else { return }
+        startInFlight = true
+        defer { startInFlight = false }
         var config = config
         config.mode = mode // start 的 mode 参数为准（简报签名 mode 与 config 并列）
         hasBegun = false

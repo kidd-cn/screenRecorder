@@ -178,6 +178,17 @@ final class CaptureControllerTests: XCTestCase {
         XCTAssertEqual(controller.elapsed, 0, accuracy: 0.001)
     }
 
+    func testConcurrentDoubleStartStartsOnlyOneSession() async {
+        let controller = makeController(countdownSeconds: 0)
+
+        async let first: Void = controller.start(mode: .display(1), config: makeConfig())
+        async let second: Void = controller.start(mode: .display(1), config: makeConfig())
+        await first
+        await second
+
+        XCTAssertEqual(session.beginCallCount, 1, "并发双 start（guard 与 await 之间的窗口）只允许一场录制")
+    }
+
     func testPauseTransitionsToPausedAndResumeBackToRecording() async {
         let controller = makeController(countdownSeconds: 0)
         await controller.start(mode: .display(1), config: makeConfig())
