@@ -19,11 +19,14 @@ final class DiskSpaceMonitorTests: XCTestCase {
     /// 假 provider 不触碰真实卷，路径仅作透传参数。
     private let url = URL(fileURLWithPath: "/tmp/screen-recorder-tests/disk-probe")
 
-    // MARK: - 回调计数（测试方法运行在主线程、回调同步内联，无需锁）
+    // MARK: - 回调计数（计数与断言全部只发生在主线程——同步测试内联、异步测试经 main.async——无需锁）
 
     private var warnCount = 0
     private var stopCount = 0
+    /// 契约违规计数：回调体运行在非主线程时 +1（正确实现恒为 0）。
     private var offMainDeliveries = 0
+    /// 供异步派发测试等待送达；nil 时 no-op（其余同步测试不受影响）。
+    private var warnExpectation: XCTestExpectation?
 
     private func makeMonitor(provider: FakeFreeSpaceProvider) -> DiskSpaceMonitor {
         let monitor = DiskSpaceMonitor(provider: provider, url: url)
@@ -31,6 +34,7 @@ final class DiskSpaceMonitorTests: XCTestCase {
             guard let self = self else { return }
             self.warnCount += 1
             if !Thread.isMainThread { self.offMainDeliveries += 1 }
+            self.warnExpectation?.fulfill()
         }
         monitor.onStop = { [weak self] in
             guard let self = self else { return }
@@ -122,6 +126,30 @@ final class DiskSpaceMonitorTests: XCTestCase {
         monitor.checkNow()
         XCTAssertEqual(warnCount, 1)
         XCTAssertEqual(stopCount, 1)
+    }
+
+    // MARK: - 主队列契约·异步分支（后台线程触发必须经 main.async 派发）
+
+    func testBackgroundQueueCheckNowDeliversOnMainQueue() {
+        let provider = FakeFreeSpaceProvider()
+        provider.freeBytesValue = 1_500_000_000 // 直落 warn 阈下
+        let monitor = makeMonitor(provider: provider)
+        let delivered = expectation(description: "onWarn 经 main.async 在主队列送达")
+        warnExpectation = delivered
+
+        DispatchQueue.global().async {
+            monitor.checkNow() // 非主线程调用：必须走 main.async 派发分支
+        }
+
+        // wait 泵主 RunLoop，主队列块得以执行；确定性等待、无 sleep，5s 超时兜底
+        wait(for: [delivered], timeout: 5)
+
+        XCTAssertEqual(warnCount, 1)
+        XCTAssertEqual(stopCount, 0)
+        // 关键判别：回调体运行在主线程（offMainDeliveries == 0）⇒ 走的是 main.async 分支。
+        // 若派发回归为在调用线程（global/timer 队列）内联执行，回调仍会触发、
+        // 本计数会变 1，测试即在最后一行断言失败——这正是本测试要抓住的回归。
+        XCTAssertEqual(offMainDeliveries, 0)
     }
 
     // MARK: - 迟滞重武装（controller 决策 4 钉死语义）
