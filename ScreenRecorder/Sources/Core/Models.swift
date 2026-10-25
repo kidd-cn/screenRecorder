@@ -19,6 +19,9 @@ struct RecordingConfiguration {
     var mode: CaptureMode
     var captureSystemAudio: Bool
     var captureMicrophone: Bool
+    /// 麦克风增益 0…1（快照语义：录制中途改设置不影响进行中的录制）。
+    /// 来源 `SettingsStore.micVolume`（Double），传给混音器前收敛为 Float。
+    var micVolume: Double = 1.0
     var includeCamera: Bool
     var fps: Int
     var codec: VideoCodec

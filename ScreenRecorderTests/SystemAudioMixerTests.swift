@@ -183,4 +183,123 @@ final class SystemAudioMixerTests: XCTestCase {
             XCTAssertEqual(roundTripped.floatChannelData![1][index], -Float(index + 5) * 0.25, "channel1[\(index)]")
         }
     }
+
+    // MARK: - Task 9 麦克风路径
+
+    /// reset()：清空缓冲并把写指针归零——setMicMuted 转换时排空陈旧音频用。
+    /// 覆盖回绕态重置（写指针若未归零，重置后再写满容量会读到错位内容）。
+    func testRingBufferResetClearsContentAndRebasesWrite() {
+        let ring = RingBuffer(channels: 2, capacityFrames: 8)
+        ring.write([[1, 2, 3, 4], [10, 20, 30, 40]], frameCount: 4)
+        ring.reset()
+        XCTAssertEqual(ring.bufferedCount, 0, "reset 后缓冲必须为空")
+        var out: [[Float]] = [Array(repeating: -1, count: 4), Array(repeating: -1, count: 4)]
+        XCTAssertEqual(ring.read(into: &out, frameCount: 4), 0, "reset 后读必须返回 0")
+
+        // 先写到回绕位置（写指针 6/8），reset 后再写满容量：读回必须恰为新内容（证明写指针已归零）
+        ring.write([[1, 2, 3, 4, 5, 6], [-1, -2, -3, -4, -5, -6]], frameCount: 6)
+        XCTAssertEqual(ring.bufferedCount, 6)
+        ring.reset()
+        let refreshed: [[Float]] = [(0..<8).map { Float($0) + 100 }, (0..<8).map { -Float($0) - 100 }]
+        ring.write(refreshed, frameCount: 8)
+        XCTAssertEqual(ring.bufferedCount, 8)
+        var out2: [[Float]] = [Array(repeating: -1, count: 8), Array(repeating: -1, count: 8)]
+        XCTAssertEqual(ring.read(into: &out2, frameCount: 8), 8)
+        XCTAssertEqual(out2[0], (0..<8).map { Float($0) + 100 }, "reset 后写满必须从位置 0 起写")
+        XCTAssertEqual(out2[1], (0..<8).map { -Float($0) - 100 })
+    }
+
+    /// setMicrophoneInput 登记麦克风输入格式与增益：format 必达，volume 缺省 1.0、可覆盖、
+    /// 越界收敛到 0…1（后续装配据此建 converter 与施加 mixer 输入增益）。
+    func testSetMicrophoneInputRegistersFormatAndGain() {
+        let mixer = SystemAudioMixer()
+        XCTAssertNil(mixer.microphoneFormat, "初始未登记")
+
+        let mono = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        mixer.setMicrophoneInput(mono)
+        XCTAssertEqual(mixer.microphoneFormat, mono)
+        XCTAssertEqual(mixer.micVolume, 1.0, "缺省增益 1.0")
+
+        mixer.setMicrophoneInput(mono, volume: 0.5)
+        XCTAssertEqual(mixer.micVolume, 0.5)
+
+        mixer.setMicrophoneInput(mono, volume: 1.7)
+        XCTAssertEqual(mixer.micVolume, 1.0, "增益越上界收敛到 1")
+        mixer.setMicrophoneInput(mono, volume: -0.2)
+        XCTAssertEqual(mixer.micVolume, 0.0, "增益越下界收敛到 0")
+    }
+
+    /// 空闲态（engine 未运行）setMicMuted：仅记录状态供 start() 装配时裁决，不做节点手术；
+    /// 同值重复设置幂等。
+    func testSetMicMutedWhileIdleRecordsFlagOnly() {
+        let mixer = SystemAudioMixer()
+        XCTAssertFalse(mixer.isMicMuted)
+        mixer.setMicMuted(true)
+        XCTAssertTrue(mixer.isMicMuted)
+        mixer.setMicMuted(true)
+        XCTAssertTrue(mixer.isMicMuted, "同值重复设置幂等")
+        mixer.setMicMuted(false)
+        XCTAssertFalse(mixer.isMicMuted)
+    }
+
+    /// mic tap 处理器（渲染线程回调的生产逻辑，无头直测）：单声道 48k 输入经 converter 转
+    /// masterFormat 立体声后经串行队列写入 ring——L=R=输入值（实测 AVAudioConverter 单声道
+    /// 上混为通道复制），帧数守恒。
+    func testMicTapHandlerDuplicatesMonoIntoStereoRing() throws {
+        let mixer = SystemAudioMixer()
+        let ring = RingBuffer(channels: 2, capacityFrames: 48000)
+        let mono48 = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let converter = try XCTUnwrap(AVAudioConverter(from: mono48, to: masterFormat))
+        let handler = mixer.makeMicTapHandler(ring: ring, converter: converter)
+
+        let frames = 96
+        guard let pcm = AVAudioPCMBuffer(pcmFormat: mono48, frameCapacity: AVAudioFrameCount(frames)) else {
+            return XCTFail("AVAudioPCMBuffer 创建失败")
+        }
+        pcm.frameLength = AVAudioFrameCount(frames)
+        for index in 0..<frames {
+            pcm.floatChannelData![0][index] = Float(index) * 0.25
+        }
+        handler(pcm)
+        mixer.flushMicDeliveryForTesting()
+
+        XCTAssertEqual(ring.bufferedCount, frames, "同采样率转换帧数守恒")
+        var out: [[Float]] = [Array(repeating: -1, count: frames), Array(repeating: -1, count: frames)]
+        XCTAssertEqual(ring.read(into: &out, frameCount: frames), frames)
+        for index in 0..<frames {
+            XCTAssertEqual(out[0][index], Float(index) * 0.25, accuracy: 1e-6, "L[\(index)]")
+            XCTAssertEqual(out[1][index], Float(index) * 0.25, accuracy: 1e-6, "R[\(index)] = 上混复制")
+        }
+    }
+
+    /// mic tap 处理器：44.1k 单声道 → 48k 立体声跨缓冲重采样——converter 状态跨 tap 延续。
+    /// 实测（/tmp probe，30 轮流）：SRC 以 4096 帧为发射量子，内部滞留为有界锯齿
+    ///（≤ 1 个量子 ≈ 85ms），长期速率守恒不丢样本。断言累计输出落在
+    /// [expected − 4096, expected + 64] 窗口（下界 = 一个量子的有界滞留，上界 = 不超产）。
+    func testMicTapHandlerResamples44100MonoAcrossBuffers() throws {
+        let mixer = SystemAudioMixer()
+        let ring = RingBuffer(channels: 2, capacityFrames: 48000)
+        let mono441 = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+        let converter = try XCTUnwrap(AVAudioConverter(from: mono441, to: masterFormat))
+        let handler = mixer.makeMicTapHandler(ring: ring, converter: converter)
+
+        let framesPerBuffer = 4410
+        let bufferCount = 6
+        for batch in 0..<bufferCount {
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: mono441, frameCapacity: AVAudioFrameCount(framesPerBuffer)) else {
+                return XCTFail("AVAudioPCMBuffer 创建失败")
+            }
+            pcm.frameLength = AVAudioFrameCount(framesPerBuffer)
+            for index in 0..<framesPerBuffer {
+                pcm.floatChannelData![0][index] = Float(index + batch * framesPerBuffer) * 0.5
+            }
+            handler(pcm)
+        }
+        mixer.flushMicDeliveryForTesting()
+
+        let expected = Int(Double(framesPerBuffer * bufferCount) * 48000.0 / 44100.0) // 28800
+        let lag = ring.bufferedCount - expected
+        XCTAssertTrue(lag >= -4096 && lag <= 64,
+                      "累计输出应约 \(expected) 帧（有界滞留 ≤4096），实际 \(ring.bufferedCount)")
+    }
 }

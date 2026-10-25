@@ -6,9 +6,9 @@ import ScreenCaptureKit
 
 /// SCStream 采集 → `AssetWriterSession` 落盘的录制会话。
 /// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧 append（Task 15 合成管线接管前直通）。
-/// 音频路径（Task 8，仅 captureSystemAudio 时）：SCStream audio 队列样本 → `SystemAudioMixer`
-/// 混音（engine 渲染只做转换入队 → delivery 串行队列打包交付 → AAC 轨），混音器启动失败时
-/// 降级为纯视频轨继续录制。
+/// 音频路径（Task 9，captureSystemAudio 或 captureMicrophone 时）：`SystemAudioMixer` 双路混音
+/// ——系统声：SCStream audio 队列样本；麦克风：engine inputNode tap（SCStream 的 `.microphone`
+/// 输出 macOS 15+ 才有，维持丢弃）——混音为单条 AAC 轨，混音器启动失败时降级为纯视频轨继续录制。
 /// 生命周期：`start()`（解析目标 + 建流 + 开采集）→ video 队列首帧装配 writer（视频 + 有则音频
 /// 输入）→ 逐路 append → `stop()`（停流 + 停混音 + 收尾成片）。
 ///
@@ -63,12 +63,16 @@ final class SCStreamRecorder: NSObject {
     func start() async throws {
         let target = try await resolveTarget()
         let session = try AssetWriterSession(config: config, pixelSize: target.pixelSize)
-        // 混音器在开流前启动：engine 先热起来，系统声音样本从第一刻起就不缺位；
-        // 启动失败（如无输出设备的极端环境）降级为纯视频轨，不阻断录制。
+        // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
+        // 时混音器同样在位（系统声源节点持续渲染静音，与麦克风混合）。启动失败（如无输出设备
+        // 的极端环境）降级为纯视频轨，不阻断录制。
         var activeMixer: SystemAudioMixer?
-        if config.captureSystemAudio {
+        if config.captureSystemAudio || config.captureMicrophone {
             let engine = AVAudioEngine()
             let mixer = SystemAudioMixer()
+            if config.captureMicrophone {
+                registerMicrophone(on: mixer, engine: engine)
+            }
             do {
                 try mixer.start(engine: engine) { [weak self] sampleBuffer in
                     self?.handleMixedAudio(sampleBuffer)
@@ -111,6 +115,25 @@ final class SCStreamRecorder: NSObject {
             session.discardIfNoContent()
             throw error
         }
+    }
+
+    /// 登记麦克风输入（Task 9）：SCStream 的 `.microphone` 输出 macOS 15+ 才有（维持丢弃），
+    /// 麦克风统一走 engine inputNode tap。无音频输入设备的极端环境访问 inputNode 会抛 ObjC
+    /// 异常（Swift 侧接不住），先以 AVCaptureDevice 预检降级为不含麦克风的混音；设备在位但
+    /// TCC 未授权时 inputNode 输出静音（录出无声人声轨，成片仍有效可播）。
+    private func registerMicrophone(on mixer: SystemAudioMixer, engine: AVAudioEngine) {
+        guard AVCaptureDevice.default(for: .audio) != nil else {
+            NSLog("SCStreamRecorder: 无音频输入设备，本次录制不含麦克风")
+            return
+        }
+        mixer.setMicrophoneInput(engine.inputNode.inputFormat(forBus: 0), volume: Float(config.micVolume))
+    }
+
+    /// 麦克风静音（浮条静音按钮语义，Task 11 消费）：转发混音器摘除/回装 inputNode tap；
+    /// 无混音器（纯视频轨 / 混音器未启动）时为 no-op。
+    func setMicMuted(_ muted: Bool) {
+        let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+        mixer?.setMicMuted(muted)
     }
 
     /// 停采集并收尾成片。幂等（重复调用 no-op）；完成后 `finishedFileURL` 反映结果，
@@ -213,7 +236,7 @@ extension SCStreamRecorder: SCStreamOutput {
         case .audio:
             handleStreamAudio(sampleBuffer)
         default:
-            break // .microphone（macOS 15+）及未来新增类型：Task 9 接麦克风前一律丢弃
+            break // .microphone（macOS 15+）及未来新增类型：麦克风走 engine inputNode tap，维持丢弃
         }
     }
 

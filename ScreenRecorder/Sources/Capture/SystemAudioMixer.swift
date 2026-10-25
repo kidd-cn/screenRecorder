@@ -2,23 +2,34 @@ import AVFoundation
 import CoreMedia
 import Foundation
 
-/// 系统声音混音器：SCStream 的 PCM → `AVAudioSourceNode` 环形缓冲 → `AVAudioEngine`
-/// mainMixer → tap → `AVAudioConverter` 转 masterFormat → 打包 CMSampleBuffer 交给上层写轨。
-/// Task 8 仅接系统声音一路；Task 9 经 `setMicrophoneInput` + inputNode tap 加入第二路混音。
+/// 双路混音器：系统声音（SCStream PCM → `AVAudioSourceNode` 环形缓冲）与麦克风（inputNode
+/// tap → `AVAudioConverter` → mic 环形缓冲 → 第二 `AVAudioSourceNode`）汇入 `AVAudioEngine`
+/// mainMixer → 输出 tap → `AVAudioConverter` 转 masterFormat → 打包 CMSampleBuffer 交给上层
+/// 写单条 AAC 音轨。
+///
+/// 麦克风路径（Task 9）：inputNode tap 回调（渲染线程）只做格式转换 + 串行队列投递，与系统声
+/// 路径同构；micNode 先连入 mainMixer 占 input bus 0，`micVolume` 增益施加在该连接上（现代
+/// SDK 的 `AVAudioMixing.volume`——mixer per-input 音量，简报 `setValue(_:forInputBus:)` 机制
+/// 在本 SDK 的等价物，实测 macOS 27 该旧签名不存在）；静音（浮条按钮语义）= 摘除 inputNode
+/// tap（`setMicMuted`），摘/回装转换时排空 mic ring 防陈旧音频泄漏。
 ///
 /// 音画对齐机制：混音器输出样本的 PTS 取自 engine tap 的 host time（与 SCStream 视频 PTS 同
 /// mach 时基）。writer 会话锚点由视频首帧确定（AssetWriterSession 首个到轨样本），锚点之前的
 /// 系统声音属录制前内容——混音器经 `setGatePTS`（视频锚定后由上层设置）做帧级裁剪：锚点前的
 /// 整段丢弃、跨界样本裁掉头部、其余原样输出；gate 生效前已在途的样本由上层按锚点兜底丢弃。
+/// 麦克风与系统声在 mainMixer 混合后共用同一输出 tap 与 gate，无需单独对齐。
 ///
-/// 监听静音（实测裁决，probe 实验）：engine 的 mainMixer 默认直连输出硬件，且 mixer 节点上的
-/// tap 在 fader 之后——`mainMixer.outputVolume = 0` 会把录制内容一并静音。故在 mainMixer 下游
-/// 插入一个音量 0 的静音 mixer 接通输出硬件：录制链路满幅、外放无声。
+/// 监听静音与增益（实测裁决，probe 实验）：engine 的 mainMixer 默认直连输出硬件，且 mixer 节点上
+/// 的 tap 在 fader 之后——`mainMixer.outputVolume = 0` 会把录制内容一并静音。故在 mainMixer 下游
+/// 插入一个音量 0 的静音 mixer 接通输出硬件：录制链路满幅、外放无声。`masterGain`（0.8，简报
+/// 削波封顶）同样施加在 mainMixer 上：它是增益——同时缩放两路录制冷平，监听仍被下游归零。
 ///
-/// 线程模型：`enqueueSystemAudio` 在 SCStream audio 队列、tap 回调在 engine 渲染线程——
-/// 实时线程只做格式转换与入队；gate 裁剪、CMSampleBuffer 打包、上层 append 全部在
-/// `deliveryQueue` 串行队列执行（单消费者、样本顺序保持）。`stop()` 先停 engine 再围栏排空
-/// 该队列，保证上层收尾 writer 时无 append 在途或排队。共享状态经 `stateLock` 串行化。
+/// 线程模型：`enqueueSystemAudio` 在 SCStream audio 队列、系统 tap 与 mic tap 回调在 engine
+/// 渲染线程——实时线程只做格式转换与入队（零锁获取、闭包只捕获不可变量）；gate 裁剪、
+/// CMSampleBuffer 打包、上层 append 全部在 `deliveryQueue` 串行队列执行（单消费者、样本顺序
+/// 保持），mic 转换段的 ring 写入在 `micDeliveryQueue` 串行队列执行（同构）。`stop()` 先停
+/// engine 再围栏排空两个队列，保证上层收尾 writer 时无 append 在途或排队。共享状态经
+/// `stateLock` 串行化。
 final class SystemAudioMixer {
     enum SystemAudioMixerError: LocalizedError {
         case cannotCreateConverter(from: AVAudioFormat, to: AVAudioFormat)
@@ -42,18 +53,36 @@ final class SystemAudioMixer {
     private let stateLock = NSLock()
     /// 打包与交付专用串行队列：单消费者，保证样本与时间轴顺序；stop() 围栏排空。
     private let deliveryQueue = DispatchQueue(label: "screenRecorder.SystemAudioMixer.delivery", qos: .userInitiated)
+    /// 麦克风转换段交付专用串行队列：mic tap（渲染线程）只转换 + 入队，ring 写入（ring 自带锁）
+    /// 在此执行——与 deliveryQueue 同构；stop()/setMicMuted 围栏排空。
+    private let micDeliveryQueue = DispatchQueue(label: "screenRecorder.SystemAudioMixer.micDelivery", qos: .userInitiated)
+
+    /// 混音总增益封顶（简报 Step 3 削波封顶）：mainMixer tap 在 fader 之后，该值同时缩放系统声
+    /// 与麦克风的录制冷平；监听静音由下游音量 0 的 silencer 负责，与本增益无关（T8 裁决）。
+    static let masterGain: Float = 0.8
 
     private var isRunning = false
     private var engine: AVAudioEngine?
     private var silencer: AVAudioMixerNode?
     private var sourceNode: AVAudioSourceNode?
+    /// 麦克风第二路节点/缓冲/转换器（start 装配 mic 路径时非 nil，stop 清理）。
+    private var micNode: AVAudioSourceNode?
+    private var micRing: RingBuffer?
+    /// mic 硬件格式 → masterFormat 的转换器（start 装配时创建，运行期不变——tap 闭包捕获用）。
+    private var micConverter: AVAudioConverter?
+    /// inputNode tap 是否在位（setMicMuted 摘除后为 false）。
+    private var micTapInstalled = false
     /// 音画锚点（视频首帧 PTS；`.invalid` = 未设置，不裁剪）。
     private var gatePTS: CMTime = .invalid
     /// SCStream 音频源格式 → masterFormat 的转换器（格式不变则复用）。
     private var sourceConverter: AVAudioConverter?
     private var sourceConverterFormat: AVAudioFormat?
-    /// Task 9 用：登记的麦克风输入格式（Task 8 仅登记不接线）。
+    /// 登记的麦克风输入格式（recorder 在 start 前从 engine.inputNode 硬件格式登记）。
     private(set) var microphoneFormat: AVAudioFormat?
+    /// 麦克风增益 0…1（缺省 1）：施加在 micNode → mainMixer 输入连接上的 per-input 音量。
+    private(set) var micVolume: Float = 1.0
+    /// 麦克风静音（浮条按钮语义 = 摘除 inputNode tap）。
+    private(set) var isMicMuted = false
 
     init(masterFormat: AVAudioFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!) {
         self.masterFormat = masterFormat
@@ -63,12 +92,16 @@ final class SystemAudioMixer {
 
     // MARK: - 生命周期
 
-    /// 挂接 engine：sourceNode → mainMixer（tap 在此）→ 静音 mixer → 输出硬件，并启动 engine。
+    /// 挂接 engine：[micNode → mainMixer bus 0] + [sourceNode → mainMixer]（tap 在此）→
+    /// 静音 mixer → 输出硬件，并启动 engine。mic 路径仅在 `setMicrophoneInput` 已登记且
+    /// converter 可建时装配；`micVolume` 增益施加在 micNode 的 mixer 连接上。
     /// `output` 在 delivery 串行队列回调，交付 masterFormat 的 CMSampleBuffer（host time PTS）。
     /// engine 由本类持有并在 `stop()` 中停机；engine.start 失败时回滚全部装配再上抛。
     func start(engine: AVAudioEngine, output: @escaping (CMSampleBuffer) -> Void) throws {
         let running: Bool = stateLock.withStateLock { isRunning }
         guard !running else { return }
+        // 装配期快照（register-then-start 由调用方串行化，锁快照仅为纪律一致）。
+        let (micFormat, micGain, micMuted) = stateLock.withStateLock { (microphoneFormat, micVolume, isMicMuted) }
 
         var asbd = masterFormat.streamDescription.pointee
         var descOut: CMFormatDescription?
@@ -88,20 +121,38 @@ final class SystemAudioMixer {
 
         let source = AVAudioSourceNode(format: masterFormat) { [weak self] _, _, frameCount, audioBufferList in
             guard let self else { return noErr }
-            return self.renderFromRing(audioBufferList, frameCount: Int(frameCount))
+            return self.renderFromRing(audioBufferList, frameCount: Int(frameCount), from: self.ring)
         }
         engine.attach(source)
         let mainMixer = engine.mainMixerNode
+        // 麦克风第二路：micNode 先连入 mainMixer 占 input bus 0；converter 把可能的单声道/
+        // 异采样率硬件格式统一为 masterFormat（mixer 只做混合，不再承担逐路格式归一）。
+        var assembledMic: (node: AVAudioSourceNode, ring: RingBuffer, converter: AVAudioConverter)?
+        if let micFormat, let converter = AVAudioConverter(from: micFormat, to: masterFormat) {
+            let ring = RingBuffer(channels: Int(masterFormat.channelCount),
+                                  capacityFrames: Int(masterFormat.sampleRate))
+            let node = AVAudioSourceNode(format: masterFormat) { [weak self] _, _, frameCount, audioBufferList in
+                guard let self else { return noErr }
+                return self.renderFromRing(audioBufferList, frameCount: Int(frameCount), from: ring)
+            }
+            engine.attach(node)
+            engine.connect(node, to: mainMixer, format: masterFormat)
+            node.volume = micGain // AVAudioMixing.volume：mixer per-input 音量（0…1）
+            assembledMic = (node, ring, converter)
+        }
         engine.connect(source, to: mainMixer, format: masterFormat)
-        // 监听静音：tap 在 mainMixer 输出 bus（fader 之后），不能靠归零 mainMixer 音量静音；
-        // 下游插入音量 0 的静音 mixer 接通输出硬件（engine 要求 graph 触达 i/o 单元）。
+        // 监听静音（T8 裁决）：tap 在 mainMixer 输出 bus（fader 之后），不能靠归零 mainMixer
+        // 音量静音；下游插入音量 0 的静音 mixer 接通输出硬件。masterGain 是录制冷平封顶
+        //（增益，缩放两路），与监听静音无关。
         let silencer = AVAudioMixerNode()
         engine.attach(silencer)
         engine.connect(mainMixer, to: silencer, format: nil)
         engine.connect(silencer, to: engine.outputNode, format: nil)
         silencer.outputVolume = 0
+        mainMixer.outputVolume = Self.masterGain
         let mixerOutFormat = mainMixer.outputFormat(forBus: 0)
         guard let outputConverter = AVAudioConverter(from: mixerOutFormat, to: masterFormat) else {
+            if let assembledMic { engine.detach(assembledMic.node) }
             engine.detach(source)
             engine.detach(silencer)
             throw SystemAudioMixerError.cannotCreateConverter(from: mixerOutFormat, to: masterFormat)
@@ -118,12 +169,26 @@ final class SystemAudioMixer {
                 }
             }
         }
+        // 麦克风 inputNode tap（静音态不装配——setMicMuted(false) 时回装）。
+        var didInstallMicTap = false
+        if let mic = assembledMic, !micMuted {
+            let handler = makeMicTapHandler(ring: mic.ring, converter: mic.converter)
+            engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+                handler(buffer)
+            }
+            didInstallMicTap = true
+        }
         do {
+            engine.prepare() // 简报 Step 1：prepare 后 start，预载渲染管线
             try engine.start()
         } catch {
             mainMixer.removeTap(onBus: 0)
-            engine.detach(source)
+            if didInstallMicTap {
+                engine.inputNode.removeTap(onBus: 0)
+            }
             engine.detach(silencer)
+            if let assembledMic { engine.detach(assembledMic.node) }
+            engine.detach(source)
             throw error
         }
         stateLock.withStateLock {
@@ -131,33 +196,51 @@ final class SystemAudioMixer {
             self.engine = engine
             self.silencer = silencer
             self.sourceNode = source
+            micNode = assembledMic?.node
+            micRing = assembledMic?.ring
+            micConverter = assembledMic?.converter
+            micTapInstalled = didInstallMicTap
         }
     }
 
-    /// 停机并回滚 engine 装配（幂等）。先停 engine 终止新入队，再围栏排空 delivery 队列——
-    /// 本方法返回时，已入队/在途的打包与 append 全部完成（上层收尾 writer 前必须先调本方法），
-    /// 最后才清理共享状态并摘除节点。
+    /// 停机并回滚 engine 装配（幂等）。先停 engine 终止新入队（含摘除双 tap），再围栏排空
+    /// delivery 与 micDelivery 两个串行队列——本方法返回时，已入队/在途的打包、append 与
+    /// mic ring 写入全部完成（上层收尾 writer 前必须先调本方法），最后才清理共享状态并摘除节点。
     func stop() {
-        let teardown: (AVAudioEngine, AVAudioMixerNode, AVAudioSourceNode)? = stateLock.withStateLock {
+        let teardown: (engine: AVAudioEngine, silencer: AVAudioMixerNode, source: AVAudioSourceNode, micNode: AVAudioSourceNode?, micTapInstalled: Bool)? = stateLock.withStateLock {
             guard isRunning else { return nil }
             isRunning = false
             guard let engine, let silencer, let sourceNode else { return nil }
             self.engine = nil
             self.silencer = nil
             self.sourceNode = nil
-            return (engine, silencer, sourceNode)
+            let mic = micNode
+            micNode = nil
+            let installed = micTapInstalled
+            micTapInstalled = false
+            micRing = nil
+            micConverter = nil
+            isMicMuted = false
+            return (engine, silencer, sourceNode, mic, installed)
         }
-        guard let (engine, silencer, source) = teardown else { return }
-        engine.mainMixerNode.removeTap(onBus: 0)
-        engine.stop()
+        guard let teardown else { return }
+        teardown.engine.mainMixerNode.removeTap(onBus: 0)
+        if teardown.micTapInstalled {
+            teardown.engine.inputNode.removeTap(onBus: 0)
+        }
+        teardown.engine.stop()
         deliveryQueue.sync { } // 围栏：串行队列单消费者，sync 返回即在途/排队工作全部完成
+        micDeliveryQueue.sync { } // 围栏：mic 转换段全部落 ring（ring 状态随后清理）
         stateLock.withStateLock {
             gatePTS = .invalid
             sourceConverter = nil
             sourceConverterFormat = nil
         }
-        engine.detach(silencer)
-        engine.detach(source)
+        teardown.engine.detach(teardown.silencer)
+        if let mic = teardown.micNode {
+            teardown.engine.detach(mic)
+        }
+        teardown.engine.detach(teardown.source)
     }
 
     // MARK: - 输入 / 输出装配
@@ -196,9 +279,41 @@ final class SystemAudioMixer {
         }
     }
 
-    /// 登记麦克风输入格式（Task 9 据此接 inputNode tap；Task 8 仅登记）。
-    func setMicrophoneInput(_ format: AVAudioFormat) {
-        stateLock.withStateLock { microphoneFormat = format }
+    /// 登记麦克风输入格式与增益（上层在 start 前从 `engine.inputNode` 硬件格式登记；start 据
+    /// 此装配 inputNode tap → converter → mic ring → micNode → mainMixer bus 0 的第二路）。
+    /// volume 为 0…1 增益，越界值收敛；缺省 1.0。
+    func setMicrophoneInput(_ format: AVAudioFormat, volume: Float = 1.0) {
+        stateLock.withStateLock {
+            microphoneFormat = format
+            micVolume = min(max(volume, 0), 1)
+        }
+    }
+
+    /// 麦克风静音（简报 `setMicMuted`，浮条静音按钮消费）：直接摘除/回装 inputNode tap。
+    /// 摘除与回装时都排空 mic ring——摘除排空在途段与已缓冲内容，回装排空 tap 手术间隙可能
+    /// 迟到的旧段（宁丢不旧）。engine 未运行时仅记录状态（start 据此决定是否装配 tap）。
+    /// 与 `stop()` 并发的窗口内可能对已停机 engine 做节点手术：tap 摘除/回装幂等且 engine
+    /// 随会话丢弃，竞态后果至多为一次无效果手术。
+    func setMicMuted(_ muted: Bool) {
+        let snapshot: (engine: AVAudioEngine, ring: RingBuffer, converter: AVAudioConverter, installed: Bool)? = stateLock.withStateLock {
+            guard muted != isMicMuted else { return nil }
+            isMicMuted = muted
+            guard isRunning, let engine, let ring = micRing, let converter = micConverter else { return nil }
+            return (engine, ring, converter, micTapInstalled)
+        }
+        guard let snapshot else { return }
+        if muted, snapshot.installed {
+            snapshot.engine.inputNode.removeTap(onBus: 0)
+            micDeliveryQueue.sync { snapshot.ring.reset() }
+            stateLock.withStateLock { micTapInstalled = false }
+        } else if !muted, !snapshot.installed {
+            let handler = makeMicTapHandler(ring: snapshot.ring, converter: snapshot.converter)
+            snapshot.engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+                handler(buffer)
+            }
+            micDeliveryQueue.sync { snapshot.ring.reset() }
+            stateLock.withStateLock { micTapInstalled = true }
+        }
     }
 
     /// 设置音画锚点（视频首帧 PTS）。此后输出内容时间裁剪到锚点起；
@@ -209,8 +324,27 @@ final class SystemAudioMixer {
 
     // MARK: - 内部：渲染与打包
 
-    /// sourceNode 渲染回调（engine 实时线程）：从环形缓冲取数，欠载补零（静音）。
-    private func renderFromRing(_ audioBufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int) -> OSStatus {
+    /// mic tap 回调工厂：闭包只捕获不可变量（converter/ring/队列；self 仅为读取 `let`
+    /// masterFormat 的 drainConverter）——渲染线程零锁获取、零跨对象可变状态读取；转换后逐段
+    /// 投递 micDelivery 串行队列，ring 写入（ring 自带锁）在队列侧执行，与系统声路径同构。
+    /// PTS 不经此路径：mic 与系统声在 mainMixer 混合，输出 PTS 由 mainMixer tap 统一赋予。
+    func makeMicTapHandler(ring: RingBuffer, converter: AVAudioConverter) -> (AVAudioPCMBuffer) -> Void {
+        let queue = micDeliveryQueue
+        return { [weak self] buffer in
+            guard let self, buffer.frameLength > 0 else { return }
+            self.drainConverter(converter, from: buffer, startPTS: .invalid) { segment, _ in
+                queue.async { ring.write(from: segment) }
+            }
+        }
+    }
+
+    /// 测试专用围栏：等待 mic 串行队列在途 ring 写入完成（生产路径由 stop()/setMicMuted 围栏）。
+    func flushMicDeliveryForTesting() {
+        micDeliveryQueue.sync { }
+    }
+
+    /// sourceNode 渲染回调（engine 实时线程）：从指定环形缓冲取数，欠载补零（静音）。
+    private func renderFromRing(_ audioBufferList: UnsafeMutablePointer<AudioBufferList>, frameCount: Int, from ring: RingBuffer) -> OSStatus {
         let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
         let filled = ring.readInto(abl: abl, frameCount: frameCount)
         for buffer in abl {
@@ -295,6 +429,14 @@ extension SystemAudioMixer {
         /// 当前缓冲帧数。
         var bufferedCount: Int {
             lock.withStateLock { bufferedFrames }
+        }
+
+        /// 清空缓冲并把写指针归零（静音转换排空用）。内存不清零——写指针归位后旧内容不可达。
+        func reset() {
+            lock.lock()
+            defer { lock.unlock() }
+            writePosition = 0
+            bufferedFrames = 0
         }
 
         /// 写入 AVAudioPCMBuffer（非交错 Float32）；格式声道不匹配时整段丢弃。
