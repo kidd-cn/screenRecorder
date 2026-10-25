@@ -57,4 +57,23 @@ final class SCStreamRecorderPauseTests: XCTestCase {
         recorder.resume()
         XCTAssertFalse(recorder.isPaused)
     }
+
+    /// 修复轮 2：暂停丢弃计数快照在 stop 后仍可读——stop 复位 mediaClock 不得清零
+    /// 诊断读数（T11 成片时长归因在收尾之后读）。internal 快照字段注入模拟真实录制
+    /// 产生的活动计数（生产路径仅 stop/start 失败回滚临界区写入）；重复 stop 亦不清零。
+    func testPausedDropCountersSurviveStop() async {
+        let recorder = makeRecorder()
+        recorder.finalPausedDroppedVideoFrameCount = 3
+        recorder.finalPausedDroppedAudioPacketCount = 5
+        XCTAssertEqual(recorder.pausedDroppedVideoFrameCount, 3)
+        XCTAssertEqual(recorder.pausedDroppedAudioPacketCount, 5)
+
+        await recorder.stop()
+        XCTAssertEqual(recorder.pausedDroppedVideoFrameCount, 3, "stop 后快照读数必须保留")
+        XCTAssertEqual(recorder.pausedDroppedAudioPacketCount, 5, "stop 后快照读数必须保留")
+
+        await recorder.stop()
+        XCTAssertEqual(recorder.pausedDroppedVideoFrameCount, 3, "重复 stop 不得覆盖快照")
+        XCTAssertEqual(recorder.pausedDroppedAudioPacketCount, 5, "重复 stop 不得覆盖快照")
+    }
 }

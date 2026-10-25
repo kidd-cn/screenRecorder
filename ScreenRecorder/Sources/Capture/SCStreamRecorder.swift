@@ -64,6 +64,12 @@ final class SCStreamRecorder: NSObject {
     private var writerArmed = false
     /// 暂停媒体时钟（Task 10）：门控 + 平移 + 每轨单调护栏，所有访问经 stateLock。
     private var mediaClock = PauseMediaClock()
+    /// 暂停丢弃计数的收尾快照（修复轮 2）：stop()/start 失败回滚复位 `mediaClock` 前
+    /// 把活动计数并入（`+=`，复位后的新时钟计数恒 0，重复复位不覆盖），只读属性读
+    /// 「活动 + 快照」保证 stop 后诊断读数仍是终值（T11 成片归因在收尾之后读）。
+    /// internal 供测试注入以无头验证快照存活；生产路径只在上述两个临界区写入。
+    var finalPausedDroppedVideoFrameCount = 0
+    var finalPausedDroppedAudioPacketCount = 0
 
     init(config: RecordingConfiguration) {
         self.config = config
@@ -126,8 +132,10 @@ final class SCStreamRecorder: NSObject {
             // 采集没跑起来：不会有任何帧到达。先撤销已发布的会话引用（修复轮 1 Minor #1：
             // 引用不清会让 pause() 在 start() 失败后被接受，违背「start() 未完成一律 no-op」
             // 契约；同时复位暂停时钟，封住发布→撤销竞态窗口内进入的暂停），再停混音 +
-            // 清理排他占位文件后上抛。
+            // 清理排他占位文件后上抛。计数先并入快照（修复轮 2，与 stop 同一模式）。
             stateLock.withStateLock {
+                finalPausedDroppedVideoFrameCount += mediaClock.pausedDroppedVideoFrameCount
+                finalPausedDroppedAudioPacketCount += mediaClock.pausedDroppedAudioPacketCount
                 writerSession = nil
                 mediaClock = PauseMediaClock()
             }
@@ -185,13 +193,18 @@ final class SCStreamRecorder: NSObject {
     /// 暂停期间丢弃的视频帧数（诊断只读，修复轮 1 Minor #2）：与
     /// `AssetWriterSession.droppedVideoFrameCount`（编码器未就绪丢弃）互斥可区分，
     /// T11 真机验收「成片时长 ≈ 预期」偏差时的归因依据；回跳丢弃与非数值 PTS 不计入。
+    /// 读数 = 活动计数 + 收尾快照（修复轮 2：两者互斥非零，stop 后活动侧恒 0，读数为终值）。
     var pausedDroppedVideoFrameCount: Int {
-        stateLock.withStateLock { mediaClock.pausedDroppedVideoFrameCount }
+        stateLock.withStateLock {
+            mediaClock.pausedDroppedVideoFrameCount + finalPausedDroppedVideoFrameCount
+        }
     }
 
     /// 暂停期间丢弃的音频包数（诊断口径同上）。
     var pausedDroppedAudioPacketCount: Int {
-        stateLock.withStateLock { mediaClock.pausedDroppedAudioPacketCount }
+        stateLock.withStateLock {
+            mediaClock.pausedDroppedAudioPacketCount + finalPausedDroppedAudioPacketCount
+        }
     }
 
     /// 停采集并收尾成片。幂等（重复调用 no-op）；完成后 `finishedFileURL` 反映结果，
@@ -221,6 +234,10 @@ final class SCStreamRecorder: NSObject {
             self.writerSession = nil
             // 暂停态随会话一并终结：此刻起 isPaused 恒 false（pause() 以会话在位为前提，
             // 此前竞态窗口内进入的暂停也一并复位），收尾不受暂停门控影响。
+            // 暂停丢弃计数先并入收尾快照（修复轮 2）：复位不得清零诊断读数，成片归因
+            // 在 stop 之后读。`+=` 对复位后的新时钟恒加 0，重复 stop 不覆盖快照。
+            finalPausedDroppedVideoFrameCount += mediaClock.pausedDroppedVideoFrameCount
+            finalPausedDroppedAudioPacketCount += mediaClock.pausedDroppedAudioPacketCount
             mediaClock = PauseMediaClock()
             return owned
         }
