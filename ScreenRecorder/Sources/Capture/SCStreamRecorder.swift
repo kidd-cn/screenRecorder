@@ -7,7 +7,8 @@ import ScreenCaptureKit
 /// SCStream 采集 → `AssetWriterSession` 落盘的录制会话。
 /// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧 append（Task 15 合成管线接管前直通）。
 /// 音频路径（Task 8，仅 captureSystemAudio 时）：SCStream audio 队列样本 → `SystemAudioMixer`
-/// 混音（engine 渲染 → AAC 轨），混音器启动失败时降级为纯视频轨继续录制。
+/// 混音（engine 渲染只做转换入队 → delivery 串行队列打包交付 → AAC 轨），混音器启动失败时
+/// 降级为纯视频轨继续录制。
 /// 生命周期：`start()`（解析目标 + 建流 + 开采集）→ video 队列首帧装配 writer（视频 + 有则音频
 /// 输入）→ 逐路 append → `stop()`（停流 + 停混音 + 收尾成片）。
 ///
@@ -224,7 +225,7 @@ extension SCStreamRecorder: SCStreamOutput {
         mixer?.enqueueSystemAudio(pcm)
     }
 
-    /// engine 渲染线程回调：混音器输出的 masterFormat CMSampleBuffer → appendAudio。
+    /// delivery 串行队列回调：混音器输出的 masterFormat CMSampleBuffer → appendAudio。
     /// 锚点兜底门控：视频首帧锚定会话时间轴，锚点前（含 gate 生效前已在途的）样本一律丢弃——
     /// 早于锚点 PTS 的样本不被 writer 可靠拒绝（macOS 27 实测被静默钳到成片起点），
     /// 上层必须自行丢弃，否则录制前的系统声音会混进成片。
@@ -238,7 +239,13 @@ extension SCStreamRecorder: SCStreamOutput {
         do {
             try session.appendAudio(sampleBuffer)
         } catch {
-            recordFailure(error)
+            // stop() 先围栏排空混音 delivery 队列再收尾 writer，finish 期间不可能有 append——
+            // 本分支纯防御。仅当 stop 已开始（会话已被收走）才吞 writerNotWriting 一类错误；
+            // 录制中途真正的 writer 故障仍必须 recordFailure → onStreamFailure。
+            let stopHasBegun: Bool = stateLock.withStateLock { writerSession == nil }
+            if !stopHasBegun {
+                recordFailure(error)
+            }
         }
     }
 

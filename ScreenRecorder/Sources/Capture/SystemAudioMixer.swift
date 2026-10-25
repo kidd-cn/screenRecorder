@@ -15,9 +15,10 @@ import Foundation
 /// tap 在 fader 之后——`mainMixer.outputVolume = 0` 会把录制内容一并静音。故在 mainMixer 下游
 /// 插入一个音量 0 的静音 mixer 接通输出硬件：录制链路满幅、外放无声。
 ///
-/// 线程模型：`enqueueSystemAudio` 在 SCStream audio 队列、tap 回调在 engine 渲染线程、
-/// `setGatePTS`/`start`/`stop` 在上层队列——全部经 `stateLock` 串行化（热路径锁内只做快照与
-/// 环形缓冲读写，不做格式转换）。
+/// 线程模型：`enqueueSystemAudio` 在 SCStream audio 队列、tap 回调在 engine 渲染线程——
+/// 实时线程只做格式转换与入队；gate 裁剪、CMSampleBuffer 打包、上层 append 全部在
+/// `deliveryQueue` 串行队列执行（单消费者、样本顺序保持）。`stop()` 先停 engine 再围栏排空
+/// 该队列，保证上层收尾 writer 时无 append 在途或排队。共享状态经 `stateLock` 串行化。
 final class SystemAudioMixer {
     enum SystemAudioMixerError: LocalizedError {
         case cannotCreateConverter(from: AVAudioFormat, to: AVAudioFormat)
@@ -39,15 +40,13 @@ final class SystemAudioMixer {
     /// 环形缓冲容量：1s（帧）。溢出丢最旧——实时录制语义永远保留最新内容。
     private let ring: RingBuffer
     private let stateLock = NSLock()
+    /// 打包与交付专用串行队列：单消费者，保证样本与时间轴顺序；stop() 围栏排空。
+    private let deliveryQueue = DispatchQueue(label: "screenRecorder.SystemAudioMixer.delivery", qos: .userInitiated)
 
     private var isRunning = false
     private var engine: AVAudioEngine?
     private var silencer: AVAudioMixerNode?
     private var sourceNode: AVAudioSourceNode?
-    private var outputHandler: ((CMSampleBuffer) -> Void)?
-    private var outputConverter: AVAudioConverter?
-    /// masterFormat 的格式描述（打包 CMSampleBuffer 用，start 时创建一次）。
-    private var masterFormatDescription: CMFormatDescription?
     /// 音画锚点（视频首帧 PTS；`.invalid` = 未设置，不裁剪）。
     private var gatePTS: CMTime = .invalid
     /// SCStream 音频源格式 → masterFormat 的转换器（格式不变则复用）。
@@ -65,7 +64,7 @@ final class SystemAudioMixer {
     // MARK: - 生命周期
 
     /// 挂接 engine：sourceNode → mainMixer（tap 在此）→ 静音 mixer → 输出硬件，并启动 engine。
-    /// `output` 在 engine 渲染线程回调，交付 masterFormat 的 CMSampleBuffer（host time PTS）。
+    /// `output` 在 delivery 串行队列回调，交付 masterFormat 的 CMSampleBuffer（host time PTS）。
     /// engine 由本类持有并在 `stop()` 中停机；engine.start 失败时回滚全部装配再上抛。
     func start(engine: AVAudioEngine, output: @escaping (CMSampleBuffer) -> Void) throws {
         let running: Bool = stateLock.withStateLock { isRunning }
@@ -101,55 +100,47 @@ final class SystemAudioMixer {
         engine.connect(mainMixer, to: silencer, format: nil)
         engine.connect(silencer, to: engine.outputNode, format: nil)
         silencer.outputVolume = 0
-        mainMixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, when in
-            self?.consumeTapOutput(buffer, when: when)
-        }
         let mixerOutFormat = mainMixer.outputFormat(forBus: 0)
         guard let outputConverter = AVAudioConverter(from: mixerOutFormat, to: masterFormat) else {
-            mainMixer.removeTap(onBus: 0)
             engine.detach(source)
             engine.detach(silencer)
             throw SystemAudioMixerError.cannotCreateConverter(from: mixerOutFormat, to: masterFormat)
         }
-
-        stateLock.withStateLock {
-            self.engine = engine
-            self.silencer = silencer
-            self.sourceNode = source
-            self.masterFormatDescription = desc
-            self.outputConverter = outputConverter
-            self.outputHandler = output
+        // 实时线程闭包只捕获不可变量（converter/desc/handler/队列），零锁获取：
+        // 格式转换后逐段入 delivery 串行队列，gate 裁剪 + 打包 + append 全部离开渲染线程。
+        mainMixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, when in
+            guard let self, when.isHostTimeValid else { return }
+            let startPTS = CMClock.convertSystemUnitsToHostTime(when.hostTime)
+            let deliveryQueue = self.deliveryQueue
+            self.drainConverter(outputConverter, from: buffer, startPTS: startPTS) { segment, segmentPTS in
+                deliveryQueue.async { [weak self] in
+                    self?.deliver(segment, pts: segmentPTS, formatDescription: desc, handler: output)
+                }
+            }
         }
         do {
             try engine.start()
         } catch {
             mainMixer.removeTap(onBus: 0)
-            stateLock.withStateLock {
-                self.engine = nil
-                self.silencer = nil
-                self.sourceNode = nil
-                self.masterFormatDescription = nil
-                self.outputConverter = nil
-                self.outputHandler = nil
-            }
             engine.detach(source)
             engine.detach(silencer)
             throw error
         }
-        stateLock.withStateLock { isRunning = true }
+        stateLock.withStateLock {
+            isRunning = true
+            self.engine = engine
+            self.silencer = silencer
+            self.sourceNode = source
+        }
     }
 
-    /// 停机并回滚 engine 装配（幂等）。engine 随本类释放归上层。
+    /// 停机并回滚 engine 装配（幂等）。先停 engine 终止新入队，再围栏排空 delivery 队列——
+    /// 本方法返回时，已入队/在途的打包与 append 全部完成（上层收尾 writer 前必须先调本方法），
+    /// 最后才清理共享状态并摘除节点。
     func stop() {
         let teardown: (AVAudioEngine, AVAudioMixerNode, AVAudioSourceNode)? = stateLock.withStateLock {
             guard isRunning else { return nil }
             isRunning = false
-            gatePTS = .invalid
-            outputHandler = nil
-            outputConverter = nil
-            masterFormatDescription = nil
-            sourceConverter = nil
-            sourceConverterFormat = nil
             guard let engine, let silencer, let sourceNode else { return nil }
             self.engine = nil
             self.silencer = nil
@@ -159,6 +150,12 @@ final class SystemAudioMixer {
         guard let (engine, silencer, source) = teardown else { return }
         engine.mainMixerNode.removeTap(onBus: 0)
         engine.stop()
+        deliveryQueue.sync { } // 围栏：串行队列单消费者，sync 返回即在途/排队工作全部完成
+        stateLock.withStateLock {
+            gatePTS = .invalid
+            sourceConverter = nil
+            sourceConverterFormat = nil
+        }
         engine.detach(silencer)
         engine.detach(source)
     }
@@ -193,8 +190,8 @@ final class SystemAudioMixer {
         case .direct:
             ring.write(from: pcm)
         case .convert(let converter):
-            drainConverter(converter, from: pcm) { [weak self] converted in
-                self?.ring.write(from: converted)
+            drainConverter(converter, from: pcm, startPTS: .invalid) { converted, _ in
+                self.ring.write(from: converted)
             }
         }
     }
@@ -225,36 +222,28 @@ final class SystemAudioMixer {
         return noErr
     }
 
-    /// mainMixer tap 回调（engine 渲染线程）：转 masterFormat → gate 裁剪 → 打包交付。
-    private func consumeTapOutput(_ buffer: AVAudioPCMBuffer, when: AVAudioTime) {
-        let snapshot: (handler: ((CMSampleBuffer) -> Void)?, converter: AVAudioConverter?, gate: CMTime, desc: CMFormatDescription?) =
-            stateLock.withStateLock { (outputHandler, outputConverter, gatePTS, masterFormatDescription) }
-        guard let handler = snapshot.handler, let converter = snapshot.converter,
-              let desc = snapshot.desc, when.isHostTimeValid else { return }
-        let bufferPTS = CMClock.convertSystemUnitsToHostTime(when.hostTime)
-        drainConverter(converter, from: buffer) { [weak self] converted in
-            guard let self else { return }
-            let sampleRate = self.masterFormat.sampleRate
-            let gate: CMTime = self.stateLock.withStateLock { self.gatePTS }
-            guard let decision = AudioSampleBridge.trimDecision(
-                bufferPTS: bufferPTS,
-                frameCount: Int(converted.frameLength),
-                sampleRate: sampleRate,
-                gate: gate
-            ) else { return }
-            guard let sample = AudioSampleBridge.makeSampleBuffer(
-                pcm: converted,
-                skipFrames: decision.skipFrames,
-                pts: decision.outputPTS,
-                formatDescription: desc
-            ) else { return }
-            handler(sample)
-        }
+    /// delivery 串行队列（单消费者）：gate 裁剪 → CMSampleBuffer 打包 → 交上层 append。
+    /// 锁获取与内存分配全部离开渲染线程；串行执行保证样本与时间轴顺序。
+    private func deliver(_ pcm: AVAudioPCMBuffer, pts: CMTime, formatDescription: CMFormatDescription, handler: @escaping (CMSampleBuffer) -> Void) {
+        let gate: CMTime = stateLock.withStateLock { gatePTS }
+        guard let decision = AudioSampleBridge.trimDecision(
+            bufferPTS: pts,
+            frameCount: Int(pcm.frameLength),
+            sampleRate: masterFormat.sampleRate,
+            gate: gate
+        ) else { return }
+        guard let sample = AudioSampleBridge.makeSampleBuffer(
+            pcm: pcm,
+            skipFrames: decision.skipFrames,
+            pts: decision.outputPTS,
+            formatDescription: formatDescription
+        ) else { return }
+        handler(sample)
     }
 
     /// AVAudioConverter 泵：单输入缓冲反复 convert 直到输入耗尽（转换器内部可能残留
-    /// 重采样缓冲），每段输出回调一次。
-    private func drainConverter(_ converter: AVAudioConverter, from input: AVAudioPCMBuffer, emit: (AVAudioPCMBuffer) -> Void) {
+    /// 重采样缓冲），每段输出回调一次；`startPTS` 非零时逐段推进并交付段起始 PTS。
+    private func drainConverter(_ converter: AVAudioConverter, from input: AVAudioPCMBuffer, startPTS: CMTime, emit: (AVAudioPCMBuffer, CMTime) -> Void) {
         var delivered = false
         let inputBlock: AVAudioConverterInputBlock = { _, status in
             if delivered {
@@ -267,13 +256,15 @@ final class SystemAudioMixer {
         }
         let ratio = masterFormat.sampleRate / input.format.sampleRate
         let capacity = AVAudioFrameCount(Double(input.frameLength) * ratio) + AVAudioFrameCount(masterFormat.sampleRate / 10)
+        var nextPTS = startPTS
         while true {
             guard let out = AVAudioPCMBuffer(pcmFormat: masterFormat, frameCapacity: capacity) else { return }
             var error: NSError?
             let status = converter.convert(to: out, error: &error, withInputFrom: inputBlock)
             guard status != .error, error == nil else { return }
             if out.frameLength > 0 {
-                emit(out)
+                emit(out, nextPTS)
+                nextPTS = CMTimeAdd(nextPTS, CMTime(value: CMTimeValue(Int(out.frameLength)), timescale: CMTimeScale(masterFormat.sampleRate)))
             }
             if status != .haveData { return } // .inputRanDry / .endOfStream：输入耗尽
         }

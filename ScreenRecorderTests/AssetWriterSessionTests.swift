@@ -149,9 +149,10 @@ final class AssetWriterSessionTests: XCTestCase {
     private let audioFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!
 
     /// 构造非交错 PCM 的 CMSampleBuffer（与 SystemAudioMixer 输出口径一致）。
+    /// 装配失败是测试基础设施故障，必须按失败处理（XCTUnwrap），不得表现为 skipped。
     private func makeAudioSample(pcm: AVAudioPCMBuffer, pts: CMTime) throws -> CMSampleBuffer {
         var asbd = pcm.format.streamDescription.pointee
-        var description: CMFormatDescription?
+        var descriptionOut: CMFormatDescription?
         let status = CMAudioFormatDescriptionCreate(
             allocator: kCFAllocatorDefault,
             asbd: &asbd,
@@ -160,16 +161,14 @@ final class AssetWriterSessionTests: XCTestCase {
             magicCookieSize: 0,
             magicCookie: nil,
             extensions: nil,
-            formatDescriptionOut: &description
+            formatDescriptionOut: &descriptionOut
         )
         XCTAssertEqual(status, noErr)
-        guard let description else { throw XCTSkip("CMFormatDescription 创建失败") }
-        guard let sample = AudioSampleBridge.makeSampleBuffer(
-            pcm: pcm, skipFrames: 0, pts: pts, formatDescription: description
-        ) else {
-            throw XCTSkip("CMSampleBuffer 打包失败")
-        }
-        return sample
+        let description = try XCTUnwrap(descriptionOut, "CMFormatDescription 创建失败")
+        return try XCTUnwrap(
+            AudioSampleBridge.makeSampleBuffer(pcm: pcm, skipFrames: 0, pts: pts, formatDescription: description),
+            "CMSampleBuffer 打包失败"
+        )
     }
 
     /// 成片音轨必须是 AAC（MP4 + AAC 是规格硬要求），且音频 PTS 相对视频锚点的位置
