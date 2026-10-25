@@ -8,6 +8,12 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - ScreenRecorder/Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.screenrecorder.app
+        GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: Q9TF3XSQ3N
     info:
       path: ScreenRecorder/Info.plist
       properties:
