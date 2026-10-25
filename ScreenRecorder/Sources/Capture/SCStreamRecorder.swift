@@ -16,6 +16,17 @@ import ScreenCaptureKit
 /// 上报，首次失败生效；上层收到后负责调用 `stop()` 完成安全收尾（本类不自动停流）。
 /// `stop()` 后读 `finishedFileURL`（nil = 无成片）与 `lastError`（首个失败原因）。
 ///
+/// 暂停/恢复（Task 10，浮条 T11 消费）：`pause()` / `resume()` 任意线程可调；暂停中
+/// 视频帧与音频包在各自队列上下文（video 队列 / 混音 delivery 队列）丢弃——不入 writer、
+/// 不补静音；恢复后所有 append 的 PTS 经 `PauseMediaClock`（内含 `PauseTimeTracker`，
+/// 视频与音频共用同一平移量）统一去除暂停段，音画同步不受暂停影响。暂停时点取
+/// `CMClock.hostTimeClock.time`（与帧 PTS 同 mach 时基），不依赖暂停期间有帧到达
+/// （SCStream 静止画面不发帧）。生命周期边界：录制未开始（start() 未完成）或已 stop()
+/// 后调用 pause/resume 一律 no-op（不抛错——上层无需跟踪录制生命周期）；重复
+/// pause/resume 幂等；`stop()` 在暂停态可直接调用，成片按已 append 内容正常收尾
+///（全程暂停零样本时按既有 nothingWritten 语义无成片）；暂停不影响失败通道——
+/// `onStreamFailure` 与 `didStopWithError` 照常触发（T18 依赖：失败必须仍能触发 stop）。
+///
 /// 单次生命周期实例：一个 recorder 只承载一次录制，不支持 stop 后复用。
 final class SCStreamRecorder: NSObject {
     enum SCStreamRecorderError: LocalizedError {
@@ -51,6 +62,8 @@ final class SCStreamRecorder: NSObject {
     private var mixer: SystemAudioMixer?
     /// 仅 videoQueue 触碰：writer 输入是否已在首帧装配完毕。
     private var writerArmed = false
+    /// 暂停媒体时钟（Task 10）：门控 + 平移 + 每轨单调护栏，所有访问经 stateLock。
+    private var mediaClock = PauseMediaClock()
 
     init(config: RecordingConfiguration) {
         self.config = config
@@ -136,6 +149,32 @@ final class SCStreamRecorder: NSObject {
         mixer?.setMicMuted(muted)
     }
 
+    // MARK: - 暂停 / 恢复（Task 10）
+
+    /// 是否暂停中（任意线程可读；T11 浮条按钮态）。
+    var isPaused: Bool {
+        stateLock.withStateLock { mediaClock.isPaused }
+    }
+
+    /// 暂停录制（Task 10，T11 浮条消费）：此后视频帧与音频包在各自队列上下文丢弃
+    /// （不入 writer、不补静音），engine 与 SCStream 保持运行（恢复零重启开销）。
+    /// 录制未开始或已 stop() 后为 no-op（不抛错，见类注释生命周期边界）；幂等。
+    func pause() {
+        stateLock.withStateLock {
+            guard writerSession != nil, !mediaClock.isPaused else { return }
+            mediaClock.pause(at: CMClock.hostTimeClock.time)
+        }
+    }
+
+    /// 恢复录制：此后 append 的 PTS 统一平移去除暂停段（`PauseTimeTracker`），
+    /// 成片时长不含暂停间隙。未暂停时 no-op（幂等）。
+    func resume() {
+        stateLock.withStateLock {
+            guard mediaClock.isPaused else { return }
+            mediaClock.resume(at: CMClock.hostTimeClock.time)
+        }
+    }
+
     /// 停采集并收尾成片。幂等（重复调用 no-op）；完成后 `finishedFileURL` 反映结果，
     /// 失败原因记入 `lastError`（不触发 `onStreamFailure`——主动收尾时调用方就在现场）。
     func stop() async {
@@ -161,6 +200,9 @@ final class SCStreamRecorder: NSObject {
         let session: AssetWriterSession? = stateLock.withStateLock {
             let owned = self.writerSession
             self.writerSession = nil
+            // 暂停态随会话一并终结：此刻起 isPaused 恒 false（pause() 以会话在位为前提，
+            // 此前竞态窗口内进入的暂停也一并复位），收尾不受暂停门控影响。
+            mediaClock = PauseMediaClock()
             return owned
         }
         guard let session else { return } // start() 从未成功：无会话可收尾
@@ -248,19 +290,24 @@ extension SCStreamRecorder: SCStreamOutput {
         mixer?.enqueueSystemAudio(pcm)
     }
 
-    /// delivery 串行队列回调：混音器输出的 masterFormat CMSampleBuffer → appendAudio。
-    /// 锚点兜底门控：视频首帧锚定会话时间轴，锚点前（含 gate 生效前已在途的）样本一律丢弃——
-    /// 早于锚点 PTS 的样本不被 writer 可靠拒绝（macOS 27 实测被静默钳到成片起点），
-    /// 上层必须自行丢弃，否则录制前的系统声音会混进成片。
+    /// delivery 串行队列回调：混音器输出的 masterFormat CMSampleBuffer → 平移 → appendAudio。
+    /// 暂停丢弃判定在本队列上下文执行（Task 10，非渲染线程）：暂停中整包丢弃，恢复后
+    /// 平移换时再落盘。锚点兜底门控用文件基（平移后）PTS 比较——早于锚点的样本不被
+    /// writer 可靠拒绝（macOS 27 实测被静默钳到成片起点），有暂停时原始 PTS 与成片时间轴
+    /// 相差累计暂停量，直接用原始 PTS 校验会漏放录制前内容；时钟层的音频轨单调护栏则
+    /// 挡住暂停边界在途的回跳包（两者互补，先护栏后锚点兜底）。
     private func handleMixedAudio(_ sampleBuffer: CMSampleBuffer) {
+        let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        guard let shiftedPTS = stateLock.withStateLock({ mediaClock.shiftedPTS(rawPTS, for: .audio) }) else { return }
         let session: AssetWriterSession? = stateLock.withStateLock { writerSession }
         guard let session else { return } // stop() 已收走会话：丢弃尾部样本
         let anchor = session.isReadyForVideoMediaTime
         guard anchor.isValid, anchor.isNumeric else { return } // 视频未锚定：录制尚未开始，丢弃
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        guard pts.isNumeric, CMTimeCompare(pts, anchor) >= 0 else { return }
+        guard CMTimeCompare(shiftedPTS, anchor) >= 0 else { return } // 文件基：不得早于锚点
+        // 平移落盘：换时浅拷贝（数据与时长保真，仅 PTS 置为平移值）；打包失败丢包
+        guard let retimed = AudioSampleBridge.sampleBuffer(copying: sampleBuffer, presentationTimeStamp: shiftedPTS) else { return }
         do {
-            try session.appendAudio(sampleBuffer)
+            try session.appendAudio(retimed)
         } catch {
             // stop() 先围栏排空混音 delivery 队列再收尾 writer，finish 期间不可能有 append——
             // 本分支纯防御。仅当 stop 已开始（会话已被收走）才吞 writerNotWriting 一类错误；
@@ -274,12 +321,17 @@ extension SCStreamRecorder: SCStreamOutput {
 
     /// video 队列串行执行：首帧装配 writer（addVideoInput + 有混音器则 addAudioInput +
     /// startWriting，需首帧格式描述），之后逐帧直 append（Task 15 合成管线接管前的直通路径）；
-    /// 首帧 append 确立锚点后，把锚点交给混音器做音频裁剪。
+    /// 首帧 append 确立锚点后，把首帧原始采集 PTS 交给混音器做音频初筛。
+    /// 暂停丢弃判定在本队列上下文执行（Task 10，非渲染线程）：暂停中的帧不入 writer、
+    /// 不装配也不平移——首帧装配顺延到恢复后的首个内容帧，成片锚点从真实内容起算。
     private func handleVideoSample(_ sampleBuffer: CMSampleBuffer) {
         guard CMSampleBufferDataIsReady(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let session: AssetWriterSession? = stateLock.withStateLock { writerSession }
         guard let session else { return } // stop() 已收走会话：丢弃尾部帧
+        let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        // 暂停门控 + 平移 + 视频轨单调护栏（clock 决策 nil = 丢弃，含暂停中的全部帧）
+        guard let shiftedPTS = stateLock.withStateLock({ mediaClock.shiftedPTS(rawPTS, for: .video) }) else { return }
         do {
             let didArm = !writerArmed
             if didArm {
@@ -292,12 +344,13 @@ extension SCStreamRecorder: SCStreamOutput {
                 session.startWriting()
                 writerArmed = true
             }
-            try session.appendVideo(pixelBuffer, at: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            try session.appendVideo(pixelBuffer, at: shiftedPTS)
             if didArm {
-                // 锚点已由首帧 append 确立（appendVideo 内部先 startSession 再判定就绪），
-                // 此刻才能取到有效锚点交给混音器做帧级裁剪。
+                // gate 用首帧原始采集 PTS（host 时基，与混音器输出 PTS 同基）：混音侧初筛
+                // 「录制前的系统声」；文件基（平移后）的锚点兜底由 handleMixedAudio 负责
+                //（有暂停时两者相差累计暂停量，gate 只做初筛不承担最终裁决）。
                 let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
-                mixer?.setGatePTS(session.isReadyForVideoMediaTime)
+                mixer?.setGatePTS(rawPTS)
             }
         } catch {
             recordFailure(error)
