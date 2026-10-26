@@ -79,9 +79,10 @@ final class CountdownOverlayController {
     ///   - controller: 状态源（`$state` 订阅）。
     ///   - onCancelAction: ESC/点击的取消出口（装配层接 `cancelAndDiscard()`；覆盖层不碰状态）。
     ///   - windowFactory: 测试缝——无头测试注入不真正上屏的记录窗口。
+    ///     （`@MainActor` 标注：控制器全主 actor，工厂闭包同域，免 MainActor 隔离丢失转换告警。）
     init(controller: CaptureController,
          onCancelAction: @escaping () -> Void,
-         windowFactory: @escaping () -> NSWindow = CountdownOverlayController.makeDefaultWindow) {
+         windowFactory: @MainActor @escaping () -> NSWindow = CountdownOverlayController.makeDefaultWindow) {
         self.onCancelAction = onCancelAction
         self.windowFactory = windowFactory
         // @Published state 在主线程发布；Task 主 actor 跳转保序，显隐操作全部回到主 actor。
