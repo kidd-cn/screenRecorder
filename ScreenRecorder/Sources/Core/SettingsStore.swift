@@ -71,7 +71,10 @@ final class SettingsStore: ObservableObject {
 
     init(userDefaults: UserDefaults = .standard) {
         self.defaults = userDefaults
-        self.fps = userDefaults.object(forKey: Self.fpsKey) as? Int ?? 30
+        // 审查修复轮 1：defaults 外写野值（如 fps=24 / countdown=7）加载时钳回合法档位——
+        // 偏好设置 Picker 恒有匹配 tag，钳后值驱动录制配置（init 内赋值不触发 didSet，
+        // 落库的野值原样保留、不回写）。
+        self.fps = Self.normalizedFps(userDefaults.object(forKey: Self.fpsKey) as? Int)
         self.videoCodec = VideoCodec(rawValue: userDefaults.string(forKey: Self.videoCodecKey) ?? "") ?? .h264
         self.captureSystemAudio = userDefaults.object(forKey: Self.captureSystemAudioKey) as? Bool ?? true
         self.captureMicrophone = userDefaults.object(forKey: Self.captureMicrophoneKey) as? Bool ?? true
@@ -82,7 +85,7 @@ final class SettingsStore: ObservableObject {
             self.outputDirectory = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("ScreenRecorder", isDirectory: true)
         }
-        self.countdownSeconds = userDefaults.object(forKey: Self.countdownSecondsKey) as? Int ?? 5
+        self.countdownSeconds = Self.normalizedCountdown(userDefaults.object(forKey: Self.countdownSecondsKey) as? Int)
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false
         // T16 裁定：点击高亮默认关（opt-in）；早期脚手架曾以 true 落库，随本任务翻转为 false
         //（真源仍是 UserDefaults：外部 defaults write com.screenrecorder.app clickHighlightEnabled -bool true 开启）。
@@ -106,4 +109,16 @@ final class SettingsStore: ObservableObject {
     private static let pipEnabledKey = "pipEnabled"
     private static let clickHighlightEnabledKey = "clickHighlightEnabled"
     private static let lastCaptureModeKey = "lastCaptureMode"
+
+    /// 合法帧率档位 30/60；越界/缺失回退 30（审查修复轮 1）。
+    private static func normalizedFps(_ raw: Int?) -> Int {
+        guard let raw, raw == 30 || raw == 60 else { return 30 }
+        return raw
+    }
+
+    /// 合法倒计时档位 0/3/5/10；越界/缺失回退 5（审查修复轮 1）。
+    private static func normalizedCountdown(_ raw: Int?) -> Int {
+        guard let raw, [0, 3, 5, 10].contains(raw) else { return 5 }
+        return raw
+    }
 }

@@ -76,6 +76,29 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.lastCaptureMode, .display(CGMainDisplayID()))
     }
 
+    /// 审查修复轮 1：defaults 外写野值（fps=24 / countdown=7）加载时钳回合法档位（30/5）——
+    /// 偏好设置 Picker 恒有匹配 tag，钳后值驱动录制配置。
+    func testOutOfRangePersistedFpsAndCountdownAreClampedToValidOptions() {
+        defaults.set(24, forKey: "fps")
+        defaults.set(7, forKey: "countdownSeconds")
+
+        let store = SettingsStore(userDefaults: defaults)
+
+        XCTAssertEqual(store.fps, 30)
+        XCTAssertEqual(store.countdownSeconds, 5)
+    }
+
+    /// 审查修复轮 1：合法档位（含边界 60 / 0）不被钳制，原样通过。
+    func testValidFpsAndCountdownValuesAreNotClamped() {
+        defaults.set(60, forKey: "fps")
+        defaults.set(0, forKey: "countdownSeconds")
+
+        let store = SettingsStore(userDefaults: defaults)
+
+        XCTAssertEqual(store.fps, 60)
+        XCTAssertEqual(store.countdownSeconds, 0)
+    }
+
     private var defaultOutputDirectory: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScreenRecorder", isDirectory: true)

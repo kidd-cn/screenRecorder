@@ -119,6 +119,7 @@ final class AppAssembly: ObservableObject {
         case .recording, .paused:
             controller.stop()
         case .idle, .countdown:
+            // 倒计时态：controller.start 自守卫为定义好的 no-op——此处不取消/不重启倒计时（取消走覆盖层 ESC/点击）
             startRecording(mode: settings.lastCaptureMode)
         case .finishing:
             break
