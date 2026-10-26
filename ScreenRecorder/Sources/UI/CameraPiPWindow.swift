@@ -65,8 +65,8 @@ final class CameraPiPWindowController {
     /// - Parameters:
     ///   - camera: 摄像头控制器（跨场录制复用单实例）。
     ///   - windowFactory: 测试缝——无头测试注入可构造的浮窗（同 RegionSelector/Countdown 模式）。
-    ///   - startCamera/stopCamera: 测试缝——生产默认切后台队列调 camera.start()/stop()
-    ///     （`startRunning` 阻塞，不得占主线程）。
+    ///   - startCamera/stopCamera: 测试缝——生产默认：start 切后台队列（`startRunning` 阻塞，
+    ///     不得占主线程）、stop 主线程直接提交（控制器内部异步化，提交保序，见 stopAsynchronously）。
     init(camera: CameraPiPController = CameraPiPController(),
          windowFactory: @MainActor @escaping () -> CameraPiPWindow = { CameraPiPWindow.makeDefault() },
          startCamera: ((CameraPiPController) throws -> Void)? = nil,
@@ -74,7 +74,7 @@ final class CameraPiPWindowController {
         self.camera = camera
         self.windowFactory = windowFactory
         self.startCamera = startCamera ?? { try CameraPiPWindowController.startOnBackground($0) }
-        self.stopCamera = stopCamera ?? { CameraPiPWindowController.stopOnBackground($0) }
+        self.stopCamera = stopCamera ?? { CameraPiPWindowController.stopAsynchronously($0) }
     }
 
     /// 录制开始（coordinator.begin 调用）：启动摄像头 + 显示浮窗 + 发布拖动锚点。
@@ -158,13 +158,17 @@ final class CameraPiPWindowController {
             cgDisplayOrigin: screen.map { RegionSelector.cgDisplayOrigin(of: $0) } ?? .zero)
     }
 
-    /// 摄像头启停在后台队列（`startRunning`/`stopRunning` 阻塞式，不得占主线程）。
+    /// 摄像头启停路径：start 的 `startRunning` 阻塞式（~百毫秒），切后台队列 sync，主线程
+    /// 不阻塞；stop 在控制器内部已收敛为「向 lifecycle 串行队列异步提交」（非阻塞），这里在
+    /// 主线程直接调用——提交序即主线程程序序，与后续 begin 的 start 构成 FIFO happens-before
+    /// （修复轮 Important #1 的形式化：旧 stop 的执行必在新 start 之前；若把提交也丢上并发
+    /// 队列，到达序失守，修复形同虚设）。
     private static func startOnBackground(_ camera: CameraPiPController) throws {
         try DispatchQueue.global(qos: .userInitiated).sync { try camera.start() }
     }
 
-    private static func stopOnBackground(_ camera: CameraPiPController) {
-        DispatchQueue.global(qos: .userInitiated).async { camera.stop() }
+    private static func stopAsynchronously(_ camera: CameraPiPController) {
+        camera.stop() // 仅向 lifecycle 串行队列提交（非阻塞）；主线程提交保序
     }
 
     // MARK: 无头测试缝

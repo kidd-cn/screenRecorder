@@ -354,4 +354,21 @@ final class PiPCompositorTests: XCTestCase {
             XCTAssertEqual(CVPixelBufferGetWidth(output), 320)
         }
     }
+
+    /// 画布尺寸必须取 screenFrame 实测值（init pixelSize 只是池种子提示）——尺寸失配时
+    /// 不得把实测坐标内的 PiP 误判为越界直通、也不得输出错误尺寸（修复轮 Minor #2）。
+    func testCompositeUsesMeasuredScreenBufferSizeNotInitHint() throws {
+        let compositor = PiPCompositor(pixelSize: CGSize(width: 100, height: 100)) // 刻意与实缓冲不符
+        let screen = try XCTUnwrap(makeColorBuffer(width: 240, height: 180, color: screenColor))
+        let pip = try XCTUnwrap(makeColorBuffer(width: 80, height: 60, color: pipColor))
+        let frame = PiPFrame(rectInCapturePixels: CGRect(x: 100, y: 120, width: 80, height: 50)) // 仅在实测 240×180 内
+
+        let output = compositor.composite(screenFrame: screen, pip: pip, pipFrame: frame, at: .zero, into: softwareContext)
+
+        XCTAssertFalse(output === screen, "实测坐标内的 PiP 不得因 init 尺寸假设被误判越界而直通")
+        XCTAssertEqual(CVPixelBufferGetWidth(output), 240, "输出画布必须与 screenFrame 实测同宽")
+        XCTAssertEqual(CVPixelBufferGetHeight(output), 180, "输出画布必须与 screenFrame 实测同高")
+        assertColor(samplePixel(output, x: 130, y: 140), equals: pipColor, "PiP rect（实测系）中心应为摄像头内容")
+        assertColor(samplePixel(output, x: 30, y: 170), equals: screenColor, "超出 init 假设的区域应保留屏幕内容")
+    }
 }

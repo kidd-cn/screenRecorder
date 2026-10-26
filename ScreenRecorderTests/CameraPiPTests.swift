@@ -68,6 +68,69 @@ final class CameraPiPControllerTests: XCTestCase {
         XCTAssertTrue(controller.latestPixelBuffer === second, "新帧到达必须覆盖旧帧")
     }
 
+    /// 生命周期串行化契约（修复轮 Important #1）：stop() 提交后（清理在控制器专用串行
+    /// lifecycle 队列完成），随后 start() 返回时该清理必已完成——跨场「先收上一场、再开
+    /// 下一场」的 happens-before 由控制器自建，不依赖调用方排队。
+    func testStartObservesTeardownOfPreviouslySubmittedStop() throws {
+        let controller = CameraPiPController()
+        controller.authorizationStatus = { _ in .authorized }
+        let frame = try XCTUnwrap(makeColorBuffer(width: 8, height: 8, blue: 1, green: 2, red: 3, alpha: 4))
+        controller.recordFrameIfNeeded(try XCTUnwrap(makeSampleBuffer(frame)))
+        XCTAssertNotNil(controller.latestPixelBuffer)
+
+        var observedFrameAtAssembly: CVPixelBuffer?
+        controller.frontCameraProvider = {
+            observedFrameAtAssembly = controller.latestPixelBuffer
+            return nil
+        }
+        controller.stop() // 提交清理（lifecycle 队列异步完成）
+        XCTAssertThrowsError(try controller.start(), "无前置摄像头应抛 cameraNotFound")
+        XCTAssertNil(observedFrameAtAssembly, "start 的装配阶段必须观察到 stop 已完成的清理（串行 FIFO）")
+        XCTAssertNil(controller.latestPixelBuffer, "start 返回后，此前提交的 stop 清理必已完成")
+    }
+
+    /// 跨场启停按程序序提交的串行化压测（修复轮 Important #1）：生产中 end 的 stop 与下一场
+    /// begin 的 start 由主线程按程序序提交（stop 提交即返回、start 同步等待），执行收敛在
+    /// lifecycle 串行队列——每轮 start 的装配阶段观察到的必须是上一 stop 清理后的状态。
+    /// 注：lifecycle 队列保证的是「同线程提交序 → 执行序」；跨线程提交的到达序不在保证范围
+    /// （生产不存在跨线程提交：装配层 stop 已改为主线程直接提交）。
+    func testStopStartCyclesSubmittedInProgramOrderStaySerialized() throws {
+        let controller = CameraPiPController()
+        controller.authorizationStatus = { _ in .authorized }
+
+        var violations = 0
+        let violationsLock = NSLock()
+        controller.frontCameraProvider = {
+            if controller.latestPixelBuffer != nil {
+                violationsLock.lock()
+                violations += 1
+                violationsLock.unlock()
+            }
+            return nil
+        }
+
+        let frame = try XCTUnwrap(makeColorBuffer(width: 8, height: 8, blue: 9, green: 0, red: 0, alpha: 255))
+        let sample = try XCTUnwrap(makeSampleBuffer(frame))
+        let submitter = DispatchQueue(label: "pip.hammer.submitter") // 模拟主线程程序序提交
+        let roundDone = DispatchGroup()
+        for _ in 0..<40 {
+            controller.recordFrameIfNeeded(sample) // 交付最新帧（上一场完全收场后、本场 stop 前）
+            roundDone.enter()
+            submitter.async {
+                controller.stop() // 提交即返回（非阻塞），执行在 lifecycle 队列排队
+                _ = try? controller.start() // 同步等待：串行等在此前提交的 stop 之后
+                if controller.latestPixelBuffer != nil {
+                    violationsLock.lock()
+                    violations += 1
+                    violationsLock.unlock()
+                }
+                roundDone.leave()
+            }
+            roundDone.wait() // 与生产时序一致：上一场完全收场后才开始下一场的帧交付
+        }
+        XCTAssertEqual(violations, 0, "程序序提交的 stop/start 在 lifecycle 队列上串行：start 的装配必须观察到 stop 已完成")
+    }
+
     /// 并发冒烟：采集队列连写 + 任意队列连读——读数恒为 nil 或已交付的帧之一，不崩。
     func testConcurrentFrameAccessStaysConsistent() throws {
         let controller = CameraPiPController()
@@ -224,6 +287,36 @@ final class CameraPiPWindowControllerTests: XCTestCase {
     func testPixelBufferProviderPassesThroughToCamera() {
         let controller = makeController()
         XCTAssertNil(controller.latestPixelBuffer())
+    }
+}
+
+// MARK: - PiPAssemblyPlan（半装配残留的装配决策，修复轮 Minor #1）
+
+final class PiPAssemblyPlanTests: XCTestCase {
+    /// 半装配残留（上一场 canAddOutput 失败：有输入/无输出）→ 只补输出，不得整块跳过
+    /// （旧实现仅看 inputs.isEmpty，会永久缺失输出——PiP 静默消失）。
+    func testPlanAddsOutputWhenOnlyInputPresent() {
+        let plan = CameraPiPController.assemblyPlan(inputs: 1, outputs: 0)
+        XCTAssertFalse(plan.input, "输入已在位，不得重复装配")
+        XCTAssertTrue(plan.output, "有输入无输出的残留必须补装输出（否则下一场 PiP 静默消失）")
+    }
+
+    func testPlanAssemblesBothWhenSessionEmpty() {
+        let plan = CameraPiPController.assemblyPlan(inputs: 0, outputs: 0)
+        XCTAssertTrue(plan.input)
+        XCTAssertTrue(plan.output)
+    }
+
+    func testPlanSkipsBothWhenFullyAssembled() {
+        let plan = CameraPiPController.assemblyPlan(inputs: 1, outputs: 1)
+        XCTAssertFalse(plan.input)
+        XCTAssertFalse(plan.output, "完整装配（跨场复用）不得重复添加")
+    }
+
+    func testPlanAddsInputWhenOnlyOutputPresent() {
+        let plan = CameraPiPController.assemblyPlan(inputs: 0, outputs: 1)
+        XCTAssertTrue(plan.input)
+        XCTAssertFalse(plan.output)
     }
 }
 

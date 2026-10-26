@@ -85,7 +85,10 @@ struct PiPCaptureGeometry {
 /// 逐帧合成器（T15）：屏幕帧为底，PiP 摄像头帧按 `PiPFrame` 贴入捕获像素空间，CI 连续
 /// 圆角 mask。热路径纪律：
 /// - `CIContext` 单实例复用（`useSoftwareRenderer: false` 走 GPU，简报钉死）；
-/// - 输出缓冲取自 `CVPixelBufferPool`（避免逐帧 ~24MB 级大分配；池耗尽兜底直建）；
+/// - 输出缓冲取自 `CVPixelBufferPool`（避免逐帧 ~24MB 级大分配；池按 screenFrame 实测尺寸
+///   建立与重建，耗尽兜底直建）；
+/// - 画布尺寸以逐帧实测的 `screenFrame` 尺寸为准（修复轮 Minor #2：`init(pixelSize:)` 的
+///   尺寸只是提示，消除「缓冲实际尺寸 == init 假设」前提）；
 /// - 无 PiP（pip / pipFrame 为 nil）或完全不相交时**零渲染直返原 buffer**；
 /// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append，本参数为 Task 16 点击高亮的
 ///   时间轴预留）；只在 PiP 或点击高亮开启时被调用（调用方门控）。
@@ -94,9 +97,13 @@ final class PiPCompositor {
     /// 单实例复用的渲染上下文（简报钉死：useSoftwareRenderer: false）。
     let context = CIContext(options: [.useSoftwareRenderer: false])
 
+    /// 简报签名保留的期望画布尺寸（提示值）；实际画布一律以逐帧实测的 screenFrame 尺寸为准。
     private let pixelSize: CGSize
-    /// 输出缓冲池（32BGRA @ pixelSize；init 期创建失败则退化为逐帧直建，宁分配不丢帧）。
+    /// 输出缓冲池（32BGRA @ 首帧实测尺寸，尺寸变化时按实测重建；创建失败退化为逐帧直建，
+    /// 宁分配不丢帧）。只在 video 队列访问，无需加锁。
     private var bufferPool: CVPixelBufferPool?
+    /// 当前池对应的实测尺寸（nil = 池未建/已弃用——错误尺寸的池化缓冲不得使用）。
+    private var poolSize: CGSize?
     /// 圆角 mask 缓存：键为（宽, 高, 半径）——浮窗尺寸录制中恒定，实际 ≤ 1 项；封顶防御。
     private var maskCache: [MaskCacheKey: CIImage] = [:]
 
@@ -106,18 +113,10 @@ final class PiPCompositor {
         let radius: CGFloat
     }
 
+    /// - Parameter pixelSize: 期望输出尺寸（提示值，简报签名逐字）；实际画布以逐帧实测的
+    ///   screenFrame 尺寸为准，缓冲池延迟到首帧按实测尺寸建立。
     init(pixelSize: CGSize) {
         self.pixelSize = pixelSize
-        let attributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: Int(pixelSize.width),
-            kCVPixelBufferHeightKey as String: Int(pixelSize.height),
-        ]
-        var pool: CVPixelBufferPool?
-        if CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool) != kCVReturnSuccess {
-            pool = nil // 池不可用不致命：dequeueBuffer 兜底直建
-        }
-        bufferPool = pool
     }
 
     /// 逐帧合成（简报 Produces 签名逐字）。screen 为底；pip/pipFrame 任一缺省直返 screen。
@@ -128,21 +127,26 @@ final class PiPCompositor {
                    at pts: CMTime,
                    into context: CIContext) -> CVPixelBuffer {
         guard let pip, let pipFrame else { return screenFrame } // 无 PiP：零开销直返原 buffer
+        // 画布尺寸以 screenFrame 实测为准（修复轮 Minor #2）：与 init pixelSize 失配时按
+        // 实测求交、换算与出图——不得误判越界直通，也不得输出错误尺寸。
+        let bounds = CGRect(
+            x: 0, y: 0,
+            width: CVPixelBufferGetWidth(screenFrame),
+            height: CVPixelBufferGetHeight(screenFrame))
         let targetRect = pipFrame.rectInCapturePixels
-        let bounds = CGRect(origin: .zero, size: pixelSize)
         guard !targetRect.isEmpty, bounds.intersection(targetRect) != .null else { return screenFrame }
         let pipImage = CIImage(cvPixelBuffer: pip)
         guard pipImage.extent.width > 0, pipImage.extent.height > 0, targetRect.width > 0 else {
             return screenFrame
         }
-        guard let output = dequeueOutputBuffer() else { return screenFrame } // 缓冲不可得：丢 PiP 不丢帧
+        guard let output = dequeueOutputBuffer(size: bounds.size) else { return screenFrame } // 缓冲不可得：丢 PiP 不丢帧
 
         // 摄像头帧等比缩放到目标 rect（源为 .vga640x480，窗口同 4:3，等比即完整覆盖）
         let scale = targetRect.width / pipImage.extent.width
         var placedPip = pipImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         placedPip = applyRoundedCornerMask(to: placedPip, radius: pipFrame.cornerRadius)
-        // CI 坐标系 y 向上；目标 rect 是缓冲区坐标（左上原点）。换算平移量：CI y = 缓冲高 - rect 底。
-        let ciOrigin = CGPoint(x: targetRect.minX, y: CGFloat(pixelSize.height) - targetRect.maxY)
+        // CI 坐标系 y 向上；目标 rect 是缓冲区坐标（左上原点）。换算平移量：CI y = 画布高 - rect 底。
+        let ciOrigin = CGPoint(x: targetRect.minX, y: bounds.height - targetRect.maxY)
         placedPip = placedPip.transformed(by: CGAffineTransform(translationX: ciOrigin.x, y: ciOrigin.y))
 
         // sourceOver：PiP 在上（self=placedPip），屏幕帧为底。屏幕帧全不透明，参数顺序
@@ -190,8 +194,28 @@ final class PiPCompositor {
         return context?.makeImage()
     }
 
-    /// 从池取输出缓冲；池不可用/耗尽时直建兜底（罕见路径，宁分配不丢帧）。
-    private func dequeueOutputBuffer() -> CVPixelBuffer? {
+    /// 从池取输出缓冲（按 screenFrame 实测尺寸建池，尺寸变化时重建）；池不可用/耗尽时直建
+    /// 兜底（罕见路径，宁分配不丢帧）。重建失败即弃池——错误尺寸的池化缓冲不得使用。
+    private func dequeueOutputBuffer(size: CGSize) -> CVPixelBuffer? {
+        let width = Int(size.width)
+        let height = Int(size.height)
+        guard width > 0, height > 0 else { return nil }
+        if poolSize != size {
+            let attributes: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height,
+            ]
+            var pool: CVPixelBufferPool?
+            if CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attributes as CFDictionary, &pool) == kCVReturnSuccess,
+               let pool {
+                bufferPool = pool
+                poolSize = size
+            } else {
+                bufferPool = nil
+                poolSize = nil
+            }
+        }
         if let bufferPool {
             var pooled: CVPixelBuffer?
             if CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, bufferPool, &pooled) == kCVReturnSuccess,
@@ -200,14 +224,9 @@ final class PiPCompositor {
             }
         }
         var buffer: CVPixelBuffer?
-        let attributes: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferWidthKey as String: Int(pixelSize.width),
-            kCVPixelBufferHeightKey as String: Int(pixelSize.height),
-        ]
         guard CVPixelBufferCreate(
-            kCFAllocatorDefault, Int(pixelSize.width), Int(pixelSize.height),
-            kCVPixelFormatType_32BGRA, attributes as CFDictionary, &buffer
+            kCFAllocatorDefault, width, height,
+            kCVPixelFormatType_32BGRA, nil, &buffer
         ) == kCVReturnSuccess else { return nil }
         return buffer
     }
