@@ -1,8 +1,9 @@
 import Foundation
 
 /// 文件列表中的一条录像元数据。
-/// Equatable 为合成实现（全 Equatable 成员），供测试与 UI 比对。
-struct RecordingFileMetadata: Identifiable, Equatable {
+/// Equatable/Hashable 为合成实现（全可哈希成员）：供测试、UI 比对与 `Table` 行选中集
+///（`contextMenu(forSelectionType:)` 的 selection 元素要求 Hashable）。
+struct RecordingFileMetadata: Identifiable, Equatable, Hashable {
     /// 以文件 URL 作为稳定标识。
     let id: URL
     let url: URL

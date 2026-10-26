@@ -566,4 +566,77 @@ final class CaptureControllerTests: XCTestCase {
         await waitForState(.idle, of: controller)
         XCTAssertEqual(session.finishCount, 1)
     }
+
+    // MARK: - T18 源丢失监视器（录制期监视 / 收尾摘除 / displayID 匹配语义 / 源丢失自动保存）
+
+    func testSourceLossMonitorLifecycleTiedToRecording() async {
+        let controller = makeController(countdownSeconds: 0)
+        let monitor = SourceLossMonitor(onSourceLost: {})
+        controller.sourceLossMonitor = monitor
+
+        await controller.start(mode: .display(1), config: makeConfig())
+        XCTAssertTrue(monitor.isActive, "录制进入生命周期钩子应启动源丢失监视器")
+        XCTAssertEqual(monitor.monitoredDisplayID, 1, "display 模式：监视被采集的显示器（裁定 2）")
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+        XCTAssertFalse(monitor.isActive, "收尾生命周期钩子应停止源丢失监视器")
+    }
+
+    func testSourceLossMonitorDisplayIDMappingPerMode() async {
+        let controller = makeController(countdownSeconds: 0)
+        let monitor = SourceLossMonitor(onSourceLost: {})
+        controller.sourceLossMonitor = monitor
+
+        await controller.start(mode: .region(rect: CGRect(x: 0, y: 0, width: 10, height: 10), displayID: 3), config: makeConfig())
+        XCTAssertEqual(monitor.monitoredDisplayID, 3, "region 模式：监视所在显示器")
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+
+        await controller.start(mode: .window(99), config: makeConfig())
+        XCTAssertNil(monitor.monitoredDisplayID, "window 模式：无定显示器 → 采集全台语义（任一移除触发）")
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+    }
+
+    func testDisplayLossDuringRecordingAutoSavesAndNotifies() async throws {
+        let controller = makeController(countdownSeconds: 0)
+        let url = tempDirectory.appendingPathComponent("sourceloss.mp4")
+        try Data("x".utf8).write(to: url)
+        session.finishedURL = url
+        // 装配层接线复刻：onSourceLost → handleSessionFailure（主 actor 跳转同 AppAssembly）
+        let monitor = SourceLossMonitor(onSourceLost: { [weak controller] in
+            Task { @MainActor in controller?.handleSessionFailure(SourceLossError(removedDisplayID: 1)) }
+        })
+        controller.sourceLossMonitor = monitor
+        await controller.start(mode: .display(1), config: makeConfig())
+
+        monitor.simulateDisplayRemoved(1) // 与被采集显示器同 id：触发
+        await waitForState(.idle, of: controller)
+
+        XCTAssertEqual(session.finishCount, 1, "源丢失必须触发 stop 保存路径")
+        XCTAssertEqual(finishedFiles, [url], "源丢失自动保存：成片保留")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(notifier.failureMessages.count, 1)
+        XCTAssertTrue(notifier.failureMessages[0].contains("已自动保存"), "实际：\(notifier.failureMessages[0])")
+        XCTAssertTrue(notifier.failureMessages[0].contains("显示器"), "失败原因应指明显示器断开，实际：\(notifier.failureMessages[0])")
+        XCTAssertFalse(monitor.isActive, "收尾钩子已摘除监视器")
+    }
+
+    // MARK: - T18 麦克风路由观察器（录制期观察 / 收尾摘除）
+
+    func testRouteWatcherLifecycleTiedToRecording() async {
+        let controller = makeController(countdownSeconds: 0)
+        let watcher = MicrophoneRouteWatcher(onRouteChanged: {})
+        controller.microphoneRouteWatcher = watcher
+
+        await controller.start(mode: .display(1), config: makeConfig())
+        XCTAssertTrue(watcher.isObserving, "录制进入生命周期钩子应启动路由观察器")
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+        XCTAssertFalse(watcher.isObserving, "收尾生命周期钩子应停止路由观察器")
+    }
 }

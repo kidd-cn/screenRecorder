@@ -65,6 +65,8 @@ final class SystemAudioMixer {
     private var engine: AVAudioEngine?
     private var silencer: AVAudioMixerNode?
     private var sourceNode: AVAudioSourceNode?
+    /// start() 时交付闭包（T18 路由自愈重建输出 tap 时复用；stop 清理）。
+    private var outputHandler: ((CMSampleBuffer) -> Void)?
     /// 麦克风第二路节点/缓冲/转换器（start 装配 mic 路径时非 nil，stop 清理）。
     private var micNode: AVAudioSourceNode?
     private var micRing: RingBuffer?
@@ -103,22 +105,6 @@ final class SystemAudioMixer {
         // 装配期快照（register-then-start 由调用方串行化，锁快照仅为纪律一致）。
         let (micFormat, micGain, micMuted) = stateLock.withStateLock { (microphoneFormat, micVolume, isMicMuted) }
 
-        var asbd = masterFormat.streamDescription.pointee
-        var descOut: CMFormatDescription?
-        let descStatus = CMAudioFormatDescriptionCreate(
-            allocator: kCFAllocatorDefault,
-            asbd: &asbd,
-            layoutSize: 0,
-            layout: nil,
-            magicCookieSize: 0,
-            magicCookie: nil,
-            extensions: nil,
-            formatDescriptionOut: &descOut
-        )
-        guard descStatus == noErr, let desc = descOut else {
-            throw SystemAudioMixerError.cannotCreateMasterFormatDescription(descStatus)
-        }
-
         let source = AVAudioSourceNode(format: masterFormat) { [weak self] _, _, frameCount, audioBufferList in
             guard let self else { return noErr }
             return self.renderFromRing(audioBufferList, frameCount: Int(frameCount), from: self.ring)
@@ -150,24 +136,16 @@ final class SystemAudioMixer {
         engine.connect(silencer, to: engine.outputNode, format: nil)
         silencer.outputVolume = 0
         mainMixer.outputVolume = Self.masterGain
-        let mixerOutFormat = mainMixer.outputFormat(forBus: 0)
-        guard let outputConverter = AVAudioConverter(from: mixerOutFormat, to: masterFormat) else {
-            if let assembledMic { engine.detach(assembledMic.node) }
-            engine.detach(source)
-            engine.detach(silencer)
-            throw SystemAudioMixerError.cannotCreateConverter(from: mixerOutFormat, to: masterFormat)
-        }
         // 实时线程闭包只捕获不可变量（converter/desc/handler/队列），零锁获取：
         // 格式转换后逐段入 delivery 串行队列，gate 裁剪 + 打包 + append 全部离开渲染线程。
-        mainMixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, when in
-            guard let self, when.isHostTimeValid else { return }
-            let startPTS = CMClock.convertSystemUnitsToHostTime(when.hostTime)
-            let deliveryQueue = self.deliveryQueue
-            self.drainConverter(outputConverter, from: buffer, startPTS: startPTS) { segment, segmentPTS in
-                deliveryQueue.async { [weak self] in
-                    self?.deliver(segment, pts: segmentPTS, formatDescription: desc, handler: output)
-                }
-            }
+        // 输出 converter/desc 建不出 → 上抛（此刻尚未装任何 tap；回滚已挂接的全部节点）。
+        do {
+            try installMainMixerTap(engine: engine, output: output)
+        } catch {
+            engine.detach(silencer)
+            if let assembledMic { engine.detach(assembledMic.node) }
+            engine.detach(source)
+            throw error
         }
         // 麦克风 inputNode tap（静音态不装配——setMicMuted(false) 时回装）。
         var didInstallMicTap = false
@@ -196,6 +174,7 @@ final class SystemAudioMixer {
             self.engine = engine
             self.silencer = silencer
             self.sourceNode = source
+            self.outputHandler = output
             micNode = assembledMic?.node
             micRing = assembledMic?.ring
             micConverter = assembledMic?.converter
@@ -214,6 +193,7 @@ final class SystemAudioMixer {
             self.engine = nil
             self.silencer = nil
             self.sourceNode = nil
+            outputHandler = nil
             let mic = micNode
             micNode = nil
             let installed = micTapInstalled
@@ -320,6 +300,155 @@ final class SystemAudioMixer {
     /// `.invalid` 取消裁剪。上层在 writer 锚定后调用。
     func setGatePTS(_ pts: CMTime) {
         stateLock.withStateLock { gatePTS = pts }
+    }
+
+    // MARK: - 路由自愈（T18，裁定 5）
+
+    /// 麦克风路重建决策（纯逻辑，无头可测）：`.AVAudioEngineConfigurationChange` 后重读
+    /// inputNode 硬件格式的处置。`registeredFormat` nil = 开录时无 mic 路径。
+    enum MicRebuildDecision {
+        /// 格式未变：converter 沿用，仅按需回装 tap（engine 配置变化可能已摘 tap）。
+        case keep
+        /// 格式已变且可转换：换装新 converter（渲染热路径闭包只捕获不可变量——新 converter
+        /// 不可变，旧 tap 闭包随摘除失效），此后以新设备格式继续录制。
+        case reconvert(AVAudioConverter)
+        /// 无已登记 mic 路径 / 新格式不可转换（设备全拔等）：不装 tap，录无声，不阻断录制。
+        case drop
+    }
+
+    /// 决策函数（internal 供无头钉测）。
+    static func micRebuildDecision(registeredFormat: AVAudioFormat?,
+                                   currentInputFormat: AVAudioFormat,
+                                   masterFormat: AVAudioFormat) -> MicRebuildDecision {
+        guard registeredFormat != nil else { return .drop }
+        if currentInputFormat == registeredFormat { return .keep }
+        if let converter = AVAudioConverter(from: currentInputFormat, to: masterFormat) {
+            return .reconvert(converter)
+        }
+        return .drop
+    }
+
+    /// `.AVAudioEngineConfigurationChange` 后的自愈重建（MicrophoneRouteWatcher 主队列回调
+    /// ——非渲染线程、与其余 tap 手术同队列串行，裁定 4）。engine 因配置变化自动停机：本方法
+    /// 显式停机（幂等）后重读输入硬件格式、按 `micRebuildDecision` 换装 mic converter 与
+    /// inputNode tap（宁丢不旧：回装时排空 mic ring）；mainMixer 输出 tap 同步重装（输出设备
+    /// 采样率可能已变，converter 按当前总线格式重建，建不出则输出降级无声）；最后重启 engine
+    ///（失败降级为无声：视频轨不受影响，录制继续）。混音器未运行（stop 后/尚未 start）为
+    /// no-op。与 `stop()` 并发的窗口内可能对已停机 engine 做手术：幂等且 engine 随会话丢弃
+    ///（与 `setMicMuted` 的既有接受度一致）。
+    func rebuildAfterConfigurationChange() {
+        let snapshot: (engine: AVAudioEngine,
+                       micRing: RingBuffer?,
+                       micConverter: AVAudioConverter?,
+                       micFormat: AVAudioFormat?,
+                       micMuted: Bool,
+                       micTapInstalled: Bool,
+                       output: ((CMSampleBuffer) -> Void)?)? = stateLock.withStateLock {
+            guard isRunning, let engine else { return nil }
+            return (engine, micRing, micConverter, microphoneFormat, isMicMuted, micTapInstalled, outputHandler)
+        }
+        guard let snapshot else { return }
+        snapshot.engine.stop() // 配置变化后 engine 已自停；显式停机幂等，保证手术在停机态进行
+
+        // 1) 麦克风路：重读硬件输入格式 → 决策 → 锁内换装登记（纯赋值）。
+        let inputFormat = snapshot.engine.inputNode.inputFormat(forBus: 0)
+        let decision = Self.micRebuildDecision(
+            registeredFormat: snapshot.micFormat,
+            currentInputFormat: inputFormat,
+            masterFormat: masterFormat)
+        var activeConverter = snapshot.micConverter
+        switch decision {
+        case .keep:
+            break
+        case .reconvert(let converter):
+            activeConverter = converter
+            stateLock.withStateLock {
+                microphoneFormat = inputFormat
+                micConverter = converter
+            }
+        case .drop:
+            activeConverter = nil
+            if snapshot.micFormat != nil {
+                stateLock.withStateLock { micConverter = nil }
+                NSLog("SystemAudioMixer: 路由变化后输入格式不可转换（\(inputFormat)），本次录制麦克风降级为无声")
+            }
+        }
+
+        // 2) inputNode tap 重建（手术在锁外；旧 tap 闭包持有旧 converter，必须摘除重装）。
+        //    静音态保持摘除（setMicMuted 语义——setMicMuted(false) 时才回装）。
+        snapshot.engine.inputNode.removeTap(onBus: 0)
+        var didInstallMicTap = false
+        if !snapshot.micMuted, let ring = snapshot.micRing, let converter = activeConverter {
+            let handler = makeMicTapHandler(ring: ring, converter: converter)
+            snapshot.engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, _ in
+                handler(buffer)
+            }
+            didInstallMicTap = true
+        }
+        stateLock.withStateLock { micTapInstalled = didInstallMicTap }
+        micDeliveryQueue.sync { snapshot.micRing?.reset() } // 宁丢不旧（与 setMicMuted 同纪律）
+
+        // 3) 系统声/输出路：mainMixer 输出 tap 重装（converter 按当前总线格式重建）。
+        snapshot.engine.mainMixerNode.removeTap(onBus: 0)
+        if let output = snapshot.output {
+            do {
+                try installMainMixerTap(engine: snapshot.engine, output: output)
+            } catch {
+                NSLog("SystemAudioMixer: 路由自愈输出 tap 重建失败，输出降级为无声：\(error)")
+            }
+        }
+
+        // 4) 重启（失败降级为无声：视频轨不受影响，录制继续）。
+        do {
+            try snapshot.engine.start()
+        } catch {
+            NSLog("SystemAudioMixer: 路由自愈重启 engine 失败，本次录制降级为无声：\(error)")
+        }
+    }
+
+    // MARK: - 内部：装配
+
+    /// masterFormat 的 CMFormatDescription 工厂（start 与路由自愈共用）。
+    private func makeMasterFormatDescription() throws -> CMFormatDescription {
+        var asbd = masterFormat.streamDescription.pointee
+        var descOut: CMFormatDescription?
+        let descStatus = CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault,
+            asbd: &asbd,
+            layoutSize: 0,
+            layout: nil,
+            magicCookieSize: 0,
+            magicCookie: nil,
+            extensions: nil,
+            formatDescriptionOut: &descOut
+        )
+        guard descStatus == noErr, let desc = descOut else {
+            throw SystemAudioMixerError.cannotCreateMasterFormatDescription(descStatus)
+        }
+        return desc
+    }
+
+    /// 装配 mainMixer 输出 tap（start 与路由自愈共用）：按当前 mixer 输出总线格式建
+    /// converter 与 masterFormat 描述；tap 回调（渲染线程）只做格式转换 + delivery 串行
+    /// 队列投递——零锁获取、闭包只捕获不可变量。converter/描述建不出时上抛
+    ///（start 侧回滚节点装配；自愈侧降级为无声输出）。
+    private func installMainMixerTap(engine: AVAudioEngine, output: @escaping (CMSampleBuffer) -> Void) throws {
+        let mainMixer = engine.mainMixerNode
+        let mixerOutFormat = mainMixer.outputFormat(forBus: 0)
+        guard let outputConverter = AVAudioConverter(from: mixerOutFormat, to: masterFormat) else {
+            throw SystemAudioMixerError.cannotCreateConverter(from: mixerOutFormat, to: masterFormat)
+        }
+        let desc = try makeMasterFormatDescription()
+        mainMixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, when in
+            guard let self, when.isHostTimeValid else { return }
+            let startPTS = CMClock.convertSystemUnitsToHostTime(when.hostTime)
+            let deliveryQueue = self.deliveryQueue
+            self.drainConverter(outputConverter, from: buffer, startPTS: startPTS) { segment, segmentPTS in
+                deliveryQueue.async { [weak self] in
+                    self?.deliver(segment, pts: segmentPTS, formatDescription: desc, handler: output)
+                }
+            }
+        }
     }
 
     // MARK: - 内部：渲染与打包

@@ -302,4 +302,45 @@ final class SystemAudioMixerTests: XCTestCase {
         XCTAssertTrue(lag >= -4096 && lag <= 64,
                       "累计输出应约 \(expected) 帧（有界滞留 ≤4096），实际 \(ring.bufferedCount)")
     }
+
+    // MARK: - T18 路由自愈决策（micRebuildDecision 纯逻辑）
+
+    /// 格式未变：converter 沿用（.keep）——engine 配置变化后仅需按需回装 tap。
+    func testMicRebuildDecisionKeepsSameFormat() {
+        let input = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let decision = SystemAudioMixer.micRebuildDecision(
+            registeredFormat: input,
+            currentInputFormat: input,
+            masterFormat: masterFormat)
+        guard case .keep = decision else {
+            return XCTFail("同格式应判 .keep，实际 \(decision)")
+        }
+    }
+
+    /// 格式已变且可转换：换装新 converter（裁定 5 自愈核心——录制以新设备格式继续）。
+    func testMicRebuildDecisionReconvertsOnFormatChange() {
+        let registered = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1)!
+        let current = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let decision = SystemAudioMixer.micRebuildDecision(
+            registeredFormat: registered,
+            currentInputFormat: current,
+            masterFormat: masterFormat)
+        guard case .reconvert(let converter) = decision else {
+            return XCTFail("可转换的新格式应判 .reconvert，实际 \(decision)")
+        }
+        XCTAssertEqual(converter.inputFormat.sampleRate, 48000, "换装的 converter 应以新硬件格式为输入")
+        XCTAssertEqual(converter.outputFormat.sampleRate, masterFormat.sampleRate)
+    }
+
+    /// 开录时无 mic 路径：路由变化不装配（.drop，纯系统声/纯视频录制不受影响）。
+    func testMicRebuildDecisionDropsWithoutRegisteredMicPath() {
+        let current = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+        let decision = SystemAudioMixer.micRebuildDecision(
+            registeredFormat: nil,
+            currentInputFormat: current,
+            masterFormat: masterFormat)
+        guard case .drop = decision else {
+            return XCTFail("无已登记 mic 路径应判 .drop，实际 \(decision)")
+        }
+    }
 }

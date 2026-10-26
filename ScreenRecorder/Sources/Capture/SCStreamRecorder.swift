@@ -189,6 +189,15 @@ final class SCStreamRecorder: NSObject {
         mixer?.setMicMuted(muted)
     }
 
+    /// 路由自愈触发（T18，MicrophoneRouteWatcher 主队列回调）：快照当前混音器执行
+    /// `.AVAudioEngineConfigurationChange` 后的重建（engine 停机/格式重读/tap 重装/重启，
+    /// 详见 `SystemAudioMixer.rebuildAfterConfigurationChange`）。无混音器（纯视频轨/
+    /// 混音器未启动）no-op。
+    func rebuildAudioAfterConfigurationChange() {
+        let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+        mixer?.rebuildAfterConfigurationChange()
+    }
+
     // MARK: - 暂停 / 恢复（Task 10）
 
     /// 是否暂停中（任意线程可读；T11 浮条按钮态）。

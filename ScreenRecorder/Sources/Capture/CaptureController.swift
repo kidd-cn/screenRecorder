@@ -121,11 +121,15 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // （begin 本体非主 actor；浮窗/摄像头装配全主线程，MainActor.run 跳转。）
         // T16：采集几何同场复用——PiP 摆放与点击换算共用一次 resolve（nil = 解析失败，
         // 双效果均内部降级纯屏幕）。
+        // 裁定 6（零告警恢复）：resolve 结果一次性定为 let——var 捕获在 @Sendable 闭包
+        //（MainActor.run / clickOverlayProvider）下触发 Swift 6 并发告警；行为不变
+        //（两者均不开启时 resolve 原本就被跳过，nil 直通）。
         let wantsPiP = config.includeCamera && cameraPiP != nil
         let wantsClick = config.clickHighlightEnabled && clickHighlightTracker != nil
-        var geometry: PiPCaptureGeometry?
-        if wantsPiP || wantsClick {
-            geometry = await PiPCaptureGeometry.resolve(for: config.mode)
+        let geometry: PiPCaptureGeometry? = if wantsPiP || wantsClick {
+            await PiPCaptureGeometry.resolve(for: config.mode)
+        } else {
+            nil
         }
         if wantsPiP, let cameraPiP {
             await MainActor.run { cameraPiP.beginRecording(geometry: geometry) }
@@ -192,6 +196,13 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         }
         return recorder.finishedFileURL
     }
+
+    /// 麦克风路由自愈（T18，MicrophoneRouteWatcher 主队列回调）：转发当前 recorder 的混音器
+    /// 配置变化重建（engine 停机/格式重读/tap 重装/重启——裁定 5 自愈，无 UI）。无进行中
+    /// 录制（begin 未成功/已收尾）recorder 为 nil，no-op。
+    func rebuildAudioRoute() {
+        recorder?.rebuildAudioAfterConfigurationChange()
+    }
 }
 
 // MARK: - CaptureController
@@ -219,6 +230,12 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 /// 8. 点击高亮跟踪器（T16）：`start` 时以 config 快照重对齐 enabled（opt-in 真源），
 ///    `enterRecordingPhase` 启动监听、两条 finalize 出口摘除——倒计时与收尾期不监听；
 ///    tracker nil（未装配）全链路 no-op，不影响录制。
+/// 9. 源丢失监视器与路由观察器（T18）：同边界 8 的装配缝形状（AppAssembly 持有注入，
+///    nil = 未装配 no-op），`enterRecordingPhase` 启动、两条 finalize 出口摘除。源丢失
+///    监视按捕获模式取 displayID（display/region 匹配该显示器；window = 采集全台语义
+///    nil，任一移除触发——裁定 2），命中经装配层接 `handleSessionFailure` 自动保存；
+///    路由观察命中经装配层接 `RecordingSessionCoordinator.rebuildAudioRoute`（混音器
+///    自愈，无 UI）。无锁屏出口（裁定 3：锁屏不构成中断）。
 @MainActor
 final class CaptureController: ObservableObject {
     @Published private(set) var state: CaptureState = .idle
@@ -230,6 +247,13 @@ final class CaptureController: ObservableObject {
 
     /// 点击高亮跟踪器（T16 装配缝）：AppAssembly 持有，控制器仅驱动生命周期。nil = 未装配。
     var clickHighlightTracker: ClickHighlightTracker?
+
+    /// 源丢失监视器（T18 装配缝）：AppAssembly 持有，控制器仅驱动生命周期（同边界 8 形状）。
+    /// nil = 未装配，全链路 no-op。
+    var sourceLossMonitor: SourceLossMonitor?
+    /// 麦克风路由观察器（T18 装配缝）：录制期观察 engine 配置变化，回调装配层做混音器自愈
+    /// 重建（无 UI）。nil = 未装配，全链路 no-op。
+    var microphoneRouteWatcher: MicrophoneRouteWatcher?
 
     /// 测试缝：会话内等待（倒计时步进 1s / elapsed 计时器 0.5s）。生产 = `Task.sleep`，
     /// 所在 Task 被取消时抛错打断；测试注入受控推进。
@@ -258,6 +282,8 @@ final class CaptureController: ObservableObject {
     /// begin 在途期间的丢弃/失败意图：begin 返回后立即执行（边界 4/5）。
     private var pendingDiscard = false
     private var pendingFailure: Error?
+    /// 当前会话被采集的显示器（T18 源丢失匹配语义；nil = 采集全台语义——任一显示器移除触发）。
+    private var sourceDisplayID: CGDirectDisplayID?
 
     init(session: CaptureSessionManaging,
          store: RecordingFileStore,
@@ -288,6 +314,8 @@ final class CaptureController: ObservableObject {
         // T16：enabled 真源是录制开始的 config 快照（外部 defaults 改动自下一场录制生效）；
         // 监听中关闭时 tracker 内部立即摘除 monitor。
         clickHighlightTracker?.setEnabled(config.clickHighlightEnabled)
+        // T18：源丢失匹配目标随捕获模式确定（裁定 2）。
+        sourceDisplayID = Self.capturedDisplayID(of: config.mode)
         hasBegun = false
         pendingDiscard = false
         pendingFailure = nil
@@ -344,6 +372,18 @@ final class CaptureController: ObservableObject {
         state = .recording
         startElapsedTimer()
         clickHighlightTracker?.start() // T16：点击监听随录制启动（disabled 未装机为 no-op）
+        sourceLossMonitor?.start(displayID: sourceDisplayID) // T18：源丢失监视随录制启动
+        microphoneRouteWatcher?.start() // T18：路由变化观察随录制启动（混音器自愈，无 UI）
+    }
+
+    /// 源丢失匹配语义（裁定 2）：display/region 模式监视其所在显示器；window 模式无定
+    /// 显示器（窗口可移动/跨屏）→ nil = 采集全台语义，任一显示器移除即源丢失。
+    private static func capturedDisplayID(of mode: CaptureMode) -> CGDirectDisplayID? {
+        switch mode {
+        case .display(let displayID): return displayID
+        case .region(_, let displayID): return displayID
+        case .window: return nil
+        }
     }
 
     // MARK: 浮条动作
@@ -424,6 +464,9 @@ final class CaptureController: ObservableObject {
         guard state == .finishing else { return }
         stopElapsedTimer()
         clickHighlightTracker?.stop() // T16：点击监听随收尾停止（幂等）
+        sourceLossMonitor?.stop() // T18：源丢失监视随收尾摘除（幂等）
+        microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
+        sourceDisplayID = nil
         let url = await session.finish()
         resetElapsed()
         state = .idle
@@ -444,6 +487,9 @@ final class CaptureController: ObservableObject {
         guard state == .finishing else { return }
         stopElapsedTimer()
         clickHighlightTracker?.stop() // T16：失败自动保存路径同样摘除监听（幂等）
+        sourceLossMonitor?.stop() // T18：源丢失监视随收尾摘除（幂等）
+        microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
+        sourceDisplayID = nil
         let url = await session.finish()
         resetElapsed()
         state = .idle

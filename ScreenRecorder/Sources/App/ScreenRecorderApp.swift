@@ -29,8 +29,17 @@ final class AppAssembly: ObservableObject {
     /// 由 CaptureController 在录制开始时以 config 快照重对齐（外部 defaults 改动自下一场
     /// 录制生效），start/stop 由录制生命周期钩子驱动。
     private let clickHighlightTracker: ClickHighlightTracker
+    /// 源丢失监视器（T18）：所有权进本容器（装配红线），命中经 `handleSessionFailure`
+    /// 自动保存；start/stop 由录制生命周期钩子驱动（同 tracker 形状）。
+    private let sourceLossMonitor: SourceLossMonitor
+    /// 麦克风路由观察器（T18）：所有权进本容器（装配红线），命中经 coordinator 转发混音器
+    /// 自愈重建（裁定 5，无 UI）；start/stop 由录制生命周期钩子驱动。
+    private let microphoneRouteWatcher: MicrophoneRouteWatcher
     /// 偏好设置窗口控制器（T17）：窗口与控制器归装配容器（装配红线），懒建单例复用。
     private var preferencesWindowController: NSWindowController?
+    /// 文件列表窗口控制器（T18）：窗口与控制器归装配容器（装配红线），懒建单例复用；
+    /// 列表模型经 store 取数缝读当前 `fileStore`（换输出目录后刷新即见新目录）。
+    private var recordingListWindowController: NSWindowController?
 
     /// 全局快捷键已挂载的进程级闸（T17 裁定 4）：KeyboardShortcuts 的 onKeyUp 把动作
     /// 追加进包内静态注册表，重挂（assembly init 重跑）会双触发——挂载恰好一次。
@@ -56,6 +65,19 @@ final class AppAssembly: ObservableObject {
         controller.notifier = notifier
         // 点击高亮跟踪器（T16）：装配层持有，控制器按录制生命周期驱动（见 CaptureController 边界 8）
         controller.clickHighlightTracker = clickHighlightTracker
+        // 源丢失监视器（T18）：命中 → 失败通道自动保存（onSourceLost 主线程保证，闭包内跳
+        // 主 actor；「录制已自动保存」通知由 handleSessionFailure 的收尾路径发出）。
+        // brief 回调签名无 payload（`onSourceLost: () -> Void`），断连 displayID 不透传。
+        let sourceLossMonitor = SourceLossMonitor { [weak controller] in
+            Task { @MainActor in controller?.handleSessionFailure(SourceLossError(removedDisplayID: nil)) }
+        }
+        controller.sourceLossMonitor = sourceLossMonitor
+        // 麦克风路由观察器（T18）：命中 → coordinator 转发当前混音器自愈重建（主队列保证，
+        // 见 MicrophoneRouteWatcher 裁定 4 注释）。
+        let microphoneRouteWatcher = MicrophoneRouteWatcher { [weak coordinator] in
+            coordinator?.rebuildAudioRoute()
+        }
+        controller.microphoneRouteWatcher = microphoneRouteWatcher
         // 磁盘监控 / 流失败出口 → 状态机（DiskSpaceMonitor 与 onStreamFailure 均主队列保证）
         coordinator.onInterruption = { error in
             Task { @MainActor in controller.handleSessionFailure(error) }
@@ -67,6 +89,8 @@ final class AppAssembly: ObservableObject {
         self.settings = settings
         self.controller = controller
         self.fileStore = fileStore
+        self.sourceLossMonitor = sourceLossMonitor
+        self.microphoneRouteWatcher = microphoneRouteWatcher
         self.floatingBarPanel = FloatingControlBarPanel(controller: controller)
         // PiP 拖动锚点（T15）：浮窗初始摆放避让浮条（浮条 frame 单向喂数，无反向依赖）
         cameraPiP.controlBarFrameProvider = { [weak floatingBarPanel] in
@@ -175,6 +199,33 @@ final class AppAssembly: ObservableObject {
         preferencesWindowController?.window?.makeKeyAndOrderFront(nil)
     }
 
+    /// 打开文件列表窗口（菜单「文件列表…」入口，T18）：懒建单实例复用（窗口关闭仅隐藏，
+    /// `isReleasedWhenClosed = false`）。列表模型经 store 取数缝读当前 `fileStore`——
+    /// 懒建时捕获装配容器弱引用，`updateOutputDirectory` 换装后刷新即见新目录（T17 审查
+    /// 发现的固定拷贝缺陷在此封堵）。LSUIElement 应用需激活再前置（同偏好设置窗口）。
+    func openRecordingList() {
+        if recordingListWindowController == nil {
+            let viewModel = RecordingListViewModel(storeProvider: { [weak self] in
+                // 装配容器与 App 同生命周期；nil 仅在容器已释放的理论窗口出现，退避临时目录
+                self?.fileStore ?? RecordingFileStore(baseDirectory: FileManager.default.temporaryDirectory)
+            })
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 720, height: 420),
+                styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "文件列表"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: RecordingListView(viewModel: viewModel))
+            window.center()
+            recordingListWindowController = NSWindowController(window: window)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        recordingListWindowController?.showWindow(nil)
+        recordingListWindowController?.window?.makeKeyAndOrderFront(nil)
+    }
+
     /// 全局快捷键订阅（⇧⌘R / ⇧⌘P）：App 启动（装配）时挂载恰好一次。动作经主 actor
     /// 跳转进入装配层开关方法；包内 `onKeyUp` 把动作追加进静态注册表（无需持有返回值），
     /// 故以 `globalShortcutsMounted` 进程级闸防重挂双触发（裁定 4）。
@@ -203,6 +254,7 @@ struct ScreenRecorderApp: App {
             MenuBarView(
                 controller: assembly.controller,
                 onStartFullScreen: { assembly.startFullScreenRecording() },
+                onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenPreferences: { assembly.openPreferences() }
             )
         } label: {
