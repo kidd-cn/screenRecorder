@@ -133,6 +133,8 @@ final class PiPCompositor {
     private struct ClickMaskKey: Hashable {
         let side: Int
         let strokeWidth: CGFloat
+        /// 修复轮 1 #1：不同 radius 可能向上取整到同一 side——键不含 radius 会互相命中、画错圈。
+        let radius: CGFloat
     }
 
     /// - Parameter pixelSize: 期望输出尺寸（提示值，简报签名逐字）；实际画布以逐帧实测的
@@ -233,7 +235,7 @@ final class PiPCompositor {
         // 位图盖住描边外沿 + 1px AA 余量；圆心置于位图正中（竖直对称，翻转方向不影响结果）。
         let side = Int(((radius + strokeWidth / 2 + 1) * 2).rounded(.up))
         guard side > 1 else { return nil }
-        let key = ClickMaskKey(side: side, strokeWidth: strokeWidth)
+        let key = ClickMaskKey(side: side, strokeWidth: strokeWidth, radius: radius)
         if let cached = clickMaskCache[key] { return cached }
         guard let cg = Self.makeRingMaskCGImage(side: side, radius: radius, strokeWidth: strokeWidth) else {
             return nil

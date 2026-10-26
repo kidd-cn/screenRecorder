@@ -76,9 +76,12 @@ final class ClickHighlightTracker: NSObject {
     /// 主开关重对齐（接线缝：CaptureController 在录制开始时以 `RecordingConfiguration`
     /// 快照覆盖，外部 `defaults write` 的改动自下一场录制生效）。监听中关闭立即摘除 monitor；
     /// 只对齐开关、不自动装机（装机仍是 `start()` 职责）。
+    /// 修复轮 1 #2：`enabled` 一律锁内写（与 `start()` 锁内读同一纪律；调用方今日虽全主 actor）。
     func setEnabled(_ newValue: Bool) {
+        lock.lock()
         enabled = newValue
-        if !newValue { stopInternal() }
+        lock.unlock()
+        if !newValue { stopInternal() } // 锁外摘监听（stopInternal 自持锁，不可嵌套）
     }
 
     /// 安装事件监听（幂等；未启用为 no-op）。录制进入生命周期钩子调用。
@@ -108,6 +111,9 @@ final class ClickHighlightTracker: NSObject {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         globalMonitor = nil
         localMonitor = nil
+        // 修复轮 1 #3：收尾清空最近点击——stop 前一瞬的点击（如「停止」按钮本身）不得把
+        // 残影淡入 600ms 内重启的下一场录制开头。
+        lastClick = nil
     }
 
     /// 事件回调路径：读当前光标位置（Cocoa 全局，左下原点）。`NSEvent.mouseLocation` 是
