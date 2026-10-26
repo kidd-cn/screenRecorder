@@ -242,7 +242,7 @@ final class CaptureController: ObservableObject {
     var screenPermissionProbe: @Sendable () -> Bool = { CGPreflightScreenCaptureAccess() }
 
     private let session: CaptureSessionManaging
-    private let store: RecordingFileStore
+    private var store: RecordingFileStore
     private let countdownSeconds: Int
     private let onFinishedFile: (URL) -> Void
 
@@ -267,6 +267,12 @@ final class CaptureController: ObservableObject {
         self.store = store
         self.countdownSeconds = countdownSeconds
         self.onFinishedFile = onFinishedFile
+    }
+
+    /// 输出目录在偏好设置中变更后由装配层换入新 store（T17；值语义结构体，整只替换）。
+    /// 此后 discard 路径 `store.delete` 作用于新目录内的成片；既有测试不受影响（默认不换）。
+    func updateStore(_ newStore: RecordingFileStore) {
+        store = newStore
     }
 
     // MARK: 启动

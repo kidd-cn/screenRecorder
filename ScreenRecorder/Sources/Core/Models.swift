@@ -7,7 +7,9 @@ typealias VideoCodec = SettingsStore.VideoCodec
 
 /// 捕获目标模式：整块显示器 / 单个独立窗口 / 显示器上的一块区域。
 /// region 的 rect 为显示器逻辑坐标系（points），与 `SCStreamConfiguration.sourceRect` 同一口径。
-enum CaptureMode: Equatable {
+/// Codable（关联值均可编码）：`SettingsStore.lastCaptureMode`（T17，⇧⌘R 上次使用模式）
+/// 以 JSON 整只落库 UserDefaults。
+enum CaptureMode: Equatable, Codable {
     case display(CGDirectDisplayID)
     case window(CGWindowID)
     case region(rect: CGRect, displayID: CGDirectDisplayID)

@@ -1,3 +1,6 @@
+import AppKit
+import CoreGraphics
+import KeyboardShortcuts
 import SwiftUI
 
 /// App 装配容器（修复轮 1 Important #1）：整条有状态装配链（settings / fileStore /
@@ -9,7 +12,10 @@ import SwiftUI
 final class AppAssembly: ObservableObject {
     let settings: SettingsStore
     let controller: CaptureController
-    let fileStore: RecordingFileStore
+    /// 输出目录可随偏好设置变更（T17）：值语义结构体按需整只替换（`updateOutputDirectory`
+    /// 是唯一换装点，并同步换入控制器）。菜单/快捷键的开始路径在点击时刻读本值，保证
+    /// 「改输出目录后新文件落新目录」。
+    private(set) var fileStore: RecordingFileStore
     /// 面板自持 controller.$state 订阅驱动显隐；装配层只需持有保活。
     private let floatingBarPanel: FloatingControlBarPanel
     /// 倒计时覆盖层（T12）：同样自持 $state 订阅驱动 show/hide；装配层持有保活
@@ -23,6 +29,12 @@ final class AppAssembly: ObservableObject {
     /// 由 CaptureController 在录制开始时以 config 快照重对齐（外部 defaults 改动自下一场
     /// 录制生效），start/stop 由录制生命周期钩子驱动。
     private let clickHighlightTracker: ClickHighlightTracker
+    /// 偏好设置窗口控制器（T17）：窗口与控制器归装配容器（装配红线），懒建单例复用。
+    private var preferencesWindowController: NSWindowController?
+
+    /// 全局快捷键已挂载的进程级闸（T17 裁定 4）：KeyboardShortcuts 的 onKeyUp 把动作
+    /// 追加进包内静态注册表，重挂（assembly init 重跑）会双触发——挂载恰好一次。
+    private static var globalShortcutsMounted = false
 
     init() {
         let settings = SettingsStore()
@@ -70,6 +82,110 @@ final class AppAssembly: ObservableObject {
         )
         self.cameraPiP = cameraPiP
         self.clickHighlightTracker = clickHighlightTracker
+        mountGlobalShortcutsIfNeeded()
+    }
+
+    // MARK: 录制入口（T17：菜单与全局快捷键共用，配置装配单点化）
+
+    /// 菜单「开始录制（全屏）」入口：主显示器全屏。
+    func startFullScreenRecording() {
+        startRecording(mode: .display(CGMainDisplayID()))
+    }
+
+    /// 唯一的开始装配点：持久化「上次使用的模式」（裁定 2：每次开始都记）→ 建输出目录 →
+    /// 从 SettingsStore 快照装配 config → 进入控制器状态机（快照语义：录制中途改设置
+    /// 不影响进行中的录制）。控制器自守卫（非 `.idle` 一律 no-op），此处不重复判态。
+    private func startRecording(mode: CaptureMode) {
+        settings.lastCaptureMode = mode
+        try? fileStore.ensureDirectory()
+        let config = RecordingConfiguration(
+            mode: mode,
+            captureSystemAudio: settings.captureSystemAudio,
+            captureMicrophone: settings.captureMicrophone,
+            micVolume: settings.micVolume,
+            includeCamera: settings.pipEnabled,
+            fps: settings.fps,
+            codec: settings.videoCodec,
+            outputURL: fileStore.nextFileURL(),
+            clickHighlightEnabled: settings.clickHighlightEnabled
+        )
+        Task { await controller.start(mode: mode, config: config) }
+    }
+
+    /// ⇧⌘R 开关（裁定 2）：idle/倒计时 → 按上次使用的模式开始；录制/暂停 → 停止；
+    /// `.finishing` 是控制器去抖闸位，忽略。
+    func toggleStartStopRecording() {
+        switch controller.state {
+        case .recording, .paused:
+            controller.stop()
+        case .idle, .countdown:
+            startRecording(mode: settings.lastCaptureMode)
+        case .finishing:
+            break
+        }
+    }
+
+    /// ⇧⌘P 开关（裁定 2）：录制中 → 暂停，暂停中 → 恢复；其余状态 no-op（控制器自守卫）。
+    func togglePauseResumeRecording() {
+        switch controller.state {
+        case .recording:
+            controller.pause()
+        case .paused:
+            controller.resume()
+        case .idle, .countdown, .finishing:
+            break
+        }
+    }
+
+    /// 偏好设置改输出目录（T17 验收）：settings 真源更新 + 换装 fileStore + 同步换入
+    /// 控制器 store（此后 discard 删除作用于新目录成片）。
+    func updateOutputDirectory(to url: URL) {
+        settings.outputDirectory = url
+        let newStore = RecordingFileStore(baseDirectory: url)
+        fileStore = newStore
+        controller.updateStore(newStore)
+    }
+
+    // MARK: 偏好设置窗口
+
+    /// 打开偏好设置窗口（菜单「偏好设置…」入口）：懒建单实例、复用；LSUIElement 应用
+    /// 需激活再前置，避免窗口落在其他应用后面。
+    func openPreferences() {
+        if preferencesWindowController == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "偏好设置"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: PreferencesView(
+                settings: settings,
+                onOutputDirectoryChange: { [weak self] url in
+                    self?.updateOutputDirectory(to: url)
+                }
+            ))
+            window.center()
+            preferencesWindowController = NSWindowController(window: window)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        preferencesWindowController?.showWindow(nil)
+        preferencesWindowController?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// 全局快捷键订阅（⇧⌘R / ⇧⌘P）：App 启动（装配）时挂载恰好一次。动作经主 actor
+    /// 跳转进入装配层开关方法；包内 `onKeyUp` 把动作追加进静态注册表（无需持有返回值），
+    /// 故以 `globalShortcutsMounted` 进程级闸防重挂双触发（裁定 4）。
+    private func mountGlobalShortcutsIfNeeded() {
+        guard !Self.globalShortcutsMounted else { return }
+        Self.globalShortcutsMounted = true
+        KeyboardShortcuts.onKeyUp(for: .startStopRecording) { [weak self] in
+            Task { @MainActor in self?.toggleStartStopRecording() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .pauseResumeRecording) { [weak self] in
+            Task { @MainActor in self?.togglePauseResumeRecording() }
+        }
     }
 }
 
@@ -85,8 +201,8 @@ struct ScreenRecorderApp: App {
         MenuBarExtra {
             MenuBarView(
                 controller: assembly.controller,
-                settings: assembly.settings,
-                fileStore: assembly.fileStore
+                onStartFullScreen: { assembly.startFullScreenRecording() },
+                onOpenPreferences: { assembly.openPreferences() }
             )
         } label: {
             Image(systemName: "record.circle")

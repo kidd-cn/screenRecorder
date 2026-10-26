@@ -1,6 +1,10 @@
 name: ScreenRecorder
 options:
   createIntermediateGroups: true
+packages:
+  KeyboardShortcuts:
+    url: https://github.com/sindresorhus/KeyboardShortcuts
+    from: 2.0.0
 targets:
   ScreenRecorder:
     type: application
@@ -8,6 +12,8 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - ScreenRecorder/Sources
+    dependencies:
+      - package: KeyboardShortcuts
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.screenrecorder.app

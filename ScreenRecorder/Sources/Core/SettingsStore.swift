@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreGraphics
 import Foundation
 
 /// 录制设置：读写 UserDefaults 并以 `@Published` 暴露给 SwiftUI。
@@ -55,6 +56,17 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(clickHighlightEnabled, forKey: Self.clickHighlightEnabledKey) }
     }
 
+    /// 上次使用的采集模式（T17 裁定：⇧⌘R「开始/停止」以最后使用的模式开录，每次开始录制时
+    /// 由装配层持久化到此处）。默认全屏（主显示器）。`CaptureMode` Codable 编码整只落库，
+    /// 解码失败（如枚举演化）回退默认；显示器拓扑变化由下一次开始重新持久化自然覆盖。
+    @Published var lastCaptureMode: CaptureMode {
+        didSet {
+            if let data = try? JSONEncoder().encode(lastCaptureMode) {
+                defaults.set(data, forKey: Self.lastCaptureModeKey)
+            }
+        }
+    }
+
     private let defaults: UserDefaults
 
     init(userDefaults: UserDefaults = .standard) {
@@ -75,6 +87,13 @@ final class SettingsStore: ObservableObject {
         // T16 裁定：点击高亮默认关（opt-in）；早期脚手架曾以 true 落库，随本任务翻转为 false
         //（真源仍是 UserDefaults：外部 defaults write com.screenrecorder.app clickHighlightEnabled -bool true 开启）。
         self.clickHighlightEnabled = userDefaults.object(forKey: Self.clickHighlightEnabledKey) as? Bool ?? false
+        // T17：上次使用的采集模式（⇧⌘R 开录用）；缺省/解码失败回退全屏（主显示器）。
+        if let data = userDefaults.data(forKey: Self.lastCaptureModeKey),
+           let mode = try? JSONDecoder().decode(CaptureMode.self, from: data) {
+            self.lastCaptureMode = mode
+        } else {
+            self.lastCaptureMode = .display(CGMainDisplayID())
+        }
     }
 
     private static let fpsKey = "fps"
@@ -86,4 +105,5 @@ final class SettingsStore: ObservableObject {
     private static let countdownSecondsKey = "countdownSeconds"
     private static let pipEnabledKey = "pipEnabled"
     private static let clickHighlightEnabledKey = "clickHighlightEnabled"
+    private static let lastCaptureModeKey = "lastCaptureMode"
 }

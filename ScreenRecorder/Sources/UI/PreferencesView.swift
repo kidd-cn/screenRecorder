@@ -1,0 +1,173 @@
+import AppKit
+import CoreGraphics
+import KeyboardShortcuts
+import SwiftUI
+import VideoToolbox
+
+// MARK: - 全局快捷键名（T17 brief Produces 逐字）
+
+extension KeyboardShortcuts.Name {
+    /// 开始/停止录制（默认 ⇧⌘R）：idle/倒计时 → 按上次使用的模式开始，录制/暂停 → 停止。
+    /// 经 Carbon `RegisterEventHotKey` 注册（KeyboardShortcuts 包机制），不产生新 TCC 权限。
+    static let startStopRecording = Self(
+        "startStopRecording",
+        default: .init(.r, modifiers: [.shift, .command]))
+    /// 暂停/恢复录制（默认 ⇧⌘P）：录制中 → 暂停，暂停中 → 恢复。
+    static let pauseResumeRecording = Self(
+        "pauseResumeRecording",
+        default: .init(.p, modifiers: [.shift, .command]))
+}
+
+// MARK: - HEVC 硬件编码能力（裁定 5）
+
+/// HEVC 硬件编码器可用性：以 `VTCopyVideoEncoderList` 判定（编码器列表，而非解码侧的
+/// `VTIsHardwareDecodeSupported`）。进程内硬件能力不变，首次调用后以静态常量缓存。
+enum HEVCEncoderCapability {
+    static let hevcHardwareEncodingAvailable: Bool = {
+        var list: CFArray?
+        guard VTCopyVideoEncoderList(nil, &list) == noErr, let list else { return false }
+        for case let encoder as NSDictionary in list as NSArray {
+            guard isCodecHEVC(encoder), isHardwareAccelerated(encoder) else { continue }
+            return true
+        }
+        return false
+    }()
+
+    /// `kVTVideoEncoderList_CodecType` 为 CFNumber（FourCharCode）。
+    private static func isCodecHEVC(_ encoder: NSDictionary) -> Bool {
+        guard let raw = encoder[kVTVideoEncoderList_CodecType] as? NSNumber else { return false }
+        return raw.uint32Value == kCMVideoCodecType_HEVC
+    }
+
+    /// `kVTVideoEncoderList_IsHardwareAccelerated` 为 CFBoolean（非 toll-free），
+    /// 按 CFTypeID 显式分派（unsafeDowncast 无运行时检查，不产生 as! 强转告警），
+    /// 其余形态回退 NSNumber 桥接。
+    private static func isHardwareAccelerated(_ encoder: NSDictionary) -> Bool {
+        guard let raw = encoder[kVTVideoEncoderList_IsHardwareAccelerated] else { return false }
+        if CFGetTypeID(raw as CFTypeRef) == CFBooleanGetTypeID() {
+            return CFBooleanGetValue(unsafeDowncast(raw as AnyObject, to: CFBoolean.self))
+        }
+        return (raw as? NSNumber)?.boolValue ?? false
+    }
+}
+
+// MARK: - 偏好设置界面
+
+/// 偏好设置（T17）：TabView 三页——通用（输出目录/倒计时/帧率/编码）、录制源（系统声音/
+/// 麦克风/画中画/点击高亮）、快捷键（两个 RecorderCocoa 系录制控件）。
+/// 输出目录变更经 `onOutputDirectoryChange` 回到装配层（换 fileStore + 控制器 store），
+/// 视图不做装配副作用。
+struct PreferencesView: View {
+    @ObservedObject var settings: SettingsStore
+    var onOutputDirectoryChange: (URL) -> Void
+
+    var body: some View {
+        TabView {
+            GeneralTab(settings: settings, onOutputDirectoryChange: onOutputDirectoryChange)
+                .tabItem { Label("通用", systemImage: "gearshape") }
+            RecordingSourcesTab(settings: settings)
+                .tabItem { Label("录制源", systemImage: "slider.horizontal.3") }
+            ShortcutsTab()
+                .tabItem { Label("快捷键", systemImage: "keyboard") }
+        }
+        .padding()
+        .frame(width: 480, height: 320)
+    }
+}
+
+/// 通用页：输出目录（NSOpenPanel 选择）、倒计时 0/3/5/10、帧率 30/60、编码 H.264/HEVC
+/// （HEVC 硬件编码器不可用时禁用并标注「需硬件编码器」）。
+private struct GeneralTab: View {
+    @ObservedObject var settings: SettingsStore
+    var onOutputDirectoryChange: (URL) -> Void
+
+    var body: some View {
+        Form {
+            outputDirectoryRow
+            Picker("倒计时", selection: $settings.countdownSeconds) {
+                Text("无").tag(0)
+                Text("3 秒").tag(3)
+                Text("5 秒").tag(5)
+                Text("10 秒").tag(10)
+            }
+            Picker("帧率", selection: $settings.fps) {
+                Text("30 fps").tag(30)
+                Text("60 fps").tag(60)
+            }
+            codecPicker
+        }
+    }
+
+    private var outputDirectoryRow: some View {
+        HStack(alignment: .top) {
+            Text("输出目录")
+            Spacer()
+            VStack(alignment: .trailing, spacing: 6) {
+                Text(settings.outputDirectory.path)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .help(settings.outputDirectory.path)
+                Button("选择…") { chooseOutputDirectory() }
+            }
+        }
+    }
+
+    /// HEVC 硬件编码器不可用时：HEVC 选项禁用并标注（硬件能力进程内缓存，读取零开销）。
+    private var codecPicker: some View {
+        Picker("编码", selection: $settings.videoCodec) {
+            Text("H.264").tag(SettingsStore.VideoCodec.h264)
+            if HEVCEncoderCapability.hevcHardwareEncodingAvailable {
+                Text("HEVC").tag(SettingsStore.VideoCodec.hevc)
+            } else {
+                Text("HEVC（需硬件编码器）")
+                    .tag(SettingsStore.VideoCodec.hevc)
+                    .disabled(true)
+            }
+        }
+        .pickerStyle(.radioGroup)
+        .horizontalRadioGroupLayout()
+    }
+
+    /// 输出目录选择：仅目录、可新建；确认后交装配层换装（真源仍是 SettingsStore）。
+    private func chooseOutputDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = settings.outputDirectory
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            onOutputDirectoryChange(url)
+        }
+    }
+}
+
+/// 录制源页：系统声音 / 麦克风开关（T9 混音既有项）、摄像头画中画（T15）、
+/// 鼠标点击高亮（T16，默认关）。
+private struct RecordingSourcesTab: View {
+    @ObservedObject var settings: SettingsStore
+
+    var body: some View {
+        Form {
+            Toggle("系统声音", isOn: $settings.captureSystemAudio)
+            Toggle("麦克风", isOn: $settings.captureMicrophone)
+            Toggle("摄像头画中画", isOn: $settings.pipEnabled)
+            Toggle("鼠标点击高亮", isOn: $settings.clickHighlightEnabled)
+        }
+    }
+}
+
+/// 快捷键页：两个录制控件（`KeyboardShortcuts.Recorder` 内含 `RecorderCocoa`），
+/// 取值/落库由包自理（UserDefaults）。
+private struct ShortcutsTab: View {
+    var body: some View {
+        Form {
+            KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
+            KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
+            Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
