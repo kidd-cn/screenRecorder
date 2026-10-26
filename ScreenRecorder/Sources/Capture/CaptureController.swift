@@ -78,13 +78,18 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     private let stopBelow: Int64
     private var recorder: SCStreamRecorder?
     private var monitor: DiskSpaceMonitor?
+    /// PiP 装配单元（T15，AppAssembly 注入；nil = 无 PiP 能力，录制照常纯屏幕）。
+    /// 运行时生命周期挂在 begin/finish（既有 stop 路径），失败内部降级不阻断录制。
+    private let cameraPiP: CameraPiPWindowController?
 
     init(diskProvider: DiskFreeSpaceProviding = VolumeFreeSpaceProvider(),
          warnBelow: Int64 = 2_000_000_000,
-         stopBelow: Int64 = 500_000_000) {
+         stopBelow: Int64 = 500_000_000,
+         cameraPiP: CameraPiPWindowController? = nil) {
         self.diskProvider = diskProvider
         self.warnBelow = warnBelow
         self.stopBelow = stopBelow
+        self.cameraPiP = cameraPiP
     }
 
     func begin(_ config: RecordingConfiguration) async throws {
@@ -105,14 +110,28 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 
         keeper.activate(reason: "屏幕录制进行中")
 
+        // Task 15：PiP 随录制启动（includeCamera 时）——摄像头 + 浮窗先热，首帧起 PiP 就位。
+        // 几何解析失败 / 授权拒绝 / 无摄像头在内部降级为纯屏幕（T8 混音降级精神），不阻断。
+        // （begin 本体非主 actor；浮窗/摄像头装配全主线程，MainActor.run 跳转。）
+        if config.includeCamera, let cameraPiP {
+            let geometry = await PiPCaptureGeometry.resolve(for: config.mode)
+            await MainActor.run { cameraPiP.beginRecording(geometry: geometry) }
+        }
+
         let recorder = SCStreamRecorder(config: config)
+        // PiP 注入缝（T15）：合成器逐帧取最新摄像头帧与浮窗位置；都取不到时合成器直返
+        // 原 buffer，与直通路径等价。
+        recorder.pipPixelBufferProvider = cameraPiP?.latestPixelBuffer
+        recorder.pipFrameProvider = cameraPiP?.currentPiPFrame
         // 失败通道（T18 台账指针）：recorder 首失败经此上报，上层负责 stop 保存路径
         recorder.onStreamFailure = { [weak self] error in self?.onInterruption?(error) }
         self.recorder = recorder
         do {
             try await recorder.start()
         } catch {
-            // 回滚：停监控 + 释放断言 + 摘除失败 recorder；占位/claim 清理由 recorder 内部完成
+            // 回滚：停监控 + 释放断言 + 摘除失败 recorder + 收 PiP（若已激活，幂等）；
+            // 占位/claim 清理由 recorder 内部完成
+            await MainActor.run { cameraPiP?.endRecording() }
             self.recorder = nil
             monitor.stopMonitoring()
             self.monitor = nil
@@ -132,6 +151,9 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         guard let recorder else { return nil } // begin 未成功：无会话可收尾
         self.recorder = nil
         await recorder.stop()
+        // Task 15：PiP 收尾挂在既有 stop 路径（流已停、video 队列在途帧已排空——
+        // removeStreamOutput 栅栏保证），无新停止竞态；摄像头停与浮窗收起幂等。
+        await MainActor.run { cameraPiP?.endRecording() }
         // 暂停丢弃诊断（T10 交付：stop 后快照仍可读）——有丢弃时留日志供成片时长归因
         let droppedVideo = recorder.pausedDroppedVideoFrameCount
         let droppedAudio = recorder.pausedDroppedAudioPacketCount

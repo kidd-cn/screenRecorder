@@ -15,11 +15,16 @@ final class AppAssembly: ObservableObject {
     /// 倒计时覆盖层（T12）：同样自持 $state 订阅驱动 show/hide；装配层持有保活
     /// （修复轮 1 装配纪律：有状态/持窗对象一律进本容器）。
     private let countdownOverlay: CountdownOverlayController
+    /// 摄像头画中画装配单元（T15，持浮窗 NSPanel + 摄像头控制器，跨场录制复用）：
+    /// 所有权进本容器（装配红线）；运行时生命周期由 RecordingSessionCoordinator 的
+    /// begin/finish（既有 stop 路径）驱动，启动失败内部降级纯屏幕。
+    private let cameraPiP: CameraPiPWindowController
 
     init() {
         let settings = SettingsStore()
         let fileStore = RecordingFileStore(baseDirectory: settings.outputDirectory)
-        let coordinator = RecordingSessionCoordinator()
+        let cameraPiP = CameraPiPWindowController()
+        let coordinator = RecordingSessionCoordinator(cameraPiP: cameraPiP)
         let notifier = UNRecordingNotifier()
         let controller = CaptureController(
             session: coordinator,
@@ -42,6 +47,10 @@ final class AppAssembly: ObservableObject {
         self.controller = controller
         self.fileStore = fileStore
         self.floatingBarPanel = FloatingControlBarPanel(controller: controller)
+        // PiP 拖动锚点（T15）：浮窗初始摆放避让浮条（浮条 frame 单向喂数，无反向依赖）
+        cameraPiP.controlBarFrameProvider = { [weak floatingBarPanel] in
+            floatingBarPanel.map { $0.screenFrame }
+        }
         // 倒计时覆盖层：ESC/点击出口接 cancelAndDiscard（回 idle 且不 begin）——覆盖层不自行改状态，
         // hide 由状态离开 .countdown 收束。
         self.countdownOverlay = CountdownOverlayController(
@@ -50,6 +59,7 @@ final class AppAssembly: ObservableObject {
                 Task { @MainActor in controller?.cancelAndDiscard() }
             }
         )
+        self.cameraPiP = cameraPiP
     }
 }
 

@@ -109,6 +109,29 @@ struct FloatingControlBar: View {
     }
 }
 
+/// PiP 小窗拖动锚点（T15）：浮窗初始摆放与浮条的避让关系——浮条钉在可视区顶部居中，
+/// PiP 锚在右上角；若可视区窄到两者重叠，PiP 整体下移到浮条下方（不遮浮条）。拖动开始后
+/// 位置由浮窗自行汇报（frame 变化实时进合成器），本函数只管首次锚点（纯函数，无头钉测）。
+enum PiPLacementAnchor {
+    /// PiP 浮窗尺寸（points，前置摄像头 4:3）。
+    static let pipSize = CGSize(width: 160, height: 120)
+    /// 距可视区边缘 / 浮条的留边。
+    static let edgeMargin: CGFloat = 12
+
+    /// 初始锚点：可视区右上角；与浮条重叠时下移至浮条下方（仍完整在可视区内）。
+    static func defaultFrame(visibleFrame: CGRect, controlBarFrame: CGRect?) -> CGRect {
+        var frame = CGRect(
+            x: visibleFrame.maxX - pipSize.width - edgeMargin,
+            y: visibleFrame.maxY - pipSize.height - edgeMargin,
+            width: pipSize.width,
+            height: pipSize.height)
+        if let bar = controlBarFrame, bar.intersects(frame) {
+            frame.origin.y = bar.minY - pipSize.height - edgeMargin
+        }
+        return frame
+    }
+}
+
 /// 浮条的 NSPanel 承载（简报：`styleMask: [.borderless, .nonactivatingPanel]`、
 /// `level: .floating`、默认屏幕顶部居中、可拖动）。由 ScreenRecorderApp 装配点创建并持有；
 /// 显隐随 `CaptureController.state`：`.recording`/`.paused` 显示，其余（idle/countdown/
@@ -119,6 +142,9 @@ final class FloatingControlBarPanel {
     private let panel: NSPanel
     private var stateObservation: AnyCancellable?
     private var isShowing = false
+
+    /// PiP 拖动锚点（T15）数据源：浮条当前在屏坐标的 frame（PiP 初始摆放避让用）。
+    var screenFrame: NSRect { panel.frame }
 
     init(controller: CaptureController) {
         let hostingView = NSHostingView(rootView: FloatingControlBar(controller: controller))

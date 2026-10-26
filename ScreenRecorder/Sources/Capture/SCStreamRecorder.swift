@@ -1,11 +1,14 @@
 import AVFoundation
 import CoreGraphics
 import CoreMedia
+import CoreVideo
 import Foundation
 import ScreenCaptureKit
 
 /// SCStream 采集 → `AssetWriterSession` 落盘的录制会话。
-/// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧 append（Task 15 合成管线接管前直通）。
+/// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧合成（仅 PiP 开启，Task 15；
+/// 合成在暂停平移判定之后、append 之前，PTS 原样透传）→ append；无 PiP 时为逐帧直通
+/// （合成器 nil，零开销）。
 /// 音频路径（Task 9，captureSystemAudio 或 captureMicrophone 时）：`SystemAudioMixer` 双路混音
 /// ——系统声：SCStream audio 队列样本；麦克风：engine inputNode tap（SCStream 的 `.microphone`
 /// 输出 macOS 15+ 才有，维持丢弃）——混音为单条 AAC 轨，混音器启动失败时降级为纯视频轨继续录制。
@@ -46,6 +49,13 @@ final class SCStreamRecorder: NSObject {
     /// 流失败回调（主队列保证）。Task 18 的 CaptureController 据此走自动保存路径。
     var onStreamFailure: ((Error) -> Void)?
 
+    /// Task 15 PiP 注入缝：最新摄像头帧取数（begin 前由装配层设置；录制中只读）。
+    /// nil（未注入或 includeCamera=false）= 纯直通路径，与 T8–T13 已验收行为逐字节一致。
+    /// 仅 video 队列调用（闭包内部锁保护，见 CameraPiPController/PiPFrameStore）。
+    var pipPixelBufferProvider: (() -> CVPixelBuffer?)?
+    /// Task 15 PiP 注入缝：PiP 位置取数（捕获像素空间，浮窗拖动时逐帧变化）。
+    var pipFrameProvider: (() -> PiPFrame?)?
+
     /// `stop()` 完成后的成片 URL；nil 表示本次无产出（启动失败 / 流失败 / 零样本）。
     private(set) var finishedFileURL: URL?
 
@@ -62,6 +72,9 @@ final class SCStreamRecorder: NSObject {
     private var mixer: SystemAudioMixer?
     /// 仅 videoQueue 触碰：writer 输入是否已在首帧装配完毕。
     private var writerArmed = false
+    /// 仅 videoQueue 触碰（start() 在 startCapture 前发布，回调建立即天然的内存序栅栏）：
+    /// includeCamera 且注入缝在位时创建的合成器；nil = 直通路径。
+    private var pipCompositor: PiPCompositor?
     /// 暂停媒体时钟（Task 10）：门控 + 平移 + 每轨单调护栏，所有访问经 stateLock。
     private var mediaClock = PauseMediaClock()
     /// 暂停丢弃计数的收尾快照（修复轮 2）：stop()/start 失败回滚复位 `mediaClock` 前
@@ -82,6 +95,11 @@ final class SCStreamRecorder: NSObject {
     func start() async throws {
         let target = try await resolveTarget()
         let session = try AssetWriterSession(config: config, pixelSize: target.pixelSize)
+        // Task 15：合成器按需装配——PiP 开启且注入缝在位时建（CIContext/CVPixelBufferPool
+        // 均惰性持有，未走到合成不产生缓冲分配）。两者都关时保持 nil = 直通路径零开销。
+        if config.includeCamera, pipPixelBufferProvider != nil, pipFrameProvider != nil {
+            pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
+        }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
         // 时混音器同样在位（系统声源节点持续渲染静音，与麦克风混合）。启动失败（如无输出设备
         // 的极端环境）降级为纯视频轨，不阻断录制。
@@ -356,10 +374,13 @@ extension SCStreamRecorder: SCStreamOutput {
     }
 
     /// video 队列串行执行：首帧装配 writer（addVideoInput + 有混音器则 addAudioInput +
-    /// startWriting，需首帧格式描述），之后逐帧直 append（Task 15 合成管线接管前的直通路径）；
-    /// 首帧 append 确立锚点后，把首帧原始采集 PTS 交给混音器做音频初筛。
+    /// startWriting，需首帧格式描述），之后逐帧 append；首帧 append 确立锚点后，把首帧
+    /// 原始采集 PTS 交给混音器做音频初筛。
     /// 暂停丢弃判定在本队列上下文执行（Task 10，非渲染线程）：暂停中的帧不入 writer、
     /// 不装配也不平移——首帧装配顺延到恢复后的首个内容帧，成片锚点从真实内容起算。
+    /// Task 15 合成管线：合成插在暂停平移判定**之后**、append **之前**——合成不改变
+    /// 时间轴，PTS 原样透传（append 仍用 shiftedPTS）；无 PiP（合成器 nil 或当帧取不到
+    /// 摄像头帧/位置）时直返原 buffer，语义与 T8–T13 已验收的直通路径一致。
     private func handleVideoSample(_ sampleBuffer: CMSampleBuffer) {
         guard CMSampleBufferDataIsReady(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
@@ -380,7 +401,19 @@ extension SCStreamRecorder: SCStreamOutput {
                 session.startWriting()
                 writerArmed = true
             }
-            try session.appendVideo(pixelBuffer, at: shiftedPTS)
+            // Task 15：逐帧合成（仅 PiP 开启时到达此处；内部无 PiP 时直返原 buffer）
+            let outputBuffer: CVPixelBuffer
+            if let pipCompositor, let pipPixelBufferProvider, let pipFrameProvider {
+                outputBuffer = pipCompositor.composite(
+                    screenFrame: pixelBuffer,
+                    pip: pipPixelBufferProvider(),
+                    pipFrame: pipFrameProvider(),
+                    at: shiftedPTS,
+                    into: pipCompositor.context)
+            } else {
+                outputBuffer = pixelBuffer // 直通路径：零开销（同 T8–T13 行为）
+            }
+            try session.appendVideo(outputBuffer, at: shiftedPTS)
             if didArm {
                 // gate 用首帧原始采集 PTS（host 时基，与混音器输出 PTS 同基）：混音侧初筛
                 // 「录制前的系统声」；文件基（平移后）的锚点兜底由 handleMixedAudio 负责
