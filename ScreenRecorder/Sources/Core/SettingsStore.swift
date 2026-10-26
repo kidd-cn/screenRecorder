@@ -72,7 +72,9 @@ final class SettingsStore: ObservableObject {
         }
         self.countdownSeconds = userDefaults.object(forKey: Self.countdownSecondsKey) as? Int ?? 5
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false
-        self.clickHighlightEnabled = userDefaults.object(forKey: Self.clickHighlightEnabledKey) as? Bool ?? true
+        // T16 裁定：点击高亮默认关（opt-in）；早期脚手架曾以 true 落库，随本任务翻转为 false
+        //（真源仍是 UserDefaults：外部 defaults write com.screenrecorder.app clickHighlightEnabled -bool true 开启）。
+        self.clickHighlightEnabled = userDefaults.object(forKey: Self.clickHighlightEnabledKey) as? Bool ?? false
     }
 
     private static let fpsKey = "fps"

@@ -81,15 +81,21 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     /// PiP 装配单元（T15，AppAssembly 注入；nil = 无 PiP 能力，录制照常纯屏幕）。
     /// 运行时生命周期挂在 begin/finish（既有 stop 路径），失败内部降级不阻断录制。
     private let cameraPiP: CameraPiPWindowController?
+    /// 点击高亮跟踪器（T16，AppAssembly 注入；nil = 未装配，点击路全关）。所有权归装配层；
+    /// 开关重对齐与 start/stop 由 CaptureController 生命周期钩子驱动，本层只负责把
+    /// 屏坐标 → 捕获像素的取数闭包装进 recorder（begin 时按当次几何一次性组装）。
+    private let clickHighlightTracker: ClickHighlightTracker?
 
     init(diskProvider: DiskFreeSpaceProviding = VolumeFreeSpaceProvider(),
          warnBelow: Int64 = 2_000_000_000,
          stopBelow: Int64 = 500_000_000,
-         cameraPiP: CameraPiPWindowController? = nil) {
+         cameraPiP: CameraPiPWindowController? = nil,
+         clickHighlightTracker: ClickHighlightTracker? = nil) {
         self.diskProvider = diskProvider
         self.warnBelow = warnBelow
         self.stopBelow = stopBelow
         self.cameraPiP = cameraPiP
+        self.clickHighlightTracker = clickHighlightTracker
     }
 
     func begin(_ config: RecordingConfiguration) async throws {
@@ -110,11 +116,18 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 
         keeper.activate(reason: "屏幕录制进行中")
 
-        // Task 15：PiP 随录制启动（includeCamera 时）——摄像头 + 浮窗先热，首帧起 PiP 就位。
+        // T15：PiP 随录制启动（includeCamera 时）——摄像头 + 浮窗先热，首帧起 PiP 就位。
         // 几何解析失败 / 授权拒绝 / 无摄像头在内部降级为纯屏幕（T8 混音降级精神），不阻断。
         // （begin 本体非主 actor；浮窗/摄像头装配全主线程，MainActor.run 跳转。）
-        if config.includeCamera, let cameraPiP {
-            let geometry = await PiPCaptureGeometry.resolve(for: config.mode)
+        // T16：采集几何同场复用——PiP 摆放与点击换算共用一次 resolve（nil = 解析失败，
+        // 双效果均内部降级纯屏幕）。
+        let wantsPiP = config.includeCamera && cameraPiP != nil
+        let wantsClick = config.clickHighlightEnabled && clickHighlightTracker != nil
+        var geometry: PiPCaptureGeometry?
+        if wantsPiP || wantsClick {
+            geometry = await PiPCaptureGeometry.resolve(for: config.mode)
+        }
+        if wantsPiP, let cameraPiP {
             await MainActor.run { cameraPiP.beginRecording(geometry: geometry) }
         }
 
@@ -123,6 +136,20 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // 原 buffer，与直通路径等价。
         recorder.pipPixelBufferProvider = cameraPiP?.latestPixelBuffer
         recorder.pipFrameProvider = cameraPiP?.currentPiPFrame
+        // 点击高亮取数缝（T16）：Cocoa 全局 → CG 全局 → 捕获像素，转换器按当次几何与
+        // 主屏翻转入口一次性组装；tracker 未启动/未衰减窗口内 currentState 返回 nil，
+        // 合成器按无高亮直通。几何解析失败（nil）不装缝 = 点击路整体降级关闭。
+        if config.clickHighlightEnabled, let clickHighlightTracker, let geometry {
+            let flipHeight = await MainActor.run { ClickHighlightTracker.primaryScreenHeight() }
+            recorder.clickOverlayProvider = { [weak clickHighlightTracker] in
+                clickHighlightTracker?.currentState { cocoaPoint in
+                    let cgPoint = ClickHighlightTracker.cgGlobalPoint(
+                        fromCocoaGlobal: cocoaPoint,
+                        primaryScreenHeight: flipHeight)
+                    return geometry.capturePixelPoint(fromCGPoint: cgPoint)
+                }
+            }
+        }
         // 失败通道（T18 台账指针）：recorder 首失败经此上报，上层负责 stop 保存路径
         recorder.onStreamFailure = { [weak self] error in self?.onInterruption?(error) }
         self.recorder = recorder
@@ -189,6 +216,9 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 ///    再回调，二者之间无挂起点，观察者看到 `.idle` 时回调必然已完成。
 /// 7. 失败自动保存语义：`handleSessionFailure` 走 stop 保存路径，成片保留并回调
 ///    `onFinishedFile`，同时通知失败原因（权限类失败引导重启/重授权，见 failureMessage）。
+/// 8. 点击高亮跟踪器（T16）：`start` 时以 config 快照重对齐 enabled（opt-in 真源），
+///    `enterRecordingPhase` 启动监听、两条 finalize 出口摘除——倒计时与收尾期不监听；
+///    tracker nil（未装配）全链路 no-op，不影响录制。
 @MainActor
 final class CaptureController: ObservableObject {
     @Published private(set) var state: CaptureState = .idle
@@ -197,6 +227,9 @@ final class CaptureController: ObservableObject {
 
     /// 通知出口（App 装配点注入；测试默认不注入时失败/警告静默）。
     var notifier: RecordingNotifying?
+
+    /// 点击高亮跟踪器（T16 装配缝）：AppAssembly 持有，控制器仅驱动生命周期。nil = 未装配。
+    var clickHighlightTracker: ClickHighlightTracker?
 
     /// 测试缝：会话内等待（倒计时步进 1s / elapsed 计时器 0.5s）。生产 = `Task.sleep`，
     /// 所在 Task 被取消时抛错打断；测试注入受控推进。
@@ -246,6 +279,9 @@ final class CaptureController: ObservableObject {
         defer { startInFlight = false }
         var config = config
         config.mode = mode // start 的 mode 参数为准（简报签名 mode 与 config 并列）
+        // T16：enabled 真源是录制开始的 config 快照（外部 defaults 改动自下一场录制生效）；
+        // 监听中关闭时 tracker 内部立即摘除 monitor。
+        clickHighlightTracker?.setEnabled(config.clickHighlightEnabled)
         hasBegun = false
         pendingDiscard = false
         pendingFailure = nil
@@ -301,6 +337,7 @@ final class CaptureController: ObservableObject {
         elapsed = 0
         state = .recording
         startElapsedTimer()
+        clickHighlightTracker?.start() // T16：点击监听随录制启动（disabled 未装机为 no-op）
     }
 
     // MARK: 浮条动作
@@ -380,6 +417,7 @@ final class CaptureController: ObservableObject {
     private func finalize(discard: Bool) async {
         guard state == .finishing else { return }
         stopElapsedTimer()
+        clickHighlightTracker?.stop() // T16：点击监听随收尾停止（幂等）
         let url = await session.finish()
         resetElapsed()
         state = .idle
@@ -399,6 +437,7 @@ final class CaptureController: ObservableObject {
     private func finalizeAfterFailure(_ error: Error) async {
         guard state == .finishing else { return }
         stopElapsedTimer()
+        clickHighlightTracker?.stop() // T16：失败自动保存路径同样摘除监听（幂等）
         let url = await session.finish()
         resetElapsed()
         state = .idle

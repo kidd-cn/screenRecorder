@@ -19,12 +19,19 @@ final class AppAssembly: ObservableObject {
     /// 所有权进本容器（装配红线）；运行时生命周期由 RecordingSessionCoordinator 的
     /// begin/finish（既有 stop 路径）驱动，启动失败内部降级纯屏幕。
     private let cameraPiP: CameraPiPWindowController
+    /// 点击高亮跟踪器（T16）：所有权进本容器（装配红线）；初值取设置快照，enabled 真源
+    /// 由 CaptureController 在录制开始时以 config 快照重对齐（外部 defaults 改动自下一场
+    /// 录制生效），start/stop 由录制生命周期钩子驱动。
+    private let clickHighlightTracker: ClickHighlightTracker
 
     init() {
         let settings = SettingsStore()
         let fileStore = RecordingFileStore(baseDirectory: settings.outputDirectory)
         let cameraPiP = CameraPiPWindowController()
-        let coordinator = RecordingSessionCoordinator(cameraPiP: cameraPiP)
+        let clickHighlightTracker = ClickHighlightTracker(enabled: settings.clickHighlightEnabled)
+        let coordinator = RecordingSessionCoordinator(
+            cameraPiP: cameraPiP,
+            clickHighlightTracker: clickHighlightTracker)
         let notifier = UNRecordingNotifier()
         let controller = CaptureController(
             session: coordinator,
@@ -35,6 +42,8 @@ final class AppAssembly: ObservableObject {
             }
         )
         controller.notifier = notifier
+        // 点击高亮跟踪器（T16）：装配层持有，控制器按录制生命周期驱动（见 CaptureController 边界 8）
+        controller.clickHighlightTracker = clickHighlightTracker
         // 磁盘监控 / 流失败出口 → 状态机（DiskSpaceMonitor 与 onStreamFailure 均主队列保证）
         coordinator.onInterruption = { error in
             Task { @MainActor in controller.handleSessionFailure(error) }
@@ -60,6 +69,7 @@ final class AppAssembly: ObservableObject {
             }
         )
         self.cameraPiP = cameraPiP
+        self.clickHighlightTracker = clickHighlightTracker
     }
 }
 

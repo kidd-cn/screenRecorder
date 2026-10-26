@@ -31,7 +31,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.outputDirectory, defaultOutputDirectory)
         XCTAssertEqual(store.countdownSeconds, 5)
         XCTAssertFalse(store.pipEnabled)
-        XCTAssertTrue(store.clickHighlightEnabled)
+        XCTAssertFalse(store.clickHighlightEnabled, "T16 裁定：点击高亮默认关（opt-in）")
     }
 
     func testFpsPersistsAcrossInstances() {

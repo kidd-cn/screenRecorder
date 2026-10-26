@@ -147,6 +147,19 @@ final class PiPCaptureGeometryTests: XCTestCase {
         let frame = displayGeometry.pipFrame(fromCGRect: CGRect(x: 5000, y: 0, width: 160, height: 120))
         XCTAssertEqual(frame?.rectInCapturePixels, CGRect(x: 10000, y: 0, width: 320, height: 240))
     }
+
+    /// T16：单点换算与 rect 同一平移链（减采集区原点、乘 scale）；越界不 clamp（裁定：
+    /// 界外点击合成出画，CI 自然裁剪）。
+    func testCapturePixelPointConvertsWithOriginAndScale() {
+        XCTAssertEqual(displayGeometry.capturePixelPoint(fromCGPoint: CGPoint(x: 100, y: 200)),
+                       CGPoint(x: 200, y: 400), "主屏 2x：点坐标 ×2 进捕获像素")
+        let offset = PiPCaptureGeometry(
+            captureOriginInCGPoints: CGPoint(x: 1440, y: -380),
+            scale: 2,
+            capturePixelSize: CGSize(width: 3840, height: 2160))
+        XCTAssertEqual(offset.capturePixelPoint(fromCGPoint: CGPoint(x: 1500, y: -300)),
+                       CGPoint(x: 120, y: 160), "副屏偏移不丢：先减采集区原点再乘缩放")
+    }
 }
 
 // MARK: - PiPFrameStore（主线程写 / video 队列读的锁保护桥）
@@ -370,5 +383,153 @@ final class PiPCompositorTests: XCTestCase {
         XCTAssertEqual(CVPixelBufferGetHeight(output), 180, "输出画布必须与 screenFrame 实测同高")
         assertColor(samplePixel(output, x: 130, y: 140), equals: pipColor, "PiP rect（实测系）中心应为摄像头内容")
         assertColor(samplePixel(output, x: 30, y: 170), equals: screenColor, "超出 init 假设的区域应保留屏幕内容")
+    }
+}
+
+// MARK: - T16 点击高亮合成（黄描边半透明圆 + 衰减透明度 + 直通纪律）
+
+final class PiPCompositorClickOverlayTests: XCTestCase {
+    /// 软渲染上下文：无头环境确定性出图（生产用 compositor 自带的 GPU context）。
+    private lazy var softwareContext = CIContext(options: [.useSoftwareRenderer: true])
+
+    private let canvasSize = CGSize(width: 320, height: 240)
+    private let screenColor = BGRAColor(blue: 0, green: 255, red: 0, alpha: 255) // 纯绿底
+    private let pipColor = BGRAColor(blue: 255, green: 0, red: 0, alpha: 255)    // 纯蓝（PiP 夹具）
+
+    /// 描边像素带式断言：浓黄（R ≥ 220）+ G 保持 255 + B 近零。描边基态 85% 不透明
+    ///（简报「半透明」），混色后 R 的精确值取决于 CI 工作色彩空间口径（软渲染实测 237），
+    /// 钉带不钉点——衰减方向由 alpha 测试以相对关系另钉。
+    private func assertYellowish(
+        _ actual: BGRAColor,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertGreaterThanOrEqual(Int(actual.red), 220, message, file: file, line: line)
+        XCTAssertTrue(abs(Int(actual.green) - 255) <= 3, "\(message)（G 应保持 255）", file: file, line: line)
+        XCTAssertLessThanOrEqual(Int(actual.blue), 20, message, file: file, line: line)
+    }
+
+    private func makeCompositor() -> PiPCompositor {
+        PiPCompositor(pixelSize: canvasSize)
+    }
+
+    private func makeScreen() -> CVPixelBuffer {
+        makeColorBuffer(width: 320, height: 240, color: screenColor)!
+    }
+
+    private func overlay(point: CGPoint, alpha: CGFloat = 1, radius: CGFloat = 24) -> ClickOverlayState {
+        ClickOverlayState(point: point, appearedAt: Date(), radiusInPixels: radius, fadeDuration: 0.6, alpha: alpha)
+    }
+
+    /// 热路径纪律（T16 裁定）：PiP 关 + 无点击 → 原实例直返（逐字节直通）。
+    func testAllInputsNilReturnsOriginalBuffer() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let result = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil, at: .zero, into: softwareContext)
+        XCTAssertTrue(result === screen, "PiP 关 + 无点击高亮必须直返原 buffer（=== 同实例）")
+    }
+
+    /// 主路径：点击 (100, 60)（缓冲区坐标）→ 描边圈出现在同位；描边中心黄、
+    /// 圈心保持屏幕色（描边圈语义，无填充）、远端屏幕不受影响。
+    func testClickOnlyCompositesRingAtClickedPoint() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: overlay(point: CGPoint(x: 100, y: 60)), at: .zero, into: softwareContext)
+
+        XCTAssertFalse(output === screen, "有点击高亮必须合成输出（新 buffer，不污染采集侧缓冲）")
+        assertYellowish(samplePixel(output, x: 124, y: 60), "描边中心（圆心 +r 方向）应为黄色")
+        assertYellowish(samplePixel(output, x: 76, y: 60), "描边中心（圆心 −r 方向）应为黄色")
+        assertColor(samplePixel(output, x: 10, y: 10), equals: screenColor, "远端屏幕内容不受影响")
+    }
+
+    /// Y 轴方向钉死：缓冲区坐标左上原点（ciY = 高 − y，与 PiP 同约定）。点击贴底边时
+    /// 圈必须贴底；若上下颠倒本用例即红。
+    func testClickOverlayFollowsBufferTopLeftOrigin() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: overlay(point: CGPoint(x: 160, y: 200)), at: .zero, into: softwareContext)
+
+        assertYellowish(samplePixel(output, x: 184, y: 200), "底部点击点描边应为黄色")
+        assertColor(samplePixel(output, x: 160, y: 20), equals: screenColor, "顶部仍是屏幕内容（翻转即红）")
+    }
+
+    /// 半透明描边：圈心不被遮挡（描边圈、无填充）——与全不透明填充圈区分的钉测。
+    func testRingCenterKeepsScreenContent() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: overlay(point: CGPoint(x: 100, y: 60)), at: .zero, into: softwareContext)
+        assertColor(samplePixel(output, x: 100, y: 60), equals: screenColor, "圈心必须透出屏幕内容（仅描边）")
+    }
+
+    /// 衰减透明度：alpha 0.5 的描边黄色分量显著低于 alpha 1（线性比例关系不钉死具体值，
+    /// 只钉「明显更淡」+「仍为黄色」；与 CI 工作色彩空间混合口径解耦）。
+    func testClickOverlayAlphaFadesRing() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let full = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: overlay(point: CGPoint(x: 100, y: 60), alpha: 1), at: .zero, into: softwareContext)
+        let half = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: overlay(point: CGPoint(x: 100, y: 60), alpha: 0.5), at: .zero, into: softwareContext)
+
+        let fullRing = samplePixel(full, x: 124, y: 60)
+        let halfRing = samplePixel(half, x: 124, y: 60)
+        let halfCenter = samplePixel(half, x: 100, y: 60)
+        XCTAssertGreaterThanOrEqual(Int(fullRing.red), 200, "全不透明描边应为浓黄（R ≥ 200）")
+        XCTAssertLessThanOrEqual(Int(halfRing.red), Int(fullRing.red) - 30, "半衰描边须显著更淡")
+        XCTAssertGreaterThanOrEqual(Int(halfRing.red), 80, "半衰描边仍是黄色（R 明显高于纯绿底的 0）")
+        XCTAssertTrue(abs(Int(halfRing.green) - 255) <= 3, "G 通道保持 255")
+        XCTAssertLessThanOrEqual(Int(halfRing.blue), 20)
+        assertColor(halfCenter, equals: screenColor, "圈心不受 alpha 影响（描边圈）")
+    }
+
+    /// 部分越界（裁定 2）：不崩、输出合法、界内半圈完整、界外自然裁剪。
+    func testPartiallyOutsideClickIsClippedNaturally() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: overlay(point: CGPoint(x: 312, y: 120)), at: .zero, into: softwareContext)
+
+        XCTAssertEqual(CVPixelBufferGetWidth(output), 320)
+        XCTAssertEqual(CVPixelBufferGetHeight(output), 240)
+        assertYellowish(samplePixel(output, x: 288, y: 120), "界内半圈描边应为黄色")
+        assertColor(samplePixel(output, x: 319, y: 120), equals: screenColor, "圈内侧（描边半径内）仍是屏幕内容")
+    }
+
+    /// 完全越界：映射出画布的点击不崩、输出合法（裁定 2：不做显式边界过滤）。
+    func testFullyOutsideClickProducesValidFrame() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: overlay(point: CGPoint(x: 600, y: 700)), at: .zero, into: softwareContext)
+        XCTAssertEqual(CVPixelBufferGetWidth(output), 320)
+        XCTAssertEqual(CVPixelBufferGetHeight(output), 240)
+        assertColor(samplePixel(output, x: 10, y: 10), equals: screenColor, "圈完全出画时画面不受影响")
+    }
+
+    /// 双效果并存：PiP 与点击高亮同帧各就各位（互不遮挡对侧）。
+    func testClickOverlayComposesAlongsidePip() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let pip = makeColorBuffer(width: 64, height: 48, color: pipColor)! // 纯蓝
+        let output = compositor.composite(
+            screenFrame: screen, pip: pip,
+            pipFrame: PiPFrame(rectInCapturePixels: CGRect(x: 200, y: 16, width: 96, height: 72)),
+            clickOverlay: overlay(point: CGPoint(x: 60, y: 160)), at: .zero, into: softwareContext)
+
+        assertColor(samplePixel(output, x: 248, y: 52), equals: pipColor, "PiP 内容就位")
+        assertYellowish(samplePixel(output, x: 84, y: 160), "点击描边就位")
+        assertColor(samplePixel(output, x: 60, y: 160), equals: screenColor, "圈心透出屏幕内容")
     }
 }

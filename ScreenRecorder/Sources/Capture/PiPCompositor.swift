@@ -49,6 +49,14 @@ struct PiPCaptureGeometry {
             height: cgRect.height * scale))
     }
 
+    /// CG 全局点（points）→ 捕获像素点。与 `pipFrame(fromCGRect:)` 同一平移链：减采集区
+    /// 原点、乘 scale。越界不 clamp（T16 裁定：界外点击合成出画、CI 自然裁剪）——单点恒可换算。
+    func capturePixelPoint(fromCGPoint cgPoint: CGPoint) -> CGPoint {
+        CGPoint(
+            x: (cgPoint.x - captureOriginInCGPoints.x) * scale,
+            y: (cgPoint.y - captureOriginInCGPoints.y) * scale)
+    }
+
     /// 按捕获模式解析几何（录制 begin 时一次性调用；解析失败返回 nil = 本场录制纯屏幕）。
     /// 系统读数（CGDisplayBounds / CGDisplayCopyDisplayMode / SCShareableContent）无头不可测，
     /// 纯换算部分由 `pipFrame(fromCGRect:)` 钉死。
@@ -82,17 +90,18 @@ struct PiPCaptureGeometry {
 
 // MARK: - PiPCompositor（简报 Produces：逐帧合成器）
 
-/// 逐帧合成器（T15）：屏幕帧为底，PiP 摄像头帧按 `PiPFrame` 贴入捕获像素空间，CI 连续
-/// 圆角 mask。热路径纪律：
+/// 逐帧合成器（T15/T16）：屏幕帧为底，PiP 摄像头帧按 `PiPFrame` 贴入捕获像素空间（CI 连续
+/// 圆角 mask），点击高亮按 `ClickOverlayState` 画黄描边半透明圆（CI 椭圆 mask + alpha 衰减）。热路径纪律：
 /// - `CIContext` 单实例复用（`useSoftwareRenderer: false` 走 GPU，简报钉死）；
 /// - 输出缓冲取自 `CVPixelBufferPool`（避免逐帧 ~24MB 级大分配；池按 screenFrame 实测尺寸
 ///   建立与重建，耗尽兜底直建）；
 /// - 画布尺寸以逐帧实测的 `screenFrame` 尺寸为准（修复轮 Minor #2：`init(pixelSize:)` 的
 ///   尺寸只是提示，消除「缓冲实际尺寸 == init 假设」前提）；
-/// - 无 PiP（pip / pipFrame 为 nil）或完全不相交时**零渲染直返原 buffer**；
-/// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append，本参数为 Task 16 点击高亮的
-///   时间轴预留）；只在 PiP 或点击高亮开启时被调用（调用方门控）。
-/// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与 mask 缓存无需加锁。
+/// - 无 PiP（pip / pipFrame 为 nil）或完全不相交时 PiP 路**零渲染**；无点击态或圈不可得时
+///   点击路**零渲染**；两路皆空时**直返原 buffer**；
+/// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append）；只在 PiP 或点击高亮开启时被调用
+///   （调用方门控：`SCStreamRecorder` 按注入缝在位与否装配合成器）。
+/// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与两处 mask 缓存无需加锁。
 final class PiPCompositor {
     /// 单实例复用的渲染上下文（简报钉死：useSoftwareRenderer: false）。
     let context = CIContext(options: [.useSoftwareRenderer: false])
@@ -113,33 +122,64 @@ final class PiPCompositor {
         let radius: CGFloat
     }
 
+    /// 点击高亮描边宽（捕获像素，T16）：描边中心恰在 `ClickOverlayState.radiusInPixels` 圆上。
+    static let clickStrokeWidth: CGFloat = 4
+    /// 点击高亮描边色：纯黄、基态不透明度 85%（简报「黄色描边半透明圆」；衰减由
+    /// `ClickOverlayState.alpha` 逐帧再乘）。CIColor 字面量直接进 CI 工作空间，不经位图解码。
+    static let clickRingColor = CIColor(red: 1, green: 1, blue: 0, alpha: 0.85)
+    /// 点击圈掩图缓存：键为（位图边长, 描边宽）——半径录制中恒定，实际 ≤ 1 项；封顶防御。
+    private var clickMaskCache: [ClickMaskKey: CIImage] = [:]
+
+    private struct ClickMaskKey: Hashable {
+        let side: Int
+        let strokeWidth: CGFloat
+    }
+
     /// - Parameter pixelSize: 期望输出尺寸（提示值，简报签名逐字）；实际画布以逐帧实测的
     ///   screenFrame 尺寸为准，缓冲池延迟到首帧按实测尺寸建立。
     init(pixelSize: CGSize) {
         self.pixelSize = pixelSize
     }
 
-    /// 逐帧合成（简报 Produces 签名逐字）。screen 为底；pip/pipFrame 任一缺省直返 screen。
+    /// 逐帧合成（简报 Produces 签名逐字，T16 增 clickOverlay）。screen 为底；PiP 与点击高亮
+    /// 双缺省直返 screen（零渲染直返原 buffer）。单效果缺省时该路零渲染跳过，另一路照常。
     @discardableResult
     func composite(screenFrame: CVPixelBuffer,
                    pip: CVPixelBuffer?,
                    pipFrame: PiPFrame?,
+                   clickOverlay: ClickOverlayState? = nil,
                    at pts: CMTime,
                    into context: CIContext) -> CVPixelBuffer {
-        guard let pip, let pipFrame else { return screenFrame } // 无 PiP：零开销直返原 buffer
+        guard pip != nil || clickOverlay != nil else { return screenFrame } // 双缺省：零开销直返原 buffer
         // 画布尺寸以 screenFrame 实测为准（修复轮 Minor #2）：与 init pixelSize 失配时按
         // 实测求交、换算与出图——不得误判越界直通，也不得输出错误尺寸。
         let bounds = CGRect(
             x: 0, y: 0,
             width: CVPixelBufferGetWidth(screenFrame),
             height: CVPixelBufferGetHeight(screenFrame))
-        let targetRect = pipFrame.rectInCapturePixels
-        guard !targetRect.isEmpty, bounds.intersection(targetRect) != .null else { return screenFrame }
-        let pipImage = CIImage(cvPixelBuffer: pip)
-        guard pipImage.extent.width > 0, pipImage.extent.height > 0, targetRect.width > 0 else {
-            return screenFrame
+        let base = CIImage(cvPixelBuffer: screenFrame)
+        var composed: CIImage?
+
+        // PiP（T15 管线原样搬移）：rect 空 / 不相交 / 源异常任一失败即本路零渲染直通。
+        if let pip, let pipFrame {
+            composed = placePip(pip, pipFrame: pipFrame, in: bounds, over: base)
         }
-        guard let output = dequeueOutputBuffer(size: bounds.size) else { return screenFrame } // 缓冲不可得：丢 PiP 不丢帧
+        // 点击高亮（T16）：出画由 CI 自然裁剪；圈不可得（半径/alpha 非法）本路直通不丢帧。
+        if let clickOverlay, let overlayImage = placeClickOverlay(clickOverlay, in: bounds) {
+            composed = overlayImage.composited(over: composed ?? base)
+        }
+
+        guard let composed, let output = dequeueOutputBuffer(size: bounds.size) else { return screenFrame }
+        context.render(composed, to: output)
+        return output
+    }
+
+    /// PiP 摆放（原 composite 主体逐行搬移）：返回合成后的整幅图像；nil = 本帧不合成 PiP。
+    private func placePip(_ pip: CVPixelBuffer, pipFrame: PiPFrame, in bounds: CGRect, over base: CIImage) -> CIImage? {
+        let targetRect = pipFrame.rectInCapturePixels
+        guard !targetRect.isEmpty, bounds.intersection(targetRect) != .null else { return nil }
+        let pipImage = CIImage(cvPixelBuffer: pip)
+        guard pipImage.extent.width > 0, pipImage.extent.height > 0, targetRect.width > 0 else { return nil }
 
         // 摄像头帧等比缩放到目标 rect（源为 .vga640x480，窗口同 4:3，等比即完整覆盖）
         let scale = targetRect.width / pipImage.extent.width
@@ -151,9 +191,71 @@ final class PiPCompositor {
 
         // sourceOver：PiP 在上（self=placedPip），屏幕帧为底。屏幕帧全不透明，参数顺序
         // 反了会把 PiP 完全盖住（本用例已由测试钉死）。
-        let composed = placedPip.composited(over: CIImage(cvPixelBuffer: screenFrame))
-        context.render(composed, to: output)
-        return output
+        return placedPip.composited(over: base)
+    }
+
+    /// 点击高亮圈（T16）：黄描边半透明圆，描边中心恰在 `radiusInPixels`，整体不透明度按
+    /// `overlay.alpha` 衰减（tracker 交付态已按 600ms 窗口回填；合成器不读钟，逐帧确定）。
+    /// 缓冲区坐标 → CI 坐标同 PiP 约定（ciY = 画布高 − 缓冲 y；圆无方向性，仅换算圆心）。
+    /// 圈 mask 按（位图边长, 描边宽）生成一次并缓存——录制中恒定，实际 ≤ 1 项。返回 nil =
+    /// 本帧不合成（半径/alpha 非法或 mask 生成失败，直通不丢帧）。
+    private func placeClickOverlay(_ overlay: ClickOverlayState, in bounds: CGRect) -> CIImage? {
+        let radius = overlay.radiusInPixels
+        let alpha = overlay.alpha
+        guard radius > 0, radius.isFinite, alpha > 0, alpha.isFinite, alpha <= 1.001 else { return nil }
+        guard let ringMask = clickRingMask(radius: radius, strokeWidth: Self.clickStrokeWidth) else { return nil }
+
+        let center = CGPoint(x: overlay.point.x, y: bounds.height - overlay.point.y)
+        // 裁剪域取描边外沿（半径 + 描边半宽 + AA 余量）：裁到圆心线圆界会把描边外半截剪掉，
+        // 四个切线区的采样点恰好落在被剪的边界上（修复自 RED 后首跑：环带缺右/下弧段）。
+        let outer = radius + Self.clickStrokeWidth / 2 + 1
+        let outerRect = CGRect(x: center.x - outer, y: center.y - outer, width: outer * 2, height: outer * 2)
+        let maskExtent = ringMask.extent
+        let placedMask = ringMask.transformed(by: CGAffineTransform(
+            translationX: center.x - maskExtent.midX,
+            y: center.y - maskExtent.midY))
+        // CI 椭圆 mask：黄色描边层按环带亮度掩图取形（mask 白 255=全取 / 黑 0=透明，二元
+        // 灰阶——不引入中灰，避免 CI 工作色彩空间解码往返的中间值漂移）。
+        guard let blend = CIFilter(name: "CIBlendWithMask") else { return nil }
+        blend.setValue(CIImage(color: Self.clickRingColor).cropped(to: outerRect), forKey: kCIInputImageKey)
+        blend.setValue(CIImage(color: .clear).cropped(to: outerRect), forKey: kCIInputBackgroundImageKey)
+        blend.setValue(placedMask, forKey: kCIInputMaskImageKey)
+        guard let ring = blend.outputImage else { return nil }
+        // 淡出不透明度：整体 alpha 缩放（CIColorMatrix alpha 通道）。
+        guard let fade = CIFilter(name: "CIColorMatrix") else { return nil }
+        fade.setValue(ring, forKey: kCIInputImageKey)
+        fade.setValue(CIVector(x: 0, y: 0, z: 0, w: alpha), forKey: "inputAVector")
+        return fade.outputImage
+    }
+
+    /// 环带亮度掩图（8bit 灰度：描边带白 255、其余黑 0，边沿 AA），按（边长, 描边宽）缓存。
+    private func clickRingMask(radius: CGFloat, strokeWidth: CGFloat) -> CIImage? {
+        // 位图盖住描边外沿 + 1px AA 余量；圆心置于位图正中（竖直对称，翻转方向不影响结果）。
+        let side = Int(((radius + strokeWidth / 2 + 1) * 2).rounded(.up))
+        guard side > 1 else { return nil }
+        let key = ClickMaskKey(side: side, strokeWidth: strokeWidth)
+        if let cached = clickMaskCache[key] { return cached }
+        guard let cg = Self.makeRingMaskCGImage(side: side, radius: radius, strokeWidth: strokeWidth) else {
+            return nil
+        }
+        let mask = CIImage(cgImage: cg)
+        if clickMaskCache.count < 4 {
+            clickMaskCache[key] = mask // 封顶缓存（尺寸恒定，实际远低于上限）
+        }
+        return mask
+    }
+
+    /// 环带掩图位图：描边中心恰在半径 `radius` 的圆上（CGContext 描边椭圆）。
+    private static func makeRingMaskCGImage(side: Int, radius: CGFloat, strokeWidth: CGFloat) -> CGImage? {
+        let context = CGContext(
+            data: nil, width: side, height: side, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)
+        guard let context else { return nil }
+        let c = CGFloat(side) / 2
+        context.setStrokeColor(gray: 1, alpha: 1)
+        context.setLineWidth(strokeWidth)
+        context.strokeEllipse(in: CGRect(x: c - radius, y: c - radius, width: radius * 2, height: radius * 2))
+        return context.makeImage()
     }
 
     /// 圆角 mask（最终尺寸空间）：CIBlendWithMask 用圆角矩形亮度图把 PiP 圆角外抹成透明。

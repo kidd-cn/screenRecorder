@@ -524,4 +524,46 @@ final class CaptureControllerTests: XCTestCase {
         controller.showDiskSpaceWarning() // 收尾后（含收尾中）：stop 优先，不再警告
         XCTAssertEqual(notifier.warningCount, 1)
     }
+
+    // MARK: - T16 点击高亮跟踪器生命周期（录制期监听 / 收尾摘除 / config 快照对齐）
+
+    func testClickTrackerStartsOnRecordingEnterAndStopsOnFinalize() async {
+        let controller = makeController(countdownSeconds: 0)
+        let tracker = ClickHighlightTracker(enabled: true)
+        controller.clickHighlightTracker = tracker
+        var config = makeConfig()
+        config.clickHighlightEnabled = true
+
+        await controller.start(mode: .display(1), config: config)
+        XCTAssertTrue(tracker.isMonitoring, "录制进入生命周期钩子应启动点击跟踪器")
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+        XCTAssertFalse(tracker.isMonitoring, "收尾生命周期钩子应停止点击跟踪器")
+    }
+
+    func testClickTrackerFollowsConfigSnapshotAtStart() async {
+        let controller = makeController(countdownSeconds: 0)
+        let tracker = ClickHighlightTracker(enabled: true) // 初值刻意为 true：录制开始以 config 快照重对齐
+        controller.clickHighlightTracker = tracker
+        // makeConfig() 默认 clickHighlightEnabled: false（opt-in 关）
+
+        await controller.start(mode: .display(1), config: makeConfig())
+        XCTAssertFalse(tracker.isMonitoring, "opt-in 关：录制开始重对齐 enabled = false，不得装 monitor")
+        XCTAssertEqual(controller.state, .recording, "功能关闭不影响录制本身")
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+    }
+
+    func testNilClickTrackerDoesNotAffectLifecycle() async {
+        let controller = makeController(countdownSeconds: 0)
+        controller.clickHighlightTracker = nil
+
+        await controller.start(mode: .display(1), config: makeConfig())
+        XCTAssertEqual(controller.state, .recording)
+        controller.stop()
+        await waitForState(.idle, of: controller)
+        XCTAssertEqual(session.finishCount, 1)
+    }
 }

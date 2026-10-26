@@ -6,8 +6,8 @@ import Foundation
 import ScreenCaptureKit
 
 /// SCStream 采集 → `AssetWriterSession` 落盘的录制会话。
-/// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧合成（仅 PiP 开启，Task 15；
-/// 合成在暂停平移判定之后、append 之前，PTS 原样透传）→ append；无 PiP 时为逐帧直通
+/// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧合成（仅 PiP / 点击高亮开启，T15/T16；
+/// 合成在暂停平移判定之后、append 之前，PTS 原样透传）→ append；双效果全关时为逐帧直通
 /// （合成器 nil，零开销）。
 /// 音频路径（Task 9，captureSystemAudio 或 captureMicrophone 时）：`SystemAudioMixer` 双路混音
 /// ——系统声：SCStream audio 队列样本；麦克风：engine inputNode tap（SCStream 的 `.microphone`
@@ -55,6 +55,10 @@ final class SCStreamRecorder: NSObject {
     var pipPixelBufferProvider: (() -> CVPixelBuffer?)?
     /// Task 15 PiP 注入缝：PiP 位置取数（捕获像素空间，浮窗拖动时逐帧变化）。
     var pipFrameProvider: (() -> PiPFrame?)?
+    /// T16 点击高亮注入缝：当帧点击叠加态取数（捕获像素空间，tracker 已回填衰减 alpha）。
+    /// nil（未注入或 clickHighlightEnabled=false）= 点击路全关，热路径与今日逐字节一致。
+    /// 仅 video 队列调用（tracker 内部锁保护快照）。
+    var clickOverlayProvider: (() -> ClickOverlayState?)?
 
     /// `stop()` 完成后的成片 URL；nil 表示本次无产出（启动失败 / 流失败 / 零样本）。
     private(set) var finishedFileURL: URL?
@@ -95,9 +99,12 @@ final class SCStreamRecorder: NSObject {
     func start() async throws {
         let target = try await resolveTarget()
         let session = try AssetWriterSession(config: config, pixelSize: target.pixelSize)
-        // Task 15：合成器按需装配——PiP 开启且注入缝在位时建（CIContext/CVPixelBufferPool
-        // 均惰性持有，未走到合成不产生缓冲分配）。两者都关时保持 nil = 直通路径零开销。
-        if config.includeCamera, pipPixelBufferProvider != nil, pipFrameProvider != nil {
+        // T15/T16：合成器按需装配——PiP 开启（摄像头 + 位置注入缝在位）或点击高亮开启
+        //（取数注入缝在位）时建（CIContext/CVPixelBufferPool 均惰性持有，未走到合成不产生
+        // 缓冲分配）。两者都关时保持 nil = 直通路径零开销。
+        let pipActive = config.includeCamera && pipPixelBufferProvider != nil && pipFrameProvider != nil
+        let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
+        if pipActive || clickActive {
             pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
         }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
@@ -401,17 +408,20 @@ extension SCStreamRecorder: SCStreamOutput {
                 session.startWriting()
                 writerArmed = true
             }
-            // Task 15：逐帧合成（仅 PiP 开启时到达此处；内部无 PiP 时直返原 buffer）
+            // T15/T16：逐帧合成（任一效果开启时到达此处；合成器内部对缺省输入各自零渲染
+            // 直通，双缺省直返原 buffer）——合成不改变时间轴，PTS 原样透传（append 仍用
+            // shiftedPTS）；合成器 nil 时直通路径零开销（同 T8–T14 行为）。
             let outputBuffer: CVPixelBuffer
-            if let pipCompositor, let pipPixelBufferProvider, let pipFrameProvider {
+            if let pipCompositor {
                 outputBuffer = pipCompositor.composite(
                     screenFrame: pixelBuffer,
-                    pip: pipPixelBufferProvider(),
-                    pipFrame: pipFrameProvider(),
+                    pip: pipPixelBufferProvider?(),
+                    pipFrame: pipFrameProvider?(),
+                    clickOverlay: clickOverlayProvider?(),
                     at: shiftedPTS,
                     into: pipCompositor.context)
             } else {
-                outputBuffer = pixelBuffer // 直通路径：零开销（同 T8–T13 行为）
+                outputBuffer = pixelBuffer // 直通路径：零开销（同 T8–T14 行为）
             }
             try session.appendVideo(outputBuffer, at: shiftedPTS)
             if didArm {
