@@ -51,9 +51,16 @@ final class RecordingListViewModel: ObservableObject {
         items.removeAll { $0.id == item.id }
     }
 
-    /// 同目录内重命名并刷新列表。作用于当前 store。
+    /// 同目录内重命名并刷新列表；失败（重名/权限等）时错误照抛给视图层做告警，但列表
+    /// 同样以 refresh 复核磁盘现状（审查修复轮 1 #4：失败后列表仍与磁盘一致）。作用于
+    /// 当前 store。
     func rename(_ item: RecordingFileMetadata, to: String) async throws {
-        try storeProvider().rename(item.url, toName: to)
+        do {
+            try storeProvider().rename(item.url, toName: to)
+        } catch {
+            await refresh()
+            throw error
+        }
         await refresh()
     }
 

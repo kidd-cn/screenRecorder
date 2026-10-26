@@ -47,7 +47,9 @@ final class MicrophoneRouteWatcher {
         lock.withStateLock { observer = newObserver }
     }
 
-    /// 停止监听（幂等）。返回后不会再有任何回调。
+    /// 停止监听（幂等）。返回后不再发起新的投递；移除 observer 瞬间已在途的最后一次通知
+    /// 仍可能送达，但会被下游 `SystemAudioMixer.rebuildAfterConfigurationChange` 的
+    /// isRunning/engine 快照闸吸收（收尾后 engine 已停，重建为 no-op）。
     func stop() {
         let stale: NSObjectProtocol? = lock.withStateLock {
             let owned = observer

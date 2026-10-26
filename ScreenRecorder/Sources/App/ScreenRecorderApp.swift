@@ -202,7 +202,9 @@ final class AppAssembly: ObservableObject {
     /// 打开文件列表窗口（菜单「文件列表…」入口，T18）：懒建单实例复用（窗口关闭仅隐藏，
     /// `isReleasedWhenClosed = false`）。列表模型经 store 取数缝读当前 `fileStore`——
     /// 懒建时捕获装配容器弱引用，`updateOutputDirectory` 换装后刷新即见新目录（T17 审查
-    /// 发现的固定拷贝缺陷在此封堵）。LSUIElement 应用需激活再前置（同偏好设置窗口）。
+    /// 发现的固定拷贝缺陷在此封堵）。刷新通道（审查修复轮 1）：首开 `.task` + 复用窗口
+    /// 每次激活即刷新（didBecomeKeyNotification，见 `RecordingListWindowController`）。
+    /// LSUIElement 应用需激活再前置（同偏好设置窗口）。
     func openRecordingList() {
         if recordingListWindowController == nil {
             let viewModel = RecordingListViewModel(storeProvider: { [weak self] in
@@ -219,7 +221,7 @@ final class AppAssembly: ObservableObject {
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: RecordingListView(viewModel: viewModel))
             window.center()
-            recordingListWindowController = NSWindowController(window: window)
+            recordingListWindowController = RecordingListWindowController(window: window, viewModel: viewModel)
         }
         NSApp.activate(ignoringOtherApps: true)
         recordingListWindowController?.showWindow(nil)
@@ -237,6 +239,41 @@ final class AppAssembly: ObservableObject {
         }
         KeyboardShortcuts.onKeyUp(for: .pauseResumeRecording) { [weak self] in
             Task { @MainActor in self?.togglePauseResumeRecording() }
+        }
+    }
+}
+
+/// 文件列表窗口控制器（审查修复轮 1 #1）：复用窗口（`isReleasedWhenClosed = false`）使
+/// SwiftUI `.task` 只在窗口生命周期首帧执行——关闭后再前置（makeKeyAndOrderFront）不会
+/// 重触发；以窗口 `didBecomeKeyNotification`（仅本窗口为 object，主队列投递）补「每次
+/// 激活即刷新」，与视图内 `.task` 首开刷新及内容区底部刷新栏互补（首次激活与 `.task`
+/// 各刷一次，refresh 幂等无害）。通知观察者形状与 MicrophoneRouteWatcher 一致
+///（NSWindowController 对 NSWindowDelegate 可选要求的 Swift 隔离桥接在此工具链不可用）。
+private final class RecordingListWindowController: NSWindowController {
+    private let viewModel: RecordingListViewModel
+    private var didBecomeKeyObserver: NSObjectProtocol?
+
+    init(window: NSWindow, viewModel: RecordingListViewModel) {
+        self.viewModel = viewModel
+        super.init(window: window)
+        didBecomeKeyObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in await self.viewModel.refresh() }
+        }
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        if let didBecomeKeyObserver {
+            NotificationCenter.default.removeObserver(didBecomeKeyObserver)
         }
     }
 }

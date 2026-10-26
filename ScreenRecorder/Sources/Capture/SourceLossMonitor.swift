@@ -91,11 +91,16 @@ final class SourceLossMonitor {
             Unmanaged.passUnretained(self).toOpaque()
         )
         if status != .success {
+            // 注册失败复位标记（审查修复轮 1 #2）：否则标记滞留 true——后续 start 永不重试
+            // 注册，stop 还会去摘除一对从未注册的回调。
+            lock.withStateLock { registered = false }
             NSLog("SourceLossMonitor: CGDisplayRegisterReconfigurationCallback 失败（\(status.rawValue)），源丢失监视不可用")
         }
     }
 
-    /// 停止监视并复位（幂等）。返回后不会再有任何回调。
+    /// 停止监视并复位（幂等）。返回后不再发起新的投递；已在途（已排入主队列等待投递）的
+    /// 最后一次命中仍可能送达，但会被 `handleDisplayRemoved` 的 `armed` 闸吸收（stop 已清位，
+    /// 不会触发 `onSourceLost`）。
     func stop() {
         let wasRegistered: Bool = lock.withStateLock {
             let owned = registered

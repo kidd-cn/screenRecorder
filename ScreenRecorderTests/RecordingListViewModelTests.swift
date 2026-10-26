@@ -97,6 +97,30 @@ final class RecordingListViewModelTests: XCTestCase {
         XCTAssertEqual(RecordingFileStore(baseDirectory: dirA).contents().count, 1, "旧目录不得被误删")
     }
 
+    /// 审查修复轮 1 #4：rename 抛错（重名/权限等）时错误照抛（视图层据此告警），但列表
+    /// 仍以 refresh 复核磁盘——失败路径不吞掉磁盘现状。
+    func testRenameFailureStillRefreshesItemsFromDisk() async throws {
+        try writeFakeRecordings()
+        let store = RecordingFileStore(baseDirectory: directory)
+        let vm = RecordingListViewModel(store: store, durationProvider: { _ in 1.0 })
+        await vm.refresh()
+        XCTAssertEqual(vm.items.count, 2)
+        // 刷新后磁盘上多出的新文件：列表此刻尚不可见
+        try Data().write(to: directory.appendingPathComponent("录屏_2026-10-25_11-00-00.mp4"))
+
+        // 重名冲突：items[1]（09-00-00）改名为已存在的 10-00-00 → fileWriteFileExists
+        do {
+            try await vm.rename(vm.items[1], to: "录屏_2026-10-25_10-00-00.mp4")
+            XCTFail("重名重命名应抛错")
+        } catch {
+            XCTAssertTrue(error is CocoaError, "重名冲突应为 CocoaError：\(error)")
+            XCTAssertEqual((error as? CocoaError)?.code, .fileWriteFileExists)
+        }
+
+        XCTAssertEqual(vm.items.count, 3, "失败后 refresh 复核磁盘：新文件应出现在列表")
+        XCTAssertEqual(vm.items.first?.name, "录屏_2026-10-25_11-00-00.mp4")
+    }
+
     /// 可换装的 store 容器（模拟装配层 updateOutputDirectory 换装点）。
     private final class StoreBox: @unchecked Sendable {
         var store: RecordingFileStore

@@ -2,9 +2,13 @@ import AppKit
 import SwiftUI
 
 /// 文件列表窗口（Task 18 brief Produces）：`Table` 列名称/大小/时长/创建时间；行操作
-/// 播放（`NSWorkspace.shared.open`）/ Finder 显示 / 重命名 / 删除（`NSAlert` 确认）；
-/// 工具栏「刷新」。列表真源是 `RecordingListViewModel`（store 经取数缝在调用时刻读
-/// 装配层当前值——输出目录变更后刷新即见新目录，T17 审查修复）。
+/// 播放（`NSWorkspace.shared.open`）/ Finder 显示 / 重命名 / 删除（`NSAlert` 确认）。
+/// 刷新入口（审查修复轮 1）：窗口内容内底部刷新栏（条目数随显）——SwiftUI `.toolbar`
+/// 从 NSHostingView 桥接进 NSWindow 需 macOS 14（sceneBridgingOptions），macOS 13 不渲染，
+/// 故不用工具栏；复用窗口（`isReleasedWhenClosed = false`）下 `.task` 每窗口生命周期仅
+/// 首帧一次，故首开刷新（`.task`）+ 每次激活刷新（didBecomeKeyNotification，由
+/// `RecordingListWindowController` 承担）双通道。列表真源是 `RecordingListViewModel`
+///（store 经取数缝在调用时刻读装配层当前值——输出目录变更后刷新即见新目录，T17 审查修复）。
 ///
 /// 行操作挂载方式（偏差台账）：brief 行操作以右键行菜单 + 双击行（播放）承载——SDK
 ///（Xcode 27.1 / Swift 6.4）下 `Table(_:actions:columns:)` 初始化器在最小用例即泛型推断
@@ -37,17 +41,30 @@ struct RecordingListView: View {
                 NSWorkspace.shared.open(item.url)
             }
         }
-        .toolbar {
+        .safeAreaInset(edge: .bottom) {
+            bottomBar
+        }
+        .sheet(item: $renameTarget) { item in
+            renameSheet(item: item)
+        }
+        .task { await viewModel.refresh() } // 窗口首开刷新（复用窗口下仅生命周期首帧一次；后续激活刷新由窗口 didBecomeKeyNotification 承担）
+    }
+
+    /// 内容区底部刷新栏（审查修复轮 1 #1）：macOS 13 可渲染的窗口内控件——刷新按钮 +
+    /// 条目计数。
+    private var bottomBar: some View {
+        HStack {
             Button {
                 Task { await viewModel.refresh() }
             } label: {
                 Label("刷新", systemImage: "arrow.clockwise")
             }
+            Spacer()
+            Text("\(viewModel.items.count) 个录制")
+                .foregroundStyle(.secondary)
         }
-        .sheet(item: $renameTarget) { item in
-            renameSheet(item: item)
-        }
-        .task { await viewModel.refresh() } // 窗口打开即刷新
+        .padding(.horizontal)
+        .padding(.vertical, 8)
     }
 
     // MARK: - 行操作（右键菜单；选中集非单选时部分操作收敛）
@@ -109,9 +126,32 @@ struct RecordingListView: View {
         renameTarget = nil
         guard canRename(currentName: item.name) else { return }
         Task {
-            // 失败静默后由模型 refresh 复核（rename 抛错时列表以磁盘为准）
-            try? await viewModel.rename(item, to: target)
+            do {
+                try await viewModel.rename(item, to: target)
+            } catch {
+                // 失败可见（审查修复轮 1 #4）：模型侧已 refresh 以磁盘复核列表，此处告警。
+                presentRenameFailure(error)
+            }
         }
+    }
+
+    /// 重命名失败反馈：NSAlert 呈现原因——同名冲突给明确文案，其余（权限等）透出系统
+    /// 本地化描述；列表已由模型 refresh 复核磁盘现状。
+    private func presentRenameFailure(_ error: Error) {
+        let nsError = error as NSError
+        let detail: String
+        if let cocoaError = error as? CocoaError, cocoaError.code == .fileWriteFileExists {
+            detail = "同名文件已存在，请换一个名称。"
+        } else {
+            detail = nsError.localizedDescription
+        }
+        let alert = NSAlert()
+        alert.messageText = "重命名失败"
+        alert.informativeText = detail
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "好")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 
     // MARK: - 删除（brief：NSAlert 带确认）
