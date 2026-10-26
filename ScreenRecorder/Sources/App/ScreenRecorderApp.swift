@@ -12,6 +12,9 @@ final class AppAssembly: ObservableObject {
     let fileStore: RecordingFileStore
     /// 面板自持 controller.$state 订阅驱动显隐；装配层只需持有保活。
     private let floatingBarPanel: FloatingControlBarPanel
+    /// 倒计时覆盖层（T12）：同样自持 $state 订阅驱动 show/hide；装配层持有保活
+    /// （修复轮 1 装配纪律：有状态/持窗对象一律进本容器）。
+    private let countdownOverlay: CountdownOverlayController
 
     init() {
         let settings = SettingsStore()
@@ -39,6 +42,14 @@ final class AppAssembly: ObservableObject {
         self.controller = controller
         self.fileStore = fileStore
         self.floatingBarPanel = FloatingControlBarPanel(controller: controller)
+        // 倒计时覆盖层：ESC/点击出口接 cancelAndDiscard（回 idle 且不 begin）——覆盖层不自行改状态，
+        // hide 由状态离开 .countdown 收束。
+        self.countdownOverlay = CountdownOverlayController(
+            controller: controller,
+            onCancelAction: { [weak controller] in
+                Task { @MainActor in controller?.cancelAndDiscard() }
+            }
+        )
     }
 }
 
