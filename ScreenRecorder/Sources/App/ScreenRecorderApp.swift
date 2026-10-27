@@ -291,10 +291,15 @@ final class AppAssembly: ObservableObject {
     /// 标识（裁定 1：PID → bundle id，ownerName 兜底）→ 持久化 → 按打开场景决定是否立即
     /// 开始（⇧⌘W 路径 `.window` 随之成为上次使用模式，同 ⇧⌘R 惯例）。快照/标识取不到
     /// （选中间隙窗口关闭）记日志后放弃：不持久化、不开录（死 windowID 开录必败）。
+    /// 审查修复轮 1：非 `.idle`（录制/倒计时/收尾中）整体拒绝——即使未来出现绕过 idle 预检
+    /// 的路径，也不允许选定动作在录制中途覆写 `windowCaptureTarget`。
     private func windowPickerSelected(_ windowID: CGWindowID) {
+        guard controller.state == .idle else {
+            NSLog("WindowPicker: 忽略选定窗口 \(windowID)（当前状态非 idle：\(controller.state)），不覆写捕获目标")
+            return
+        }
         let startsRecording = pendingWindowPickerStartsRecording
-        pendingWindowPickerStartsRecording = false
-        windowPickerWindowController?.window?.orderOut(nil)
+        dismissWindowPicker()
         guard let snapshot = WindowTargetResolver.windowOwnerSnapshot(windowID: windowID),
               let target = WindowTargetResolver.makeTarget(windowID: windowID, snapshot: snapshot) else {
             NSLog("WindowPicker: 选定窗口 \(windowID) 的所有者信息读取失败（可能已关闭），未持久化目标")
@@ -305,6 +310,14 @@ final class AppAssembly: ObservableObject {
         if startsRecording {
             startRecording(mode: .window(windowID))
         }
+    }
+
+    /// 收起残留的选择器窗口并清「选定即开录」标记（审查修复轮 1）：两个动作必须成对——
+    /// 只收窗不清标记，窗口重建前的旧 onSelect 仍会带 true；只清标记不收窗，用户会在
+    /// 已失效的列表里二次选定。直录分支（`.start`）与选定回调共用。
+    private func dismissWindowPicker() {
+        pendingWindowPickerStartsRecording = false
+        windowPickerWindowController?.window?.orderOut(nil)
     }
 
     /// ⇧⌘W（简报行为规格 1-3）：非 `.idle` 一律 no-op（同 ⇧⌘R/P 的控制器自守卫纪律——
@@ -327,6 +340,9 @@ final class AppAssembly: ObservableObject {
             }
             switch WindowStartDecision.resolve(target: settings.windowCaptureTarget, candidates: windows) {
             case .start(let windowID):
+                // 审查修复轮 1：直录前收起可能残留的选择器（此前停留的失效列表 frontmost、
+                // 标记仍 true，录制开始后二次选定会空开录一次并覆写目标）。
+                dismissWindowPicker()
                 startRecording(mode: .window(windowID))
             case .openPicker:
                 openWindowPicker(startsRecordingOnSelection: true)
