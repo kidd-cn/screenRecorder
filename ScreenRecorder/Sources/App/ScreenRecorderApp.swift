@@ -111,9 +111,35 @@ final class AppAssembly: ObservableObject {
 
     // MARK: 录制入口（T17：菜单与全局快捷键共用，配置装配单点化）
 
-    /// 菜单「开始录制（全屏）」入口：主显示器全屏。
-    func startFullScreenRecording() {
-        startRecording(mode: .display(CGMainDisplayID()))
+    /// 菜单「开始录制 → 全屏」入口（T19）：按用户在显示器列表子菜单里选的显示器全屏开录。
+    func startDisplayRecording(on displayID: CGDirectDisplayID) {
+        startRecording(mode: .display(displayID))
+    }
+
+    /// 菜单「开始录制 → 区域…」入口（T19）：RegionSelector 拖拽选区后按 `.region` 开录。
+    /// 选区交互（遮罩/拖拽/ESC 取消/点击无拖动按取消）全部归 T12 `RegionSelector`，此处只
+    /// 做目标屏裁决与开录：遮罩落在**当前鼠标所在的显示器**（用户把指针挪到哪块屏就能在哪块
+    /// 屏上拖框，多屏场景无需额外选屏步骤），取不到时回退主显示器。返回 nil（ESC/误触取消/
+    /// 目标屏不在位）→ 静默放弃，状态机未进入过倒计时/录制。
+    func startRegionRecording() {
+        Task { @MainActor in
+            // 菜单项已按状态置灰，此 guard 兜非菜单路径：选区遮罩不得在录制中途弹出。
+            guard controller.state == .idle else {
+                NSLog("RegionMenu: 忽略区域录制入口（当前状态非 idle：\(controller.state)）")
+                return
+            }
+            let displayID = Self.regionAnchorDisplayID() ?? CGMainDisplayID()
+            guard let rect = await RegionSelector.selectRegion(on: displayID) else { return }
+            startRecording(mode: .region(rect: rect, displayID: displayID))
+        }
+    }
+
+    /// 区域选择的目标屏裁决：包含当前鼠标位置的显示器（Cocoa 全局坐标命中 `NSScreen.frame`）。
+    private static func regionAnchorDisplayID() -> CGDirectDisplayID? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouseLocation) }.flatMap { screen in
+            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        }
     }
 
     /// 唯一的开始装配点：持久化「上次使用的模式」（裁定 2：每次开始都记）→ 建输出目录 →
@@ -296,6 +322,9 @@ final class AppAssembly: ObservableObject {
     private func windowPickerSelected(_ windowID: CGWindowID) {
         guard controller.state == .idle else {
             NSLog("WindowPicker: 忽略选定窗口 \(windowID)（当前状态非 idle：\(controller.state)），不覆写捕获目标")
+            // T20 停放项（终审裁量批准折入 T19）：拒绝路径同样收起选择器并清标记——滞留的
+            // 失效列表无事可做，残留 true 标记还可能污染下一次打开（成对纪律见 dismissWindowPicker）。
+            dismissWindowPicker()
             return
         }
         let startsRecording = pendingWindowPickerStartsRecording
@@ -422,12 +451,17 @@ struct ScreenRecorderApp: App {
         MenuBarExtra {
             MenuBarView(
                 controller: assembly.controller,
-                onStartFullScreen: { assembly.startFullScreenRecording() },
+                settings: assembly.settings,
+                onStartDisplay: { assembly.startDisplayRecording(on: $0) },
+                onStartWindowPicker: { assembly.openWindowPicker(startsRecordingOnSelection: true) },
+                onStartRegion: { assembly.startRegionRecording() },
                 onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenPreferences: { assembly.openPreferences() }
             )
         } label: {
-            Image(systemName: "record.circle")
+            // T19：状态图标（idle/countdown/recording/paused/finishing 逐态换装），
+            // 独立视图自持 @ObservedObject，状态变化不经 App body 重跑直达菜单栏。
+            MenuBarStatusIcon(controller: assembly.controller)
         }
         Window("授权设置", id: "permission-onboarding") {
             PermissionOnboardingWindowContent()
