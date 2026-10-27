@@ -189,6 +189,10 @@ final class AppAssembly: ObservableObject {
                 settings: settings,
                 onOutputDirectoryChange: { [weak self] url in
                     self?.updateOutputDirectory(to: url)
+                },
+                onPickWindowTarget: { [weak self] in
+                    // 偏好设置入口：选定只持久化、不开录（简报「选定持久化；取消不动现有值」）
+                    self?.openWindowPicker(startsRecordingOnSelection: false)
                 }
             ))
             window.center()
@@ -228,7 +232,7 @@ final class AppAssembly: ObservableObject {
         recordingListWindowController?.window?.makeKeyAndOrderFront(nil)
     }
 
-    /// 全局快捷键订阅（⇧⌘R / ⇧⌘P）：App 启动（装配）时挂载恰好一次。动作经主 actor
+    /// 全局快捷键订阅（⇧⌘R / ⇧⌘P / ⇧⌘W）：App 启动（装配）时挂载恰好一次。动作经主 actor
     /// 跳转进入装配层开关方法；包内 `onKeyUp` 把动作追加进静态注册表（无需持有返回值），
     /// 故以 `globalShortcutsMounted` 进程级闸防重挂双触发（裁定 4）。
     private func mountGlobalShortcutsIfNeeded() {
@@ -239,6 +243,118 @@ final class AppAssembly: ObservableObject {
         }
         KeyboardShortcuts.onKeyUp(for: .pauseResumeRecording) { [weak self] in
             Task { @MainActor in self?.togglePauseResumeRecording() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .startWindowRecording) { [weak self] in
+            Task { @MainActor in self?.startWindowRecordingShortcut() }
+        }
+    }
+
+    // MARK: 窗口捕获（T20：⇧⌘W + 选择器接线，T14 WindowPicker 组件接入）
+
+    /// 窗口选择器窗口控制器：窗口归装配容器（装配红线），懒建单实例复用。每次打开重建
+    /// 内容视图——候选列表随之重新枚举（复用窗口不重触发 `.task`，同 T18 文件列表的
+    /// 教训），失效提示横幅按打开场景注入。
+    private var windowPickerWindowController: NSWindowController?
+    /// 本次打开的选择器「选定后是否立即开录」：⇧⌘W 路径 true（选定即持久化并开始，简报
+    /// 行为规格 1/2）；偏好设置「选择窗口…」路径 false（只持久化）。onSelect 闭包捕获容器
+    /// 弱引用，在选定时刻读取本标记（同一次打开内确定）。
+    private var pendingWindowPickerStartsRecording = false
+
+    /// 打开窗口选择器（⇧⌘W 无目标/失效兜底，或偏好设置「选择窗口…」入口）。`showsStaleNotice`
+    /// 为 true 时在列表上方显示「上次选择的窗口不可用，请重新选择」（简报行为规格 2 的用户
+    /// 通知——与选择器同窗呈现，用户正位于操作现场，比系统通知更直接）。取消路径 = 直接
+    /// 关窗，不经选定回调，既有目标不动（简报行为规格 3）。
+    func openWindowPicker(startsRecordingOnSelection: Bool, showsStaleNotice: Bool = false) {
+        if windowPickerWindowController == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "选择窗口"
+            window.isReleasedWhenClosed = false
+            window.center()
+            windowPickerWindowController = NSWindowController(window: window)
+        }
+        pendingWindowPickerStartsRecording = startsRecordingOnSelection
+        windowPickerWindowController?.window?.contentView = NSHostingView(rootView: WindowPickerHostView(
+            bannerText: showsStaleNotice ? "上次选择的窗口不可用，请重新选择" : nil,
+            onSelect: { [weak self] windowID in self?.windowPickerSelected(windowID) }
+        ))
+        NSApp.activate(ignoringOtherApps: true)
+        windowPickerWindowController?.showWindow(nil)
+        windowPickerWindowController?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// 选定回调（主 actor，`WindowPickerView` 双击触发）：关窗 → 单窗所有者快照组装稳定
+    /// 标识（裁定 1：PID → bundle id，ownerName 兜底）→ 持久化 → 按打开场景决定是否立即
+    /// 开始（⇧⌘W 路径 `.window` 随之成为上次使用模式，同 ⇧⌘R 惯例）。快照/标识取不到
+    /// （选中间隙窗口关闭）记日志后放弃：不持久化、不开录（死 windowID 开录必败）。
+    private func windowPickerSelected(_ windowID: CGWindowID) {
+        let startsRecording = pendingWindowPickerStartsRecording
+        pendingWindowPickerStartsRecording = false
+        windowPickerWindowController?.window?.orderOut(nil)
+        guard let snapshot = WindowTargetResolver.windowOwnerSnapshot(windowID: windowID),
+              let target = WindowTargetResolver.makeTarget(windowID: windowID, snapshot: snapshot) else {
+            NSLog("WindowPicker: 选定窗口 \(windowID) 的所有者信息读取失败（可能已关闭），未持久化目标")
+            return
+        }
+        settings.windowCaptureTarget = target
+        NSLog("WindowPicker: 已持久化窗口捕获目标（\(target.ownerAppIdentifier) — \(target.windowTitle)）")
+        if startsRecording {
+            startRecording(mode: .window(windowID))
+        }
+    }
+
+    /// ⇧⌘W（简报行为规格 1-3）：非 `.idle` 一律 no-op（同 ⇧⌘R/P 的控制器自守卫纪律——
+    /// 选择器/提示不该在录制中途弹出）。现场枚举 → 三分支决策（裁定 5 纯函数，装配层只做
+    /// 执行）：命中直接开录该窗口；无目标开选择器；失效先提示再开选择器。枚举失败（权限
+    /// 失效/枚举错）同样退选择器——错误文案与重试由选择器内呈现（T14 失败 UI）。
+    func startWindowRecordingShortcut() {
+        guard controller.state == .idle else {
+            NSLog("WindowShortcut: 忽略 ⇧⌘W（当前状态非 idle：\(controller.state)）")
+            return
+        }
+        Task { @MainActor in
+            let windows: [ShareableWindow]
+            do {
+                windows = try await WindowPicker.enumeratedWindows()
+            } catch {
+                NSLog("WindowShortcut: ⇧⌘W 窗口枚举失败，退回选择器呈现错误：\(error)")
+                openWindowPicker(startsRecordingOnSelection: true)
+                return
+            }
+            switch WindowStartDecision.resolve(target: settings.windowCaptureTarget, candidates: windows) {
+            case .start(let windowID):
+                startRecording(mode: .window(windowID))
+            case .openPicker:
+                openWindowPicker(startsRecordingOnSelection: true)
+            case .staleNotifyThenPicker:
+                NSLog("WindowShortcut: 已存窗口目标现场解析不命中（已关/改名），转选择器重选")
+                openWindowPicker(startsRecordingOnSelection: true, showsStaleNotice: true)
+            }
+        }
+    }
+}
+
+/// 窗口选择器宿主（T20）：T14 `WindowPickerView` + 可选的失效提示横幅。不改 T14 组件
+/// （`onSelect(CGWindowID)` 原样透传）；横幅仅由装配层按打开场景注入（⇧⌘W 失效重选）。
+private struct WindowPickerHostView: View {
+    let bannerText: String?
+    let onSelect: (CGWindowID) -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let bannerText {
+                Label(bannerText, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 4)
+            }
+            WindowPickerView(onSelect: onSelect)
         }
     }
 }

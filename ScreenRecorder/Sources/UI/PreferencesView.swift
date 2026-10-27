@@ -16,6 +16,11 @@ extension KeyboardShortcuts.Name {
     static let pauseResumeRecording = Self(
         "pauseResumeRecording",
         default: .init(.p, modifiers: [.shift, .command]))
+    /// 录制所选窗口（默认 ⇧⌘W，T20）：解析持久化的窗口目标直接开录；无目标/目标失效 →
+    /// 打开选择器（选定即持久化并开始，取消不动既有目标）。
+    static let startWindowRecording = Self(
+        "startWindowRecording",
+        default: .init(.w, modifiers: [.shift, .command]))
 }
 
 // MARK: - HEVC 硬件编码能力（裁定 5）
@@ -60,12 +65,15 @@ enum HEVCEncoderCapability {
 struct PreferencesView: View {
     @ObservedObject var settings: SettingsStore
     var onOutputDirectoryChange: (URL) -> Void
+    /// 打开窗口选择器（T20「窗口捕获」区「选择窗口…」入口）：呈现归装配层
+    ///（`openWindowPicker`，选定只持久化、不开录），视图不做装配副作用。
+    var onPickWindowTarget: () -> Void
 
     var body: some View {
         TabView {
             GeneralTab(settings: settings, onOutputDirectoryChange: onOutputDirectoryChange)
                 .tabItem { Label("通用", systemImage: "gearshape") }
-            RecordingSourcesTab(settings: settings)
+            RecordingSourcesTab(settings: settings, onPickWindowTarget: onPickWindowTarget)
                 .tabItem { Label("录制源", systemImage: "slider.horizontal.3") }
             ShortcutsTab()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
@@ -144,9 +152,10 @@ private struct GeneralTab: View {
 }
 
 /// 录制源页：系统声音 / 麦克风开关（T9 混音既有项）、摄像头画中画（T15）、
-/// 鼠标点击高亮（T16，默认关）。
+/// 鼠标点击高亮（T16，默认关）、「窗口捕获」组（T20：当前目标 + 选择器入口 + 快捷键提示）。
 private struct RecordingSourcesTab: View {
     @ObservedObject var settings: SettingsStore
+    var onPickWindowTarget: () -> Void
 
     var body: some View {
         Form {
@@ -154,17 +163,46 @@ private struct RecordingSourcesTab: View {
             Toggle("麦克风", isOn: $settings.captureMicrophone)
             Toggle("摄像头画中画", isOn: $settings.pipEnabled)
             Toggle("鼠标点击高亮", isOn: $settings.clickHighlightEnabled)
+            Section("窗口捕获") {
+                windowTargetRow
+                Button("选择窗口…") { onPickWindowTarget() }
+                Text("按 ⇧⌘W 录制该窗口（可在快捷键页修改）。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// 当前目标显示（简报文案：App 名 + 窗口标题，未配置「未设置」）。持久化标识是
+    /// bundle id（ownerName 兜底），无独立展示名字段（Produces 三字段钉死），原样展示；
+    /// 无标题窗口显示「（无标题）」（与选择器行文案同款）。
+    private var windowTargetRow: some View {
+        HStack {
+            Text("当前目标")
+            Spacer()
+            if let target = settings.windowCaptureTarget {
+                let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? "（无标题）" : target.windowTitle)"
+                Text(display)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(display)
+            } else {
+                Text("未设置")
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
 
-/// 快捷键页：两个录制控件（`KeyboardShortcuts.Recorder` 内含 `RecorderCocoa`），
+/// 快捷键页：三个录制控件（`KeyboardShortcuts.Recorder` 内含 `RecorderCocoa`），
 /// 取值/落库由包自理（UserDefaults）。
 private struct ShortcutsTab: View {
     var body: some View {
         Form {
             KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
             KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
+            KeyboardShortcuts.Recorder("录制所选窗口：", name: .startWindowRecording)
             Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)

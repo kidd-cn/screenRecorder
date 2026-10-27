@@ -67,6 +67,20 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    /// 窗口捕获目标（T20）：nil = 未配置。稳定标识 = owner bundle id（取不到 ownerName 兜底）
+    /// + 窗口标题（裁定 1，CGWindowID 从不持久化——重启后 id 必变）。Codable JSON 整只落库，
+    /// 解码失败回退未配置；置 nil 同时移除落库键（不留死数据）。只在选定时刻写入——
+    /// 选择器取消不动既有值（简报行为规格 3）。
+    @Published var windowCaptureTarget: WindowCaptureTarget? {
+        didSet {
+            if let target = windowCaptureTarget, let data = try? JSONEncoder().encode(target) {
+                defaults.set(data, forKey: Self.windowCaptureTargetKey)
+            } else if windowCaptureTarget == nil {
+                defaults.removeObject(forKey: Self.windowCaptureTargetKey)
+            }
+        }
+    }
+
     private let defaults: UserDefaults
 
     init(userDefaults: UserDefaults = .standard) {
@@ -97,6 +111,13 @@ final class SettingsStore: ObservableObject {
         } else {
             self.lastCaptureMode = .display(CGMainDisplayID())
         }
+        // T20：窗口捕获目标（⇧⌘W 开录用）；缺省/解码失败回退未配置（nil）。
+        if let data = userDefaults.data(forKey: Self.windowCaptureTargetKey),
+           let target = try? JSONDecoder().decode(WindowCaptureTarget.self, from: data) {
+            self.windowCaptureTarget = target
+        } else {
+            self.windowCaptureTarget = nil
+        }
     }
 
     private static let fpsKey = "fps"
@@ -109,6 +130,7 @@ final class SettingsStore: ObservableObject {
     private static let pipEnabledKey = "pipEnabled"
     private static let clickHighlightEnabledKey = "clickHighlightEnabled"
     private static let lastCaptureModeKey = "lastCaptureMode"
+    private static let windowCaptureTargetKey = "windowCaptureTarget"
 
     /// 合法帧率档位 30/60；越界/缺失回退 30（审查修复轮 1）。
     private static func normalizedFps(_ raw: Int?) -> Int {

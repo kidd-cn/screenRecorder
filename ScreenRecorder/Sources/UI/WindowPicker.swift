@@ -80,14 +80,7 @@ enum WindowPicker {
         loadWindows: () async throws -> [ShareableWindow] = loadShareableWindowsFromSystem,
         loadThumbnails: @MainActor ([ThumbnailRequest]) async -> [CGWindowID: NSImage] = generateThumbnails
     ) async throws -> [WindowCandidate] {
-        guard preflight() else { throw WindowPickerError.screenRecordingPermissionDenied }
-        let windows: [ShareableWindow]
-        do {
-            windows = try await loadWindows()
-        } catch {
-            throw WindowPickerError.contentUnavailable(underlying: String(describing: error))
-        }
-        let selectable = selectableWindows(from: windows, excludingBundleID: selfBundleID)
+        let selectable = try await loadFilteredWindows(preflight: preflight, loadWindows: loadWindows)
         let requests = selectable.map { source in
             ThumbnailRequest(windowID: source.windowID, pointSize: thumbnailPointSize(fitting: source.frame.size))
         }
@@ -99,6 +92,36 @@ enum WindowPicker {
                 appName: source.appName ?? "",
                 thumbnail: thumbnails[source.windowID])
         }
+    }
+
+    /// 现场枚举（T20，⇧⌘W 解析缝）：过滤排序后的中性快照——解析裁定的匹配键（appBundleID /
+    /// appName）与面积平决（frame）都在此类型上，`WindowTargetResolver.resolve` 消费。不产
+    /// 缩略图（无 UI）；权限短路与错误包裹语义与 `availableWindows` 完全一致（共享
+    /// `loadFilteredWindows`）。
+    @MainActor
+    static func enumeratedWindows(
+        preflight: () -> Bool = preflightScreenRecordingPermission,
+        loadWindows: () async throws -> [ShareableWindow] = loadShareableWindowsFromSystem
+    ) async throws -> [ShareableWindow] {
+        try await loadFilteredWindows(preflight: preflight, loadWindows: loadWindows)
+    }
+
+    /// 共享枚举路径（T20 从 availableWindows 抽取，语义逐行保持）：权限预检短路与——
+    /// 权限未授予绝不触发内容枚举；枚举失败包裹 `.contentUnavailable(underlying:)`；
+    /// 过滤排序走 `selectableWindows`。
+    @MainActor
+    private static func loadFilteredWindows(
+        preflight: () -> Bool,
+        loadWindows: () async throws -> [ShareableWindow]
+    ) async throws -> [ShareableWindow] {
+        guard preflight() else { throw WindowPickerError.screenRecordingPermissionDenied }
+        let windows: [ShareableWindow]
+        do {
+            windows = try await loadWindows()
+        } catch {
+            throw WindowPickerError.contentUnavailable(underlying: String(describing: error))
+        }
+        return selectableWindows(from: windows, excludingBundleID: selfBundleID)
     }
 
     // MARK: 纯函数（无头测试钉死）
