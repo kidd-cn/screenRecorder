@@ -1,0 +1,60 @@
+[简体中文](README.md) ｜ **English**
+
+# ScreenRecorder
+
+A macOS screen recording app for tutorials and meetings. Built from scratch on ScreenCaptureKit, with interaction design modeled on OmniRecorder.
+
+## Features
+
+- **Three capture modes**: fullscreen (per-display) / window / region rubber-band
+- **Audio mixing**: independent system-audio and microphone toggles; live mic volume slider and in-recording mute
+- **Camera PiP**: draggable rounded picture-in-picture; mirrored preview, non-mirrored output (FaceTime-style); auto-degrade and recovery on device unplug/replug
+- **Click highlighting**: fading yellow ring, toggleable
+- **Pause / resume**: pause durations are excluded from the output timeline
+- **Floating control bar**: draggable, non-activating, breathing red dot; discard requires a two-click confirm
+- **Global hotkeys**: `⇧⌘R` start/stop (remembers last mode), `⇧⌘P` pause/resume, `⇧⌘W` record a chosen window — rebindable in preferences, no Accessibility permission needed
+- **Countdown**: 0 / 3 / 5 / 10 s with an on-screen overlay, cancellable
+- **Encoding**: H.264 / HEVC (hardware), 30 or 60 fps
+- **Interruption protection**: captured window closed or display unplugged → auto-save; recording survives lock; low disk space → auto-finalize the take
+- **Quit protection**: quitting mid-recording offers Save & Quit / Discard & Quit / Cancel
+- **Recording list**: play, reveal in Finder, rename, delete
+- **Menu bar**: state-aware icon (idle/countdown/recording/paused/finishing) with full menu access
+
+## Requirements
+
+- macOS 13.0+
+- [Xcode](https://apps.apple.com/app/xcode/id497799835) with command-line tools
+- [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
+
+## Build & Run
+
+```bash
+xcodegen generate          # generates ScreenRecorder.xcodeproj (not checked in)
+open ScreenRecorder.xcodeproj   # option 1: ⌘R in Xcode
+# option 2: command line
+xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
+  -configuration Debug -derivedDataPath .build build
+open .build/Build/Products/Debug/ScreenRecorder.app
+```
+
+> If `xcode-select` points at the CLT rather than Xcode.app, prefix xcodebuild with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
+
+First use prompts for **Screen Recording / Microphone / Camera** permissions as needed. Global hotkeys use Carbon `RegisterEventHotKey` — no Accessibility permission required.
+
+## Usage Notes
+
+- The app is menu-bar-only (`LSUIElement`); there is no Dock icon
+- Recordings land in `~/Movies/ScreenRecorder/录屏_*.mp4` by default; the output directory is configurable
+- Window capture: pick a target window once under Preferences → Sources → Window Capture, then `⇧⌘W` starts recording it directly; a stale target prompts re-selection
+- For stereo meeting captures, enable both system audio and microphone — output is stereo AAC
+
+## Tests
+
+```bash
+xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
+  -configuration Debug -derivedDataPath .build test
+```
+
+## Stack
+
+Swift 5 · ScreenCaptureKit (screen + system audio capture) · AVFoundation (mixing, H.264/HEVC writing) · AVCaptureDevice (PiP) · SwiftUI + AppKit (menu bar, floating bar, preferences) · [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) (global hotkeys) · single `@MainActor` assembly container + capture state machine.
