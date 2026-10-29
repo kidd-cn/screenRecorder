@@ -172,18 +172,30 @@ final class AppAssembly: ObservableObject {
     private func startRecording(mode: CaptureMode) {
         settings.lastCaptureMode = mode
         try? fileStore.ensureDirectory()
-        let config = RecordingConfiguration(
+        let config = Self.makeConfiguration(
+            settings: settings,
+            mode: mode,
+            outputURL: fileStore.nextFileURL())
+        Task { await controller.start(mode: mode, config: config) }
+    }
+
+    /// 开始时刻的 config 快照（唯一装配点的纯函数抽取，internal 供无头钉测）：从
+    /// SettingsStore 逐字段入照。终审 F2 复审残余：`micMuted` 必须随快照入照——
+    /// registerMicrophone 据此决定开录是否预装 mic tap，漏带则持久化静音被每场开录
+    /// 静默忽略（live 下发链只覆盖录制中的翻转，兜不了开录初值）。
+    static func makeConfiguration(settings: SettingsStore, mode: CaptureMode, outputURL: URL) -> RecordingConfiguration {
+        RecordingConfiguration(
             mode: mode,
             captureSystemAudio: settings.captureSystemAudio,
             captureMicrophone: settings.captureMicrophone,
             micVolume: settings.micVolume,
+            micMuted: settings.micMuted,
             includeCamera: settings.pipEnabled,
             fps: settings.fps,
             codec: settings.videoCodec,
-            outputURL: fileStore.nextFileURL(),
+            outputURL: outputURL,
             clickHighlightEnabled: settings.clickHighlightEnabled
         )
-        Task { await controller.start(mode: mode, config: config) }
     }
 
     /// ⇧⌘R 开关（裁定 2）：idle/倒计时 → 按上次使用的模式开始；录制/暂停 → 停止；
@@ -566,6 +578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // 倒计时（begin 未发出）无内容可保存：保存键退化为收场取消——stop 在
                 // .countdown 是定义好的 no-op，直接调用会空耗等待上限。
                 if case .countdown = controller.state {
+                    NSLog("QuitGuard: 倒计时态选「退出并保存录制」，无内容可保存，退化为收场取消后退出")
                     controller.cancelAndDiscard()
                 } else {
                     controller.stop()
