@@ -180,6 +180,9 @@ final class SCStreamRecorder: NSObject {
             return
         }
         mixer.setMicrophoneInput(engine.inputNode.inputFormat(forBus: 0), volume: Float(config.micVolume))
+        // 终审 F2：开录时的静音快照（config.micMuted）——状态驱动幂等（false 为 no-op）；
+        // start() 装配据此决定是否预装 inputNode tap（录制中翻转走 setMicMuted live 链）。
+        mixer.setMicMuted(config.micMuted)
     }
 
     /// 麦克风静音（浮条静音按钮语义，Task 11 消费）：转发混音器摘除/回装 inputNode tap；
@@ -187,6 +190,13 @@ final class SCStreamRecorder: NSObject {
     func setMicMuted(_ muted: Bool) {
         let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
         mixer?.setMicMuted(muted)
+    }
+
+    /// 麦克风增益实时更新（终审 F2 偏好滑杆拖动）：转发混音器施加 per-input 音量（运行中
+    /// 即时生效，无需重启 engine）；无混音器（纯视频轨 / 混音器未启动）时为 no-op。
+    func setMicVolume(_ volume: Float) {
+        let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+        mixer?.setMicVolume(volume)
     }
 
     /// 路由自愈触发（T18，MicrophoneRouteWatcher 主队列回调）：快照当前混音器执行

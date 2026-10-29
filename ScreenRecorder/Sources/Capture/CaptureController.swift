@@ -203,6 +203,19 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     func rebuildAudioRoute() {
         recorder?.rebuildAudioAfterConfigurationChange()
     }
+
+    /// 麦克风静音实时下发（终审 F2，偏好「录制中静音麦克风」翻转 / live 链）：转发当前
+    /// recorder 的混音器摘/回装 inputNode tap。无进行中录制 recorder 为 nil，no-op
+    ///（持久化值自下一场开录的 config 快照生效）。
+    func setMicMuted(_ muted: Bool) {
+        recorder?.setMicMuted(muted)
+    }
+
+    /// 麦克风增益实时下发（终审 F2，偏好「麦克风音量」滑杆拖动）：转发当前 recorder 的
+    /// 混音器 per-input 音量施加。无进行中录制 recorder 为 nil，no-op（同上，快照链兜底）。
+    func setMicVolume(_ volume: Float) {
+        recorder?.setMicVolume(volume)
+    }
 }
 
 // MARK: - CaptureController

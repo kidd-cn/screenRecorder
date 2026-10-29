@@ -51,7 +51,9 @@ struct RecordingFileStore {
         return candidate
     }
 
-    /// 列出目录内文件（新在前），目录不存在或读失败时返回空数组。
+    /// 列出目录内录像成片（新在前，只列 `.mp4`），目录不存在或读失败时返回空数组。
+    /// 终审 F7：过滤器收窄为成片扩展名——异常退出残留的 `.claim` 占位与无关文件不进列表
+    ///（此前只滤目录与隐藏文件，`.claim` 会以 0 字节条目混入文件列表）。
     func contents() -> [RecordingFileMetadata] {
         let fileURLs: [URL]
         do {
@@ -65,7 +67,7 @@ struct RecordingFileStore {
         }
 
         return fileURLs
-            .filter { !$0.hasDirectoryPath }
+            .filter { !$0.hasDirectoryPath && $0.pathExtension.lowercased() == "mp4" }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
             .map { url in
                 let values = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey])

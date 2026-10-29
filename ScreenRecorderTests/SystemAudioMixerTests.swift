@@ -242,6 +242,23 @@ final class SystemAudioMixerTests: XCTestCase {
         XCTAssertFalse(mixer.isMicMuted)
     }
 
+    /// 终审 F2 空闲态 setMicVolume：仅记录登记值供 start() 装配施加（不做节点手术）；
+    /// 越界收敛到 0…1，同值重复应用 no-op（状态驱动幂等——滑杆快速连拖不重复做写入）。
+    func testSetMicVolumeWhileIdleRecordsClampedValue() {
+        let mixer = SystemAudioMixer()
+        XCTAssertEqual(mixer.micVolume, 1.0, "缺省增益 1.0")
+
+        mixer.setMicVolume(0.25)
+        XCTAssertEqual(mixer.micVolume, 0.25)
+        mixer.setMicVolume(0.25)
+        XCTAssertEqual(mixer.micVolume, 0.25, "同值重复应用幂等")
+
+        mixer.setMicVolume(2.0)
+        XCTAssertEqual(mixer.micVolume, 1.0, "越上界收敛到 1")
+        mixer.setMicVolume(-1)
+        XCTAssertEqual(mixer.micVolume, 0.0, "越下界收敛到 0")
+    }
+
     /// mic tap 处理器（渲染线程回调的生产逻辑，无头直测）：单声道 48k 输入经 converter 转
     /// masterFormat 立体声后经串行队列写入 ring——L=R=输入值（实测 AVAudioConverter 单声道
     /// 上混为通道复制），帧数守恒。

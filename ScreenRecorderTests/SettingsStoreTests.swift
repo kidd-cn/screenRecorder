@@ -99,6 +99,17 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.countdownSeconds, 0)
     }
 
+    /// 终审 F2：「录制中静音麦克风」持久化默认关，翻转跨实例往返。
+    func testMicMutedDefaultsToFalseAndPersistsAcrossInstances() {
+        let store = SettingsStore(userDefaults: defaults)
+        XCTAssertFalse(store.micMuted, "静音默认关（不改变既有开录行为）")
+
+        store.micMuted = true
+
+        let reloaded = SettingsStore(userDefaults: defaults)
+        XCTAssertTrue(reloaded.micMuted)
+    }
+
     private var defaultOutputDirectory: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScreenRecorder", isDirectory: true)

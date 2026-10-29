@@ -38,6 +38,13 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(micVolume, forKey: Self.micVolumeKey) }
     }
 
+    /// 麦克风静音（终审 F2，持久化默认 false）：与 `captureMicrophone`（是否包含麦克风，
+    /// 开始时刻快照语义）不同——本项是「录制中静音」：翻转即经 live 下发链摘/回装混音器
+    /// inputNode tap（实时生效），同时作为每场开录 config 的静音快照（开录即静音）。
+    @Published var micMuted: Bool {
+        didSet { defaults.set(micMuted, forKey: Self.micMutedKey) }
+    }
+
     /// 默认 ~/Movies/ScreenRecorder（目录创建由 RecordingFileStore.ensureDirectory 负责）
     @Published var outputDirectory: URL {
         didSet { defaults.set(outputDirectory.path, forKey: Self.outputDirectoryKey) }
@@ -93,6 +100,7 @@ final class SettingsStore: ObservableObject {
         self.captureSystemAudio = userDefaults.object(forKey: Self.captureSystemAudioKey) as? Bool ?? true
         self.captureMicrophone = userDefaults.object(forKey: Self.captureMicrophoneKey) as? Bool ?? true
         self.micVolume = userDefaults.object(forKey: Self.micVolumeKey) as? Double ?? 1.0
+        self.micMuted = userDefaults.object(forKey: Self.micMutedKey) as? Bool ?? false
         if let path = userDefaults.string(forKey: Self.outputDirectoryKey) {
             self.outputDirectory = URL(fileURLWithPath: path)
         } else {
@@ -125,6 +133,7 @@ final class SettingsStore: ObservableObject {
     private static let captureSystemAudioKey = "captureSystemAudio"
     private static let captureMicrophoneKey = "captureMicrophone"
     private static let micVolumeKey = "micVolume"
+    private static let micMutedKey = "micMuted"
     private static let outputDirectoryKey = "outputDirectory"
     private static let countdownSecondsKey = "countdownSeconds"
     private static let pipEnabledKey = "pipEnabled"

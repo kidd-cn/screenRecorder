@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreGraphics
 import KeyboardShortcuts
 import SwiftUI
@@ -44,6 +45,9 @@ final class AppAssembly: ObservableObject {
     /// 全局快捷键已挂载的进程级闸（T17 裁定 4）：KeyboardShortcuts 的 onKeyUp 把动作
     /// 追加进包内静态注册表，重挂（assembly init 重跑）会双触发——挂载恰好一次。
     private static var globalShortcutsMounted = false
+    /// 终审 F2：麦克风设置 live 下发链的订阅保活（与容器同寿）。快照链（开始时刻读
+    /// config）与 live 链并存：初值由快照负责，live 只发变化。
+    private var liveMicCancellables: Set<AnyCancellable> = []
 
     init() {
         let settings = SettingsStore()
@@ -78,12 +82,15 @@ final class AppAssembly: ObservableObject {
             coordinator?.rebuildAudioRoute()
         }
         controller.microphoneRouteWatcher = microphoneRouteWatcher
-        // 磁盘监控 / 流失败出口 → 状态机（DiskSpaceMonitor 与 onStreamFailure 均主队列保证）
-        coordinator.onInterruption = { error in
-            Task { @MainActor in controller.handleSessionFailure(error) }
+        // 磁盘监控 / 流失败出口 → 状态机（DiskSpaceMonitor 与 onStreamFailure 均主队列保证）。
+        // 终审 F4（保留环）：两闭包改 [weak controller]（与同文件 SourceLossMonitor /
+        // CountdownOverlayController 闭包同风格）——coordinator 经 controller.session 被控制器
+        // 强持有，闭包再强持控制器即成环，两者同寿但永不释放。
+        coordinator.onInterruption = { [weak controller] error in
+            Task { @MainActor in controller?.handleSessionFailure(error) }
         }
-        coordinator.onDiskSpaceWarning = {
-            Task { @MainActor in controller.showDiskSpaceWarning() }
+        coordinator.onDiskSpaceWarning = { [weak controller] in
+            Task { @MainActor in controller?.showDiskSpaceWarning() }
         }
 
         self.settings = settings
@@ -106,6 +113,23 @@ final class AppAssembly: ObservableObject {
         )
         self.cameraPiP = cameraPiP
         self.clickHighlightTracker = clickHighlightTracker
+        // 终审 F1：装配容器向退出保护登记（弱引用——容器由 App 的 @StateObject 强持有，
+        // AppDelegate 不得反向持强）。登记时序与装配单例的论证见 AppDelegate.registeredAssembly。
+        AppDelegate.registeredAssembly = self
+        // 终审 F2：麦克风设置 live 下发（录制中改动即时生效；无活动会话时 coordinator 侧
+        // recorder 缺位 → no-op）。receive(on: main) 把 tap 手术收敛到主队列（与
+        // MicrophoneRouteWatcher 主队列跳转同一纪律）。注意 mic 是 live 语义，勿与
+        // pipEnabled 的「下一场快照」链混用——两条链在此并存。
+        settings.$micMuted
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak coordinator] muted in coordinator?.setMicMuted(muted) }
+            .store(in: &liveMicCancellables)
+        settings.$micVolume
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak coordinator] volume in coordinator?.setMicVolume(Float(volume)) }
+            .store(in: &liveMicCancellables)
         mountGlobalShortcutsIfNeeded()
     }
 
@@ -439,8 +463,137 @@ private final class RecordingListWindowController: NSWindowController {
     }
 }
 
+// MARK: - 退出保护（终审 F1：录制中退出不再丢数据）
+
+/// 退出决策接缝（纯逻辑，无头可测）：控制器状态 → 退出动作。
+/// - `.idle` → 直接终止（无弹窗）；
+/// - `.finishing` → 静默等待收尾完成（同保存路径，不再询问）；
+/// - `.countdown`/`.recording`/`.paused` → 三键询问（退出并保存录制 / 退出并丢弃 / 取消）。
+enum QuitGuard {
+    enum Action: Equatable {
+        case terminateNow
+        case waitQuietly
+        case askUser
+    }
+
+    static func action(for state: CaptureState) -> Action {
+        switch state {
+        case .idle:
+            return .terminateNow
+        case .finishing:
+            return .waitQuietly
+        case .countdown, .recording, .paused:
+            return .askUser
+        }
+    }
+
+    /// 有界等待回到 `.idle`（主 actor 轮询；上限与步长注入，无头可测——不读真实时钟，
+    /// 以累计步长近似计时）。返回 true = 已回 idle；false = 到时仍未 idle，调用方必须
+    /// 放行退出（宁可截断收尾，不无限挂住退出流）。
+    @MainActor
+    static func waitForIdle(maxSeconds: TimeInterval,
+                            pollInterval: TimeInterval,
+                            provider: () -> CaptureState) async -> Bool {
+        var waited: TimeInterval = 0
+        while provider() != .idle {
+            guard waited < maxSeconds else { return false }
+            try? await Task.sleep(nanoseconds: UInt64(pollInterval * 1_000_000_000))
+            waited += pollInterval
+        }
+        return true
+    }
+}
+
+/// 应用代理（终审 F1）：唯一职责是退出保护——`applicationShouldTerminate` 按 QuitGuard
+/// 决策分流：idle 直接终止；finishing 静默有界等待；录制/暂停/倒计时弹三键询问（保存为
+/// default），保存与丢弃都经有界等待回到 `.idle` 再 `reply(toApplicationShouldTerminate: true)`。
+/// 其余生命周期一律透传默认行为。
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// 装配容器登记缝：`@NSApplicationDelegateAdaptor` 的实例化先于/并行于 `App.init`，
+    /// delegate 无法在自身 init 拿到装配容器。装配侧（`AppAssembly.init`，由 @StateObject
+    /// 保证恰好构造一次——见 AppAssembly 类注释的装配红线）登记弱引用；退出必然晚于
+    /// App.init（菜单/快捷键需应用已运行），届时静态登记必已就位。弱引用方向：容器由
+    /// App 强持有，delegate 不反向持强（避免环，delegate 与进程同寿）。
+    static weak var registeredAssembly: AppAssembly?
+    /// 退出流闸（防重入）：terminateLater 期间（模态询问/有界等待中）再次触发 terminate
+    /// 一律 `.terminateCancel`——首个退出流仍在负责 reply，重入会造成嵌套模态/双 reply。
+    private var quitFlowActive = false
+    /// 退出收场的有界等待上限（秒）：到点即放行终止（裁定 1：不可无限挂住退出）。
+    private static let terminationWaitLimit: TimeInterval = 10
+    /// 等待轮询步长（秒）。
+    private static let terminationPollInterval: TimeInterval = 0.05
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let assembly = Self.registeredAssembly else { return .terminateNow }
+        let controller = assembly.controller
+        switch QuitGuard.action(for: controller.state) {
+        case .terminateNow:
+            return .terminateNow
+        case .waitQuietly:
+            guard !quitFlowActive else { return .terminateCancel }
+            quitFlowActive = true
+            Task { @MainActor in
+                _ = await QuitGuard.waitForIdle(
+                    maxSeconds: Self.terminationWaitLimit,
+                    pollInterval: Self.terminationPollInterval,
+                    provider: { controller.state })
+                NSApplication.shared.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
+        case .askUser:
+            guard !quitFlowActive else { return .terminateCancel }
+            quitFlowActive = true
+            presentQuitConfirmation(controller: controller)
+            return .terminateLater
+        }
+    }
+
+    /// 三键退出询问（App 模态，裁定 1 文案）：「退出并保存录制」（default）→ stop 并有界
+    /// 等待回 idle；「退出并丢弃」→ cancelAndDiscard 同样有界等待；「取消」→ terminateCancel。
+    private func presentQuitConfirmation(controller: CaptureController) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "正在录制中，确定退出吗？"
+        alert.informativeText = "「退出并保存录制」将停止录制并保留成片；「退出并丢弃」将停止录制并删除未保存的内容。"
+        alert.addButton(withTitle: "退出并保存录制")
+        alert.addButton(withTitle: "退出并丢弃")
+        alert.addButton(withTitle: "取消")
+        let response = alert.runModal()
+        Task { @MainActor in
+            switch response {
+            case .alertFirstButtonReturn:
+                // 倒计时（begin 未发出）无内容可保存：保存键退化为收场取消——stop 在
+                // .countdown 是定义好的 no-op，直接调用会空耗等待上限。
+                if case .countdown = controller.state {
+                    controller.cancelAndDiscard()
+                } else {
+                    controller.stop()
+                }
+                await Self.finishTerminationAfterIdle(controller: controller)
+            case .alertSecondButtonReturn:
+                controller.cancelAndDiscard()
+                await Self.finishTerminationAfterIdle(controller: controller)
+            default:
+                quitFlowActive = false
+                NSApplication.shared.reply(toApplicationShouldTerminate: false)
+            }
+        }
+    }
+
+    /// 有界等待回 `.idle` 后放行终止（保存/丢弃共用出口；到点未 idle 也 reply 终止）。
+    private static func finishTerminationAfterIdle(controller: CaptureController) async {
+        _ = await QuitGuard.waitForIdle(
+            maxSeconds: terminationWaitLimit,
+            pollInterval: terminationPollInterval,
+            provider: { controller.state })
+        NSApplication.shared.reply(toApplicationShouldTerminate: true)
+    }
+}
+
 @main
 struct ScreenRecorderApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var assembly: AppAssembly
 
     init() {

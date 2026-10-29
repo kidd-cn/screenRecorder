@@ -55,6 +55,13 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     var frontCameraProvider: () -> AVCaptureDevice? = {
         AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
     }
+    /// 测试缝（终审 a1）：前置摄像头在位校验。生产 = 前置广角解析 + `isConnected`（解析
+    /// 不到设备视为不在位）。拔出后 session 残留上一场的 inputs/outputs（assemblyPlan 永
+    /// 见非零，不会再装配），startRunning 仍成功但永无帧——「无人脸死窗」直到重启；start
+    /// 先做本校验，不在位即在装配之前显式降级（无半装配残留）。
+    var isFrontCameraConnected: () -> Bool = {
+        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)?.isConnected == true
+    }
 
     private let session = AVCaptureSession()
     /// start/stop 的串行化载体（修复轮 Important #1）：跨场录制的上一场 stop 与下一场 start
@@ -103,6 +110,13 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
             throw CameraPiPError.cameraPermissionDenied
         @unknown default:
             throw CameraPiPError.cameraPermissionDenied
+        }
+        // 终审 a1：前置摄像头在位校验（lifecycle 队列上、装配之前）。授权在先：授权拒绝是
+        // 可行动修复（引导授权），设备不在位只是本场降级——先报权限错。不在位 → 显式降级
+        //（不出窗、录制照常、不触碰装配——无半装配残留）；重插后下一场校验自然通过。
+        guard isFrontCameraConnected() else {
+            NSLog("CameraPiP: 前置摄像头不可用（设备未连接），本场录制降级为纯屏幕")
+            throw CameraPiPError.cameraNotFound
         }
         let plan = Self.assemblyPlan(inputs: session.inputs.count, outputs: session.outputs.count)
         if plan.input || plan.output {

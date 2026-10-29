@@ -302,6 +302,21 @@ final class SystemAudioMixer {
         stateLock.withStateLock { gatePTS = pts }
     }
 
+    /// 麦克风增益实时更新（终审 F2 偏好滑杆拖动）：状态驱动——同值重复应用为 no-op
+    ///（快速连拖不重复做节点属性写入）；运行中即时施加在 micNode 的 mixer 连接 per-input
+    /// 音量上（`AVAudioMixing.volume` 属性写入实时生效，无需重启 engine——与 start() 装配
+    /// 时施加的是同一机制）。未运行时仅记录登记值，start() 装配时按登记值施加（与
+    /// `setMicMuted` 空闲态同纪律）。越界值收敛到 0…1。
+    func setMicVolume(_ volume: Float) {
+        let clamped = min(max(volume, 0), 1)
+        let node: AVAudioSourceNode? = stateLock.withStateLock {
+            guard micVolume != clamped else { return nil }
+            micVolume = clamped
+            return isRunning ? micNode : nil
+        }
+        node?.volume = clamped
+    }
+
     // MARK: - 路由自愈（T18，裁定 5）
 
     /// 麦克风路重建决策（纯逻辑，无头可测）：`.AVAudioEngineConfigurationChange` 后重读
@@ -404,6 +419,11 @@ final class SystemAudioMixer {
         } catch {
             NSLog("SystemAudioMixer: 路由自愈重启 engine 失败，本次录制降级为无声：\(error)")
         }
+
+        // 5) 终审 F2：engine 配置变化可能重置 per-input 音量——重启成功后重施登记增益
+        //    （与 live 滑杆链同一机制；无 mic 路 / 已收尾时 node 缺位 no-op）。
+        let (volume, node) = stateLock.withStateLock { (micVolume, isRunning ? micNode : nil) }
+        node?.volume = volume
     }
 
     // MARK: - 内部：装配

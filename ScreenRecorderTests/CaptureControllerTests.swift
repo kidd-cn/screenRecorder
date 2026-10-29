@@ -62,6 +62,9 @@ private final class IntervalRecorder: @unchecked Sendable {
 private final class FakeSession: CaptureSessionManaging {
     var beginCallCount = 0
     var beginError: Error?
+    /// begin 在途门闩（终审修复轮 pendingDiscard/pendingFailure 窗口钉测）：非 nil 时
+    /// begin 在计数后挂起等待放行——主 actor 侧由此制造「begin 已发出、尚未返回」的窗口。
+    var beginGate: ControlledGate?
     var pauseCount = 0
     var resumeCount = 0
     var finishCount = 0
@@ -69,6 +72,7 @@ private final class FakeSession: CaptureSessionManaging {
 
     func begin(_ config: RecordingConfiguration) async throws {
         beginCallCount += 1
+        await beginGate?.wait()
         if let beginError { throw beginError }
     }
 
@@ -469,6 +473,184 @@ final class CaptureControllerTests: XCTestCase {
         XCTAssertTrue(finishedFiles.isEmpty)
         XCTAssertEqual(notifier.failureMessages.count, 1)
         XCTAssertTrue(notifier.failureMessages[0].contains("磁盘"))
+    }
+
+    // MARK: - 终审修复轮：begin-in-flight 窗口（state==.countdown 且 hasBegun 后）的 pending* 序列化
+    //
+    // 终审点名的零测试窗口：倒计时放行后 begin 已发出、尚未返回——此刻 cancelAndDiscard 必须记
+    // pendingDiscard（置 .finishing 去抖位，begin 返回后立即丢弃收尾），handleSessionFailure 必须
+    // 记 pendingFailure（不动状态，begin 返回后按失败路径收尾）；begin 自身失败则两意图一并作废
+    //（无会话可收尾）。经 beginGate 在主 actor 上制造确定性窗口（边界 4/5 的行为钉测）。
+
+    /// 等待 begin 已发出（FakeSession 计数即证），带超时护栏。
+    private func waitForBeginIssued(timeout: TimeInterval = 5) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while session.beginCallCount == 0 && Date() < deadline {
+            await Task.yield()
+        }
+        XCTAssertGreaterThanOrEqual(session.beginCallCount, 1, "等待 begin 发出超时")
+    }
+
+    /// 共同夹具：倒计时 1 步（受控放行）+ begin 在途门闩 + 产出成片，返回开始 Task。
+    /// 调用方持 tickGate：open 一次即放完倒计时进入 begin；session.beginGate 控制 begin 返回时机。
+    @discardableResult
+    private func startIntoBeginInFlightWindow(outputURL: URL) async -> (controller: CaptureController, task: Task<Void, Never>, tickGate: ControlledGate) {
+        let controller = makeController(countdownSeconds: 1)
+        let tickGate = ControlledGate()
+        controller.waitForTick = { _ in await tickGate.wait() }
+        session.finishedURL = outputURL
+        let task = Task { await controller.start(mode: .display(1), config: makeConfig(outputURL: outputURL)) }
+        return (controller, task, tickGate)
+    }
+
+    func testCancelAndDiscardDuringBeginInFlightDefersDiscardUntilBeginReturns() async throws {
+        let url = tempDirectory.appendingPathComponent("pending-discard.mp4")
+        try Data("x".utf8).write(to: url)
+        let (controller, task, tickGate) = await startIntoBeginInFlightWindow(outputURL: url)
+        session.beginGate = ControlledGate()
+
+        await waitForState(.countdown(secondsLeft: 1), of: controller)
+        tickGate.open() // 倒计时放行 → 进入 begin（挂起在 beginGate）
+        await waitForBeginIssued()
+        XCTAssertEqual(controller.state, .countdown(secondsLeft: 1), "begin 在途：状态仍停在倒计时档位")
+
+        controller.cancelAndDiscard() // begin-in-flight 窗口：必须记 pendingDiscard 并置去抖位
+        XCTAssertEqual(controller.state, .finishing, "begin 在途的丢弃不得静默取消，须记 pendingDiscard 走收尾")
+        XCTAssertEqual(session.finishCount, 0, "begin 返回前不得提前收尾")
+
+        session.beginGate?.open() // 放行 begin → 返回后立即丢弃收尾
+        await waitForState(.idle, of: controller)
+        await task.value
+
+        XCTAssertEqual(session.beginCallCount, 1)
+        XCTAssertEqual(session.finishCount, 1, "pendingDiscard 必须在 begin 返回后立即收尾")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "丢弃：成片文件应被删除")
+        XCTAssertTrue(finishedFiles.isEmpty, "丢弃：onFinishedFile 不得回调")
+        XCTAssertTrue(notifier.failureMessages.isEmpty, "丢弃路径保持安静")
+    }
+
+    func testRepeatedCancelAndDiscardDuringBeginInFlightStaysSingleFinalize() async throws {
+        let url = tempDirectory.appendingPathComponent("pending-discard-twice.mp4")
+        try Data("x".utf8).write(to: url)
+        let (controller, task, tickGate) = await startIntoBeginInFlightWindow(outputURL: url)
+        session.beginGate = ControlledGate()
+
+        await waitForState(.countdown(secondsLeft: 1), of: controller)
+        tickGate.open()
+        await waitForBeginIssued()
+
+        controller.cancelAndDiscard()
+        controller.cancelAndDiscard() // 窗口内重复触发：.finishing 去抖位必须吸收
+        session.beginGate?.open()
+        await waitForState(.idle, of: controller)
+        await task.value
+
+        XCTAssertEqual(session.finishCount, 1, "窗口内重复丢弃只允许一次收尾")
+        XCTAssertEqual(finishedFiles.isEmpty, true)
+    }
+
+    func testSessionFailureDuringBeginInFlightDefersToFailurePathAfterBegin() async throws {
+        let url = tempDirectory.appendingPathComponent("pending-failure.mp4")
+        try Data("x".utf8).write(to: url)
+        let (controller, task, tickGate) = await startIntoBeginInFlightWindow(outputURL: url)
+        session.beginGate = ControlledGate()
+
+        await waitForState(.countdown(secondsLeft: 1), of: controller)
+        tickGate.open()
+        await waitForBeginIssued()
+
+        controller.handleSessionFailure(NSError(domain: "test", code: -1)) // 窗口内失败：只记录
+        XCTAssertEqual(controller.state, .countdown(secondsLeft: 1), "pendingFailure 只记录，不得改状态（begin 返回后处置）")
+        XCTAssertEqual(session.finishCount, 0)
+
+        session.beginGate?.open() // begin 成功返回 → 按失败路径收尾（自动保存）
+        await waitForState(.idle, of: controller)
+        await task.value
+
+        XCTAssertEqual(session.finishCount, 1, "pendingFailure 必须在 begin 返回后走 stop 保存路径")
+        XCTAssertEqual(finishedFiles, [url], "失败自动保存：成片保留")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(notifier.failureMessages.count, 1)
+        XCTAssertTrue(notifier.failureMessages[0].contains("已自动保存"), "实际：\(notifier.failureMessages[0])")
+    }
+
+    func testBeginFailureSupersedesPendingDiscard() async throws {
+        let url = tempDirectory.appendingPathComponent("pending-discard-beginfail.mp4")
+        let (controller, task, tickGate) = await startIntoBeginInFlightWindow(outputURL: url)
+        session.beginGate = ControlledGate()
+        session.beginError = CaptureSessionError.insufficientDiskSpace(freeBytes: 100, requiredBytes: 500_000_000)
+
+        await waitForState(.countdown(secondsLeft: 1), of: controller)
+        tickGate.open()
+        await waitForBeginIssued()
+
+        controller.cancelAndDiscard() // 窗口内记 pendingDiscard（置 .finishing）
+        XCTAssertEqual(controller.state, .finishing)
+
+        session.beginGate?.open() // begin 自身失败：无会话可收尾，丢弃意图一并作废
+        await waitForState(.idle, of: controller)
+        await task.value
+
+        XCTAssertEqual(session.beginCallCount, 1)
+        XCTAssertEqual(session.finishCount, 0, "begin 失败无会话可收尾（pendingDiscard 不得再触发 finish）")
+        XCTAssertTrue(finishedFiles.isEmpty)
+        XCTAssertEqual(notifier.failureMessages.count, 1, "只有 begin 失败一条通知，无二次收尾通知")
+        XCTAssertTrue(notifier.failureMessages[0].contains("未能开始"), "实际：\(notifier.failureMessages[0])")
+    }
+
+    func testBeginFailureSupersedesPendingFailure() async throws {
+        let url = tempDirectory.appendingPathComponent("pending-failure-beginfail.mp4")
+        let (controller, task, tickGate) = await startIntoBeginInFlightWindow(outputURL: url)
+        session.beginGate = ControlledGate()
+        session.beginError = CaptureSessionError.insufficientDiskSpace(freeBytes: 100, requiredBytes: 500_000_000)
+
+        await waitForState(.countdown(secondsLeft: 1), of: controller)
+        tickGate.open()
+        await waitForBeginIssued()
+
+        controller.handleSessionFailure(NSError(domain: "test", code: -1)) // 记 pendingFailure
+        session.beginGate?.open() // begin 自身失败
+        await waitForState(.idle, of: controller)
+        await task.value
+
+        XCTAssertEqual(session.finishCount, 0, "begin 失败无会话可收尾（pendingFailure 不得再触发 finish）")
+        XCTAssertEqual(notifier.failureMessages.count, 1, "只有 begin 失败一条通知，不得按失败收尾再通知一次")
+        XCTAssertTrue(notifier.failureMessages[0].contains("未能开始"), "实际：\(notifier.failureMessages[0])")
+    }
+
+    // MARK: - F1 退出保护（QuitGuard 决策接缝：状态 → 退出动作 + 有界等待）
+
+    func testQuitActionForIdleTerminatesImmediately() {
+        XCTAssertEqual(QuitGuard.action(for: .idle), .terminateNow)
+    }
+
+    func testQuitActionForActiveSessionAsksUser() {
+        XCTAssertEqual(QuitGuard.action(for: .countdown(secondsLeft: 3)), .askUser)
+        XCTAssertEqual(QuitGuard.action(for: .recording), .askUser)
+        XCTAssertEqual(QuitGuard.action(for: .paused), .askUser)
+    }
+
+    func testQuitActionForFinishingWaitsQuietly() {
+        XCTAssertEqual(QuitGuard.action(for: .finishing), .waitQuietly)
+    }
+
+    /// 有界等待：idle 到达即刻放行，不耗尽等待上限。
+    func testWaitForIdleReleasesAsSoonAsIdleReached() async {
+        var calls = 0
+        let reachedIdle = await QuitGuard.waitForIdle(maxSeconds: 10, pollInterval: 0.001) {
+            calls += 1
+            return calls >= 3 ? .idle : .finishing
+        }
+        XCTAssertTrue(reachedIdle)
+        XCTAssertEqual(calls, 3, "idle 到达即返回，不得继续空转轮询")
+    }
+
+    /// 有界等待：到时仍未 idle 也必须返回（放行退出，不无限挂住退出流）。
+    func testWaitForIdleTimesOutAndReleasesAnyway() async {
+        let start = Date()
+        let reachedIdle = await QuitGuard.waitForIdle(maxSeconds: 0.05, pollInterval: 0.01) { .recording }
+        XCTAssertFalse(reachedIdle, "到时未 idle：返回 false（由调用方决定放行退出）")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5, "到时即返回，不得远超等待上限")
     }
 
     // MARK: - elapsed：不含暂停时长 + 0.5s 刷新节拍

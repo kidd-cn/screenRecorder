@@ -151,8 +151,9 @@ private struct GeneralTab: View {
     }
 }
 
-/// 录制源页：系统声音 / 麦克风开关（T9 混音既有项）、摄像头画中画（T15）、
-/// 鼠标点击高亮（T16，默认关）、「窗口捕获」组（T20：当前目标 + 选择器入口 + 快捷键提示）。
+/// 录制源页：系统声音 / 麦克风区（终审 F2：包含麦克风=开始时刻快照；录制中静音=live 下发；
+/// 音量滑杆=live 增益）、摄像头画中画（T15）、鼠标点击高亮（T16，默认关）、
+/// 「窗口捕获」组（T20：当前目标 + 选择器入口 + 快捷键提示）。
 private struct RecordingSourcesTab: View {
     @ObservedObject var settings: SettingsStore
     var onPickWindowTarget: () -> Void
@@ -160,7 +161,21 @@ private struct RecordingSourcesTab: View {
     var body: some View {
         Form {
             Toggle("系统声音", isOn: $settings.captureSystemAudio)
-            Toggle("麦克风", isOn: $settings.captureMicrophone)
+            Section("麦克风") {
+                Toggle("包含麦克风", isOn: $settings.captureMicrophone)
+                Toggle("录制中静音麦克风", isOn: $settings.micMuted)
+                HStack {
+                    Text("麦克风音量")
+                    Slider(value: $settings.micVolume, in: 0...1)
+                        .disabled(!settings.captureMicrophone)
+                    Text("\(Int((settings.micVolume * 100).rounded()))%")
+                        .monospacedDigit()
+                        .frame(minWidth: 44, alignment: .trailing)
+                }
+                Text("「包含麦克风」在开始录制时生效；「录制中静音麦克风」与音量在录制中改动实时生效。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Toggle("摄像头画中画", isOn: $settings.pipEnabled)
             Toggle("鼠标点击高亮", isOn: $settings.clickHighlightEnabled)
             Section("窗口捕获") {

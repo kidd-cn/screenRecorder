@@ -69,4 +69,14 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         coordinator.pause()
         coordinator.resume()
     }
+
+    /// 终审 F2：麦克风 live 下发（静音/音量）在无进行中录制时为 no-op——不得崩溃；
+    /// 持久化值自下一场开录的 config 快照生效。
+    func testMicLiveSettersWithoutSessionAreNoOps() {
+        let coordinator = RecordingSessionCoordinator()
+
+        coordinator.setMicMuted(true)
+        coordinator.setMicMuted(false)
+        coordinator.setMicVolume(0.5)
+    }
 }

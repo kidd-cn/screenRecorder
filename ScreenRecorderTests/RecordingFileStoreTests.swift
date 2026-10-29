@@ -72,4 +72,24 @@ final class RecordingFileStoreTests: XCTestCase {
         XCTAssertEqual(names, ["重命名.mp4"])
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
     }
+
+    /// 终审 F7：列表只列 `.mp4` 成片——异常退出残留的 `.claim` 占位与无关文件不进列表
+    ///（扩展名比对不区分大小写）。
+    func testContentsFiltersToMp4FilesOnly() throws {
+        try store.ensureDirectory()
+        let mp4 = directory.appendingPathComponent("录屏_2026-10-25_14-30-05.mp4")
+        let claim = directory.appendingPathComponent("录屏_2026-10-25_14-30-06.mp4.claim")
+        let txt = directory.appendingPathComponent("notes.txt")
+        let partial = directory.appendingPathComponent("half.mp4.part")
+        let upper = directory.appendingPathComponent("CAM.MP4")
+        for file in [mp4, claim, txt, partial, upper] {
+            try Data("x".utf8).write(to: file)
+        }
+
+        let names = store.contents().map(\.name)
+
+        XCTAssertEqual(Set(names), ["录屏_2026-10-25_14-30-05.mp4", "CAM.MP4"],
+                       "只保留 .mp4 成片（.claim/.txt/.part 均不进列表）")
+        XCTAssertEqual(names.count, 2)
+    }
 }

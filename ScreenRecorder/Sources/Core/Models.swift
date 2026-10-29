@@ -24,6 +24,9 @@ struct RecordingConfiguration {
     /// 麦克风增益 0…1（快照语义：录制中途改设置不影响进行中的录制）。
     /// 来源 `SettingsStore.micVolume`（Double），传给混音器前收敛为 Float。
     var micVolume: Double = 1.0
+    /// 麦克风静音快照（终审 F2）：true = 开录即不装 mic tap（混音器空闲态 setMicMuted
+    /// 语义）。录制中改「录制中静音麦克风」走 live 下发链，不影响本快照。缺省 false。
+    var micMuted: Bool = false
     var includeCamera: Bool
     var fps: Int
     var codec: VideoCodec

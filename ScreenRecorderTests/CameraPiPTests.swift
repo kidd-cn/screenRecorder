@@ -54,6 +54,62 @@ final class CameraPiPControllerTests: XCTestCase {
         }
     }
 
+    // MARK: 终审 a1：前置摄像头在位校验（start 装配前拦截，拔出后不再出「无人脸死窗」）
+
+    /// 设备不在位（拔出）→ start 在装配之前显式降级：抛 cameraNotFound，且**不得进入
+    /// 装配**（不触碰设备解析、不 beginConfiguration——拔出后 session 残留上一场的
+    /// inputs/outputs，若继续走 assemblyPlan 会永见非零而跳过装配，startRunning 成功
+    /// 却永无帧）。装配前置拦截同时保证降级路径无半装配残留。
+    func testDisconnectedFrontCameraDegradesBeforeAssembly() {
+        let controller = CameraPiPController()
+        controller.authorizationStatus = { _ in .authorized }
+        controller.isFrontCameraConnected = { false }
+        controller.frontCameraProvider = { XCTFail("设备不在位时不得进入装配（不得解析设备）"); return nil }
+
+        XCTAssertThrowsError(try controller.start()) { error in
+            guard let pipError = error as? CameraPiPController.CameraPiPError,
+                  case .cameraNotFound = pipError else {
+                return XCTFail("应抛 cameraNotFound，实际：\(error)")
+            }
+            XCTAssertNotNil(pipError.errorDescription, "降级错误必须可诊断（装配层日志直接展示）")
+        }
+        XCTAssertNil(controller.latestPixelBuffer, "降级路径不得产出帧")
+    }
+
+    /// 设备在位 → 通过校验照常进入装配链（provider 返回 nil 走既有 cameraNotFound 路径，
+    /// 证明在位校验未误拦）。
+    func testConnectedFrontCameraProceedsIntoAssembly() {
+        let controller = CameraPiPController()
+        controller.authorizationStatus = { _ in .authorized }
+        controller.isFrontCameraConnected = { true }
+        controller.frontCameraProvider = { nil }
+
+        XCTAssertThrowsError(try controller.start()) { error in
+            guard let pipError = error as? CameraPiPController.CameraPiPError,
+                  case .cameraNotFound = pipError else {
+                return XCTFail("应走既有 cameraNotFound 路径（装配阶段），实际：\(error)")
+            }
+        }
+    }
+
+    /// 授权拒绝优先于在位校验（校验排在授权之后）：权限拒绝是可行动修复（引导授权），
+    /// 不得被「设备不在位」的降级文案掩盖。
+    func testDeniedAuthorizationTakesPrecedenceOverDevicePresence() {
+        let controller = CameraPiPController()
+        controller.authorizationStatus = { _ in .denied }
+        controller.isFrontCameraConnected = { false }
+        controller.frontCameraProvider = { XCTFail("未授权时不得触碰设备解析"); return nil }
+
+        XCTAssertThrowsError(try controller.start()) { error in
+            guard let pipError = error as? CameraPiPController.CameraPiPError else {
+                return XCTFail("应抛 CameraPiPError，实际：\(error)")
+            }
+            XCTAssertEqual(pipError.errorDescription,
+                           CameraPiPController.CameraPiPError.cameraPermissionDenied.errorDescription,
+                           "denied 场景必须报权限错（优先于在位降级）")
+        }
+    }
+
     /// 锁保护 latestPixelBuffer：经样本回调写入后可读出同一实例（retain 语义）。
     func testLatestPixelBufferTracksLastDeliveredFrame() throws {
         let controller = CameraPiPController()
