@@ -58,3 +58,7 @@ xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
 ## Stack
 
 Swift 5 · ScreenCaptureKit (screen + system audio capture) · AVFoundation (mixing, H.264/HEVC writing) · AVCaptureDevice (PiP) · SwiftUI + AppKit (menu bar, floating bar, preferences) · [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts) (global hotkeys) · single `@MainActor` assembly container + capture state machine.
+
+## License
+
+[MIT](LICENSE)

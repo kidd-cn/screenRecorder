@@ -58,3 +58,7 @@ xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
 ## 技术栈
 
 Swift 5 · ScreenCaptureKit（屏幕与系统声音采集）· AVFoundation（混音/H.264/HEVC 写盘）· AVCaptureDevice（画中画）· SwiftUI + AppKit（菜单栏、浮条、偏好设置）· [KeyboardShortcuts](https://github.com/sindresorhus/KeyboardShortcuts)（全局快捷键）· 单 `@MainActor` 装配容器 + 捕获状态机。
+
+## 许可证
+
+[MIT](LICENSE)
