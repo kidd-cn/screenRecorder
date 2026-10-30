@@ -80,3 +80,59 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         coordinator.setMicVolume(0.5)
     }
 }
+
+// MARK: - P1a 暂停门（spec §5「暂停时不触发」钉死）
+
+/// 无头钉测面 = `RecordingSessionCoordinator.feedZoomClick`（暂停门 + 换算链所在方法）；
+/// begin 成功路径依赖 ScreenCaptureKit TCC（无头不可确定性驱动，同上类台账注记），
+/// 暂停门经直接喂入 + 无会话 pause/resume（只置位门，recorder no-op）驱动。
+/// 数学口径：翻转高度取画布高 240 → cocoa (x, y) → cg (x, 240−y) → 像素同值 → 归一化
+/// (x/320, 1 − (240−y)/240)；点击锚 now=10、探针 now=10.125（攻击 0.25s 中点，进度 0.5）。
+@MainActor
+final class ZoomPauseGateTests: XCTestCase {
+    private let bounds = CGRect(origin: .zero, size: CGSize(width: 320, height: 240))
+    private let geometry = PiPCaptureGeometry(
+        captureOriginInCGPoints: .zero,
+        scale: 1,
+        capturePixelSize: CGSize(width: 320, height: 240))
+    private let flipHeight: CGFloat = 240
+
+    /// 暂停中丢弃新点击：攻击中锚点不被重启（若门失效，(0.75, 0.75) 新中心会改写
+    /// 变换）；已在途的缩放原样继续走完（不 reset、不 snap-cut）。
+    func testPausedCoordinatorDropsNewZoomClicks() {
+        let coordinator = RecordingSessionCoordinator()
+        let zoomState = AutoZoomState(level: 1.6)
+
+        coordinator.feedZoomClick(CGPoint(x: 80, y: 60), into: zoomState,
+                                  geometry: geometry, flipHeight: flipHeight, now: 10)
+        let attackMid = zoomState.frameTransform(in: bounds, now: 10.125)
+        XCTAssertNotNil(attackMid, "未暂停：点击喂入，攻击中变换非 nil")
+
+        coordinator.pause()
+        coordinator.feedZoomClick(CGPoint(x: 240, y: 180), into: zoomState,
+                                  geometry: geometry, flipHeight: flipHeight, now: 10)
+
+        XCTAssertEqual(zoomState.frameTransform(in: bounds, now: 10.125), attackMid,
+                       "暂停中：新点击被丢弃，攻击中变换原样走完（锚点仍 (0.25, 0.25)）")
+    }
+
+    /// 恢复重新开门：新点击以新中心 (0.5, 0.5) 重启攻击（门未开则仍停留旧锚点）。
+    func testResumeReopensZoomClickFeed() {
+        let coordinator = RecordingSessionCoordinator()
+        let zoomState = AutoZoomState(level: 1.6)
+        coordinator.feedZoomClick(CGPoint(x: 80, y: 60), into: zoomState,
+                                  geometry: geometry, flipHeight: flipHeight, now: 10)
+        coordinator.pause()
+        coordinator.resume()
+
+        coordinator.feedZoomClick(CGPoint(x: 160, y: 120), into: zoomState,
+                                  geometry: geometry, flipHeight: flipHeight, now: 10)
+
+        XCTAssertEqual(zoomState.frameTransform(in: bounds, now: 10.125),
+                       ZoomTransforms.contentTransform(center: CGPoint(x: 0.5, y: 0.5),
+                                                       level: 1.6,
+                                                       progress: 0.5,
+                                                       in: bounds),
+                       "恢复后：新点击重新锚定（变换走 Task 1 真源 API 构造参照）")
+    }
+}

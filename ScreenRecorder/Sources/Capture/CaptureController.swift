@@ -85,6 +85,12 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     /// 开关重对齐与 start/stop 由 CaptureController 生命周期钩子驱动，本层只负责把
     /// 屏坐标 → 捕获像素的取数闭包装进 recorder（begin 时按当次几何一次性组装）。
     private let clickHighlightTracker: ClickHighlightTracker?
+    /// P1a 暂停门（spec §5「暂停时不触发」钉死）：`.paused` 时丢弃**新**缩放点击。
+    /// 主线程限定的普通布尔——全部访问点都在主线程（begin 复位、pause/resume 由
+    /// @MainActor CaptureController 调用、feedZoomClick 走 tracker 主线程回调契约），
+    /// 无锁。只门控新点击喂入：攻击已在途的缩放自然走完（与点击环淡出同语义），
+    /// 暂停**不 reset**（不 snap-cut，见 `feedZoomClick`）。
+    private var isRecordingPaused = false
 
     init(diskProvider: DiskFreeSpaceProviding = VolumeFreeSpaceProvider(),
          warnBelow: Int64 = 2_000_000_000,
@@ -99,6 +105,11 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     }
 
     func begin(_ config: RecordingConfiguration) async throws {
+        // P1a：新场恒未暂停——上一场以暂停收尾（stop 不经 resume）时门仍是关的，不清会
+        // 令下一场缩放静默失效。此写与主线程 pause/resume 无并发：state 尚非 .recording
+        //（pause 被 CaptureController 状态机挡住），tracker 亦未装机（start 在 begin 返回
+        // 之后，enterRecordingPhase）。
+        isRecordingPaused = false
         // 即时磁盘检查：空间不足直接失败，不开录（T5 指针：轮询首触发在 pollInterval 后）
         if let free = diskProvider.freeBytes(at: config.outputURL), free < stopBelow {
             throw CaptureSessionError.insufficientDiskSpace(freeBytes: free, requiredBytes: stopBelow)
@@ -158,11 +169,8 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
                     }
                 }
             }
-            // P1a 自动缩放接线：点击 → 归一化中心 → AutoZoomState.click；缩放仿射经
-            // zoomStateProvider 逐帧进合成器。换算链与点击环完全同源（Cocoa 全局 →
-            // CG 全局 → capturePixelPoint，同一几何与翻转入口），只补两步归一化：
-            // ÷ 画布尺寸；y 翻转为 CI 画布 y 向上口径（合成器 placeClickOverlay 的
-            // `bounds.height - y` 同一翻转）——缩放中心与环落在同一画面位置。
+            // P1a 自动缩放接线：点击 →（暂停门 + 归一化中心，见 feedZoomClick）→
+            // AutoZoomState.click；缩放仿射经 zoomStateProvider 逐帧进合成器。
             // zoomState 为本场新建（config 快照档位：录制中途改设置不影响进行中的录制；
             // 时间线随 recorder 生命周期存亡，无需跨场 reset）。provider 缝强持有它
             //（生命周期 = recorder = 单场录制）；onClick 弱引用防 tracker 跨场滞留。
@@ -170,20 +178,15 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
                 await MainActor.run {
                     let zoomState = AutoZoomState(level: CGFloat(config.autoZoomLevel))
                     let canvasBounds = CGRect(origin: .zero, size: geometry.capturePixelSize)
-                    clickHighlightTracker.onClick = { [weak zoomState] cocoaPoint, _ in
+                    clickHighlightTracker.onClick = { [weak self, weak zoomState] cocoaPoint, _ in
                         // tracker 回调主线程契约（类注释钉定）：assumeIsolated 直进主
                         // actor，零调度延迟，时间线起点贴合点击帧。
                         MainActor.assumeIsolated {
-                            guard let zoomState,
-                                  canvasBounds.width > 0, canvasBounds.height > 0 else { return }
-                            let cgPoint = ClickHighlightTracker.cgGlobalPoint(
-                                fromCocoaGlobal: cocoaPoint,
-                                primaryScreenHeight: flipHeight)
-                            let pixel = geometry.capturePixelPoint(fromCGPoint: cgPoint)
-                            zoomState.click(
-                                atNormalizedPoint: CGPoint(x: pixel.x / canvasBounds.width,
-                                                           y: 1 - pixel.y / canvasBounds.height),
-                                now: ProcessInfo.processInfo.systemUptime)
+                            guard let zoomState else { return }
+                            self?.feedZoomClick(cocoaPoint,
+                                                into: zoomState,
+                                                geometry: geometry,
+                                                flipHeight: flipHeight)
                         }
                     }
                     recorder.zoomStateProvider = {
@@ -214,9 +217,42 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         }
     }
 
-    func pause() { recorder?.pause() }
+    func pause() {
+        isRecordingPaused = true // 主线程（CaptureController @MainActor 调用）；无会话时置位无害（begin 复位）
+        recorder?.pause()
+    }
 
-    func resume() { recorder?.resume() }
+    func resume() {
+        isRecordingPaused = false
+        recorder?.resume()
+    }
+
+    /// P1a 缩放点击喂入（暂停门 + 坐标换算；internal = 无头钉测缝）。spec §5「暂停时
+    /// 不触发」：`.paused` 时**丢弃新点击**（点击环照常绘制/淡出——环走 currentState
+    /// 读缝，不经此处）；攻击已在途的缩放自然走完，暂停不 reset（不 snap-cut）。
+    /// 换算链与点击环完全同源（Cocoa 全局 → CG 全局 → capturePixelPoint，同一几何与
+    /// 翻转入口），只补两步归一化：÷ 画布尺寸；y 翻转为 CI 画布 y 向上口径（合成器
+    /// `placeClickOverlay` 的 `bounds.height - y` 同一翻转）——缩放中心与环落在同一
+    /// 画面位置。@MainActor（AutoZoomState 主 actor 隔离的自然结果）：生产调用点在
+    /// tracker onClick 的 `MainActor.assumeIsolated` 内，无头钉测在 @MainActor 用例。
+    @MainActor
+    func feedZoomClick(_ cocoaPoint: CGPoint,
+                       into zoomState: AutoZoomState,
+                       geometry: PiPCaptureGeometry,
+                       flipHeight: CGFloat,
+                       now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard !isRecordingPaused else { return }
+        let canvasSize = geometry.capturePixelSize
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return }
+        let cgPoint = ClickHighlightTracker.cgGlobalPoint(
+            fromCocoaGlobal: cocoaPoint,
+            primaryScreenHeight: flipHeight)
+        let pixel = geometry.capturePixelPoint(fromCGPoint: cgPoint)
+        zoomState.click(
+            atNormalizedPoint: CGPoint(x: pixel.x / canvasSize.width,
+                                       y: 1 - pixel.y / canvasSize.height),
+            now: now)
+    }
 
     func finish() async -> URL? {
         monitor?.stopMonitoring()
