@@ -85,6 +85,11 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    /// 点击音效开关（P1b，opt-in 默认关；开录快照语义同 clickHighlightEnabled）。
+    @Published var clickSoundEnabled: Bool {
+        didSet { defaults.set(clickSoundEnabled, forKey: Self.clickSoundEnabledKey) }
+    }
+
     /// 上次使用的采集模式（T17 裁定：⇧⌘R「开始/停止」以最后使用的模式开录，每次开始录制时
     /// 由装配层持久化到此处）。默认全屏（主显示器）。`CaptureMode` Codable 编码整只落库，
     /// 解码失败（如枚举演化）回退默认；显示器拓扑变化由下一次开始重新持久化自然覆盖。
@@ -138,6 +143,8 @@ final class SettingsStore: ObservableObject {
         // didSet，落库的野值原样保留、不回写，与 fps/countdown 同纪律）。
         self.autoZoomEnabled = userDefaults.object(forKey: Self.autoZoomEnabledKey) as? Bool ?? false
         self.autoZoomLevel = Self.normalizedAutoZoomLevel(userDefaults.object(forKey: Self.autoZoomLevelKey) as? Double)
+        // P1b：点击音效（opt-in 默认关；快照语义同上）。
+        self.clickSoundEnabled = userDefaults.object(forKey: Self.clickSoundEnabledKey) as? Bool ?? false
         // T17：上次使用的采集模式（⇧⌘R 开录用）；缺省/解码失败回退全屏（主显示器）。
         if let data = userDefaults.data(forKey: Self.lastCaptureModeKey),
            let mode = try? JSONDecoder().decode(CaptureMode.self, from: data) {
@@ -166,6 +173,7 @@ final class SettingsStore: ObservableObject {
     private static let clickHighlightEnabledKey = "clickHighlightEnabled"
     private static let autoZoomEnabledKey = "autoZoomEnabled"
     private static let autoZoomLevelKey = "autoZoomLevel"
+    private static let clickSoundEnabledKey = "clickSoundEnabled"
     private static let lastCaptureModeKey = "lastCaptureMode"
     private static let windowCaptureTargetKey = "windowCaptureTarget"
 

@@ -9,9 +9,12 @@ import ScreenCaptureKit
 /// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧合成（PiP / 点击高亮 / 点击自动缩放
 /// 任一开启，T15/T16/P1a；合成在暂停平移判定之后、append 之前，PTS 原样透传）→ append；
 /// 三效果全关时为逐帧直通（合成器 nil，零开销）。
-/// 音频路径（Task 9，captureSystemAudio 或 captureMicrophone 时）：`SystemAudioMixer` 双路混音
-/// ——系统声：SCStream audio 队列样本；麦克风：engine inputNode tap（SCStream 的 `.microphone`
-/// 输出 macOS 15+ 才有，维持丢弃）——混音为单条 AAC 轨，混音器启动失败时降级为纯视频轨继续录制。
+/// 音频路径（Task 9；P1b 起 captureSystemAudio / captureMicrophone / clickSoundEnabled 任一
+/// 开启即建音轨，见 `includesAudioTrack`——双源全关+音效开为「效果专用音轨」：mixer 无输入
+/// tap、只有效果路）：`SystemAudioMixer` 双路混音——系统声：SCStream audio 队列样本；麦克风：
+/// engine inputNode tap（SCStream 的 `.microphone` 输出 macOS 15+ 才有，维持丢弃）；点击音效
+/// （P1b）：bundle `mouse_click.wav` 效果缓冲经播放节点入 mainMixer（writer tap 上游）——
+/// 混音为单条 AAC 轨，混音器启动失败时降级为纯视频轨继续录制。
 /// 生命周期：`start()`（解析目标 + 建流 + 开采集）→ video 队列首帧装配 writer（视频 + 有则音频
 /// 输入）→ 逐路 append → `stop()`（停流 + 停混音 + 收尾成片）。
 ///
@@ -97,6 +100,15 @@ final class SCStreamRecorder: NSObject {
         super.init()
     }
 
+    /// 音轨存在决策（纯逻辑，无头钉测缝）：系统声 / 麦克风 / 点击音效任一开启即建音轨——
+    /// P1b「双源全关+音效开必有音轨」（效果专用音轨：mixer 相应常建，无输入 tap 只有效果
+    /// 路）；三者全关保持无音轨的既有行为。start() 装配与钉测共用本决策（单一真源）。
+    static func includesAudioTrack(captureSystemAudio: Bool,
+                                   captureMicrophone: Bool,
+                                   clickSoundEnabled: Bool) -> Bool {
+        captureSystemAudio || captureMicrophone || clickSoundEnabled
+    }
+
     /// 按模式构造 `SCContentFilter` 与 `SCStream` 并开始采集。
     /// writer 会话在本方法内创建（输出文件排他占位，冲突即刻抛错）；
     /// 输入装配推迟到首帧（需要首帧格式描述做 sourceFormatHint）。
@@ -116,12 +128,28 @@ final class SCStreamRecorder: NSObject {
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
         // 时混音器同样在位（系统声源节点持续渲染静音，与麦克风混合）。启动失败（如无输出设备
         // 的极端环境）降级为纯视频轨，不阻断录制。
+        // P1b：音轨存在条件加点击音效——双源全关+音效开同样建混音器（「效果专用音轨」）。
         var activeMixer: SystemAudioMixer?
-        if config.captureSystemAudio || config.captureMicrophone {
+        if Self.includesAudioTrack(captureSystemAudio: config.captureSystemAudio,
+                                   captureMicrophone: config.captureMicrophone,
+                                   clickSoundEnabled: config.clickSoundEnabled) {
             let engine = AVAudioEngine()
             let mixer = SystemAudioMixer()
             if config.captureMicrophone {
                 registerMicrophone(on: mixer, engine: engine)
+            }
+            // P1b 音效注入装配：bundle 资源缺失/装配失败降级为无声效（音轨照建，不阻断录制；
+            // 调度侧 install 前恒 no-op，缺资源只损失音效不损失音轨）。
+            if config.clickSoundEnabled {
+                if let wavURL = Bundle.main.url(forResource: "mouse_click", withExtension: "wav") {
+                    do {
+                        try mixer.installClickEffect(wavURL: wavURL)
+                    } catch {
+                        NSLog("SCStreamRecorder: 点击音效装配失败，本次录制无音效：\(error)")
+                    }
+                } else {
+                    NSLog("SCStreamRecorder: 找不到内置 mouse_click.wav 资源，本次录制无音效")
+                }
             }
             do {
                 try mixer.start(engine: engine) { [weak self] sampleBuffer in
@@ -212,6 +240,13 @@ final class SCStreamRecorder: NSObject {
     func rebuildAudioAfterConfigurationChange() {
         let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
         mixer?.rebuildAfterConfigurationChange()
+    }
+
+    /// 点击音效调度（P1b，`ClickSoundScheduling` 生产实现，协调器暂停门下游）：转发当前
+    /// 混音器效果缓冲调度。无混音器（纯视频轨 / 混音器未启动）no-op。
+    func scheduleClickEffect() {
+        let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+        mixer?.scheduleClickEffect()
     }
 
     // MARK: - 暂停 / 恢复（Task 10）
@@ -353,6 +388,11 @@ final class SCStreamRecorder: NSObject {
         return CGSize(width: mode.pixelWidth, height: mode.pixelHeight)
     }
 }
+
+// MARK: - 点击音效调度缝（P1b）
+
+/// SCStreamRecorder 即生产 sink：转发当前混音器效果缓冲调度（协议缝见 CaptureController）。
+extension SCStreamRecorder: ClickSoundScheduling {}
 
 // MARK: - 采样回调
 

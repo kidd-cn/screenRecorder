@@ -59,4 +59,38 @@ final class RecordingConfigurationSnapshotTests: XCTestCase {
         XCTAssertFalse(config.micMuted)
         XCTAssertEqual(config.mode, .display(1))
     }
+
+    /// P1b 音轨存在性矩阵（spec §5「双源全关+音效开必有音轨」钉测）：双开/仅系统/仅麦/
+    /// 双关+音效开 → 音轨恒存在（双关+音效开 = 「效果专用音轨」）；双关+音效关 → 无音轨
+    ///（既有行为回归）。同时回归 clickSoundEnabled 经 makeConfiguration 的快照透传。
+    func testConfigAudioTrackMatrix() {
+        let matrix: [(systemAudio: Bool, microphone: Bool, clickSound: Bool, hasTrack: Bool)] = [
+            (true, true, true, true),     // 双开+音效
+            (true, false, false, true),   // 仅系统声
+            (false, true, false, true),   // 仅麦克风
+            (false, false, true, true),   // 双关+音效开：效果专用音轨（本任务核心语义）
+            (false, false, false, false), // 双关+音效关：无音轨（既有）
+        ]
+        for row in matrix {
+            let settings = SettingsStore(userDefaults: defaults)
+            settings.captureSystemAudio = row.systemAudio
+            settings.captureMicrophone = row.microphone
+            settings.clickSoundEnabled = row.clickSound
+
+            let config = AppAssembly.makeConfiguration(
+                settings: settings,
+                mode: .display(1),
+                outputURL: URL(fileURLWithPath: "/tmp/matrix.mp4"))
+
+            XCTAssertEqual(config.clickSoundEnabled, row.clickSound,
+                           "clickSoundEnabled 快照透传（system=\(row.systemAudio), mic=\(row.microphone)）")
+            XCTAssertEqual(
+                SCStreamRecorder.includesAudioTrack(
+                    captureSystemAudio: config.captureSystemAudio,
+                    captureMicrophone: config.captureMicrophone,
+                    clickSoundEnabled: config.clickSoundEnabled),
+                row.hasTrack,
+                "音轨存在性（system=\(row.systemAudio), mic=\(row.microphone), sound=\(row.clickSound)）")
+        }
+    }
 }

@@ -37,4 +37,8 @@ struct RecordingConfiguration {
     /// 缩放档位快照（1.35/1.6/1.9；`SettingsStore.autoZoomLevel` 载入/didSet 双钳制）。
     /// 缺省 1.6（默认档）。
     var autoZoomLevel: Double = 1.6
+    /// 点击音效开关（P1b 开录快照语义，同 autoZoomEnabled）：开启时录制必有音轨——
+    /// 双源全关 + 本项开启建「效果专用音轨」（音轨存在条件见
+    /// `SCStreamRecorder.includesAudioTrack`）。缺省关。
+    var clickSoundEnabled: Bool = false
 }

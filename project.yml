@@ -12,6 +12,10 @@ targets:
     deploymentTarget: "13.0"
     sources:
       - ScreenRecorder/Sources
+      # P1b 点击音效资源：显式入 resources 构建段（wav 须随 app bundle 分发，
+      # SCStreamRecorder 以 Bundle.main 装载）。
+      - path: ScreenRecorder/Resources
+        buildPhase: resources
     dependencies:
       - package: KeyboardShortcuts
     settings:

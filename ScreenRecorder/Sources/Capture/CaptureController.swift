@@ -32,6 +32,13 @@ protocol RecordingNotifying: AnyObject {
     func notifyDiskSpaceWarning()
 }
 
+/// 点击音效调度缝（P1b，spec「事件→调度抽缝」）：生产实现 `SCStreamRecorder`（转发当前
+/// 混音器效果路），无头钉测注入 spy 观测协调器暂停门的放行/丢弃（同 CaptureSessionManaging
+/// 模式）。
+protocol ClickSoundScheduling: AnyObject {
+    func scheduleClickEffect()
+}
+
 /// 会话级领域错误：begin 前置磁盘检查与磁盘停阈值中断（区别于采集管线原始错误，
 /// 后者原样透传给 `CaptureController.handleSessionFailure` 做文案归类）。
 enum CaptureSessionError: Equatable, LocalizedError {
@@ -140,6 +147,8 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         let wantsClick = config.clickHighlightEnabled && clickHighlightTracker != nil
         // P1a：自动缩放骑同一点击源（tracker 的 onClick），几何同样用于点击中心换算。
         let wantsZoom = config.autoZoomEnabled && clickHighlightTracker != nil
+        // P1b：点击音效骑同一点击源（tracker onClick 单槽）；音效无坐标载荷，与几何无关。
+        let wantsClickSound = config.clickSoundEnabled && clickHighlightTracker != nil
         let geometry: PiPCaptureGeometry? = if wantsPiP || wantsClick || wantsZoom {
             await PiPCaptureGeometry.resolve(for: config.mode)
         } else {
@@ -154,13 +163,13 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // 原 buffer，与直通路径等价。
         recorder.pipPixelBufferProvider = cameraPiP?.latestPixelBuffer
         recorder.pipFrameProvider = cameraPiP?.currentPiPFrame
-        // 点击高亮 + 自动缩放取数缝（T16 / P1a）：两者共用一次几何解析与主屏翻转高度。
-        // 转换器按当次几何与主屏翻转入口一次性组装；tracker 未启动/未衰减窗口内
-        // currentState 返回 nil，合成器按无高亮直通。几何解析失败（nil）不装缝 = 对应
-        // 效果整体降级关闭。
-        if let clickHighlightTracker, let geometry, wantsClick || wantsZoom {
+        // 点击高亮 + 自动缩放 + 点击音效取数缝（T16 / P1a / P1b）：高亮与缩放共用一次几何
+        // 解析与主屏翻转高度；转换器按当次几何与主屏翻转入口一次性组装；tracker 未启动/
+        // 未衰减窗口内 currentState 返回 nil，合成器按无高亮直通。几何解析失败（nil）不装
+        // 缝 = 对应效果整体降级关闭；音效无坐标载荷，不依赖几何（几何失败不降级音效）。
+        if let clickHighlightTracker, wantsClick || wantsZoom || wantsClickSound {
             let flipHeight = await MainActor.run { ClickHighlightTracker.primaryScreenHeight() }
-            if config.clickHighlightEnabled {
+            if config.clickHighlightEnabled, let geometry {
                 recorder.clickOverlayProvider = { [weak clickHighlightTracker] in
                     clickHighlightTracker?.currentState { cocoaPoint in
                         let cgPoint = ClickHighlightTracker.cgGlobalPoint(
@@ -170,33 +179,48 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
                     }
                 }
             }
-            // P1a 自动缩放接线：点击 →（暂停门 + 归一化中心，见 feedZoomClick）→
-            // AutoZoomState.click；缩放仿射经 zoomStateProvider 逐帧进合成器。
-            // zoomState 为本场新建（config 快照档位：录制中途改设置不影响进行中的录制；
-            // 时间线随 recorder 生命周期存亡，无需跨场 reset）。provider 缝强持有它
-            //（生命周期 = recorder = 单场录制）；onClick 弱引用防 tracker 跨场滞留。
-            if config.autoZoomEnabled {
+            // P1a/P1b onClick 单槽统一装配：缩放与音效骑同一点击源——tracker.onClick 只有
+            // 一个槽位，两条链必须在同一处理器内分派（分别装配会互相覆盖）。缩放链几何
+            // 失败降级关闭（P1a 既有语义）；音效关（wantsClickSound false）时分派与 P1a
+            // 行为一致。zoomState 为本场新建（config 快照档位：录制中途改设置不影响进行中
+            // 的录制；时间线随 recorder 生命周期存亡，无需跨场 reset）。provider 缝强持有
+            // 它（生命周期 = recorder = 单场录制）；onClick 弱引用防 tracker 跨场滞留
+            //（recorder 同理：收尾后遗留的陈旧处理器经弱引用自然失效为 no-op）。
+            if wantsZoom || wantsClickSound {
                 await MainActor.run {
-                    let zoomState = AutoZoomState(level: CGFloat(config.autoZoomLevel))
-                    let canvasBounds = CGRect(origin: .zero, size: geometry.capturePixelSize)
-                    clickHighlightTracker.onClick = { [weak self, weak zoomState] cocoaPoint, _ in
+                    let zoomState: AutoZoomState? = if config.autoZoomEnabled, geometry != nil {
+                        AutoZoomState(level: CGFloat(config.autoZoomLevel))
+                    } else {
+                        nil
+                    }
+                    if let state = zoomState, let geometry {
+                        let canvasBounds = CGRect(origin: .zero, size: geometry.capturePixelSize)
+                        recorder.zoomStateProvider = {
+                            // video 队列逐帧读（非隔离缝，锁保护锚点快照）；时钟 = 系统运行
+                            // 时长（与 CaptureController.monotonicNow 同口径，不受改时间影响）。
+                            // **强持有** state：provider 缝是它唯一的宿主，生命周期 =
+                            // recorder = 单场录制（finish 收走 recorder 即释放）。
+                            state.frameTransform(in: canvasBounds,
+                                                 now: ProcessInfo.processInfo.systemUptime)
+                        }
+                    }
+                    clickHighlightTracker.onClick = { [weak self, weak zoomState, weak recorder] cocoaPoint, _ in
                         // tracker 回调主线程契约（类注释钉定）：assumeIsolated 直进主
                         // actor，零调度延迟，时间线起点贴合点击帧。
                         MainActor.assumeIsolated {
-                            guard let zoomState else { return }
-                            self?.feedZoomClick(cocoaPoint,
-                                                into: zoomState,
-                                                geometry: geometry,
-                                                flipHeight: flipHeight)
+                            if let zoomState, let geometry {
+                                self?.feedZoomClick(cocoaPoint,
+                                                    into: zoomState,
+                                                    geometry: geometry,
+                                                    flipHeight: flipHeight)
+                            }
+                            if wantsClickSound, let recorder {
+                                // 暂停门在 feedClickSound（协调器层，与缩放同门）——tracker
+                                // 层不门（点击环照常绘制，spec §5「暂停期间不触发」只钉新
+                                // 效果不钉环）。
+                                self?.feedClickSound(into: recorder)
+                            }
                         }
-                    }
-                    recorder.zoomStateProvider = {
-                        // video 队列逐帧读（非隔离缝，锁保护锚点快照）；时钟 = 系统运行
-                        // 时长（与 CaptureController.monotonicNow 同口径，不受改时间影响）。
-                        // **强持有** zoomState：provider 缝是它唯一的宿主，生命周期 =
-                        // recorder = 单场录制（finish 收走 recorder 即释放）。
-                        zoomState.frameTransform(in: canvasBounds,
-                                                 now: ProcessInfo.processInfo.systemUptime)
                     }
                 }
             }
@@ -253,6 +277,18 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
             atNormalizedPoint: CGPoint(x: pixel.x / canvasSize.width,
                                        y: 1 - pixel.y / canvasSize.height),
             now: now)
+    }
+
+    /// P1b 点击音效喂入（暂停门 + 调度转发；internal = 无头钉测缝）。spec §5「暂停期间
+    /// 不触发」对音效同钉：`.paused` 时**丢弃新点击**的音效调度——与 `feedZoomClick` 同一
+    /// 门（isRecordingPaused）与同一时间互斥论证（begin 的复位先于任何 pause/喂入访问；
+    /// 见 P1a 注释）。tracker 层不门：点击环照常绘制/淡出（环走 currentState 读缝，不经
+    /// 此处），只有新效果的调度被门。sink 缝（`ClickSoundScheduling`）：生产 =
+    /// SCStreamRecorder 转发当前混音器（无混音器 no-op），无头钉测注入 spy。
+    @MainActor
+    func feedClickSound(into sink: ClickSoundScheduling) {
+        guard !isRecordingPaused else { return }
+        sink.scheduleClickEffect()
     }
 
     func finish() async -> URL? {
@@ -408,7 +444,9 @@ final class CaptureController: ObservableObject {
         // 监听中关闭时 tracker 内部立即摘除 monitor。
         // P1a：自动缩放骑同一点击源——只开缩放（高亮关）时 tracker 仍需监听点击；
         // 环渲染由 coordinator 侧 clickOverlayProvider 装配缝独立门控（关高亮不画环）。
-        clickHighlightTracker?.setEnabled(config.clickHighlightEnabled || config.autoZoomEnabled)
+        // P1b：点击音效骑同一点击源——只开音效时 tracker 仍需监听（音效无渲染缝，
+        // 经协调器暂停门直接调度混音器）。
+        clickHighlightTracker?.setEnabled(config.clickHighlightEnabled || config.autoZoomEnabled || config.clickSoundEnabled)
         // T18：源丢失匹配目标随捕获模式确定（裁定 2）。
         sourceDisplayID = Self.capturedDisplayID(of: config.mode)
         hasBegun = false

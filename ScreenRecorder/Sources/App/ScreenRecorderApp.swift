@@ -182,7 +182,8 @@ final class AppAssembly: ObservableObject {
     /// 开始时刻的 config 快照（唯一装配点的纯函数抽取，internal 供无头钉测）：从
     /// SettingsStore 逐字段入照。终审 F2 复审残余：`micMuted` 必须随快照入照——
     /// registerMicrophone 据此决定开录是否预装 mic tap，漏带则持久化静音被每场开录
-    /// 静默忽略（live 下发链只覆盖录制中的翻转，兜不了开录初值）。
+    /// 静默忽略（live 下发链只覆盖录制中的翻转，兜不了开录初值）。P1b：点击音效开关
+    /// 同为快照字段（开录时刻入照，录制中途改设置不影响进行中的录制）。
     static func makeConfiguration(settings: SettingsStore, mode: CaptureMode, outputURL: URL) -> RecordingConfiguration {
         RecordingConfiguration(
             mode: mode,
@@ -196,7 +197,8 @@ final class AppAssembly: ObservableObject {
             outputURL: outputURL,
             clickHighlightEnabled: settings.clickHighlightEnabled,
             autoZoomEnabled: settings.autoZoomEnabled,
-            autoZoomLevel: settings.autoZoomLevel
+            autoZoomLevel: settings.autoZoomLevel,
+            clickSoundEnabled: settings.clickSoundEnabled
         )
     }
 

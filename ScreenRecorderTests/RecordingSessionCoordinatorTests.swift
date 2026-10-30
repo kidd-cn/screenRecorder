@@ -136,3 +136,35 @@ final class ZoomPauseGateTests: XCTestCase {
                        "恢复后：新点击重新锚定（变换走 Task 1 真源 API 构造参照）")
     }
 }
+
+// MARK: - P1b 点击音效暂停门（spec §5「暂停期间不触发」）
+
+/// 无头钉测面 = `RecordingSessionCoordinator.feedClickSound`（与 feedZoomClick 同门形状，
+/// sink 缝注入 spy 观测「调度放行/丢弃」——begin 成功路径依赖 ScreenCaptureKit TCC，无头
+/// 不可确定性驱动，同上类台账注记；无会话 pause/resume 只置位门，recorder no-op）。
+@MainActor
+final class ClickSoundPauseGateTests: XCTestCase {
+    /// 调度 spy：计数 scheduleClickEffect 到达次数（生产实现 SCStreamRecorder 转发混音器）。
+    private final class ScheduleSpy: ClickSoundScheduling {
+        private(set) var scheduleCount = 0
+        func scheduleClickEffect() { scheduleCount += 1 }
+    }
+
+    /// 暂停中丢弃新点击的音效调度（暂停期间不触发）；恢复后重新放行。
+    /// 与缩放门同一 accessor（isRecordingPaused）与同一时间互斥论证（begin 复位先于喂入）。
+    func testPausedCoordinatorDropsClickSoundScheduling() {
+        let coordinator = RecordingSessionCoordinator()
+        let spy = ScheduleSpy()
+
+        coordinator.feedClickSound(into: spy)
+        XCTAssertEqual(spy.scheduleCount, 1, "未暂停：音效调度放行")
+
+        coordinator.pause()
+        coordinator.feedClickSound(into: spy)
+        XCTAssertEqual(spy.scheduleCount, 1, "暂停中：新点击的音效调度被丢弃（不得到达 scheduleClickEffect）")
+
+        coordinator.resume()
+        coordinator.feedClickSound(into: spy)
+        XCTAssertEqual(spy.scheduleCount, 2, "恢复后：门重新打开，调度放行")
+    }
+}

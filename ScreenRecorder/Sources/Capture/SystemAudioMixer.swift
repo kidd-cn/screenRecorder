@@ -24,6 +24,12 @@ import Foundation
 /// 插入一个音量 0 的静音 mixer 接通输出硬件：录制链路满幅、外放无声。`masterGain`（0.8，简报
 /// 削波封顶）同样施加在 mainMixer 上：它是增益——同时缩放两路录制冷平，监听仍被下游归零。
 ///
+/// 点击音效效果路（P1b）：`installClickEffect` 把 bundle 内置 `mouse_click.wav` 一次性装载为
+/// 效果缓冲并建 `AVAudioPlayerNode`；start 时该节点连入 mainMixer（位于 writer tap **上游**），
+/// `scheduleClickEffect` 排队缓冲——样本随混音输出进录制音轨（与系统声/麦克风共用同一输出
+/// tap 与 gate），硬件监听路仍被下游音量 0 的 silencer 拦截：**只进录制音轨，绝无实时外放**
+///（spec §5 回授红线）。音量固定 = 缓冲自身振幅（资源即成品，无滑杆、无运行期增益）。
+///
 /// 线程模型：`enqueueSystemAudio` 在 SCStream audio 队列、系统 tap 与 mic tap 回调在 engine
 /// 渲染线程——实时线程只做格式转换与入队（零锁获取、闭包只捕获不可变量）；gate 裁剪、
 /// CMSampleBuffer 打包、上层 append 全部在 `deliveryQueue` 串行队列执行（单消费者、样本顺序
@@ -34,6 +40,8 @@ final class SystemAudioMixer {
     enum SystemAudioMixerError: LocalizedError {
         case cannotCreateConverter(from: AVAudioFormat, to: AVAudioFormat)
         case cannotCreateMasterFormatDescription(OSStatus)
+        /// 点击音效 wav 不可用（P1b）：读不出、空文件或超过单条效果样本上限。
+        case clickEffectWavUnusable(URL, frames: Int64)
 
         var errorDescription: String? {
             switch self {
@@ -41,6 +49,8 @@ final class SystemAudioMixer {
                 return "AVAudioConverter 创建失败（\(from) → \(to)）"
             case .cannotCreateMasterFormatDescription(let status):
                 return "masterFormat 的 CMFormatDescription 创建失败（status=\(status)）"
+            case .clickEffectWavUnusable(let url, let frames):
+                return "点击音效 wav 不可用（\(url.path)，帧数 \(frames)）：须为非空且 ≤\(SystemAudioMixer.clickEffectMaxFrames) 帧的短促样本"
             }
         }
     }
@@ -85,6 +95,14 @@ final class SystemAudioMixer {
     private(set) var micVolume: Float = 1.0
     /// 麦克风静音（浮条按钮语义 = 摘除 inputNode tap）。
     private(set) var isMicMuted = false
+    /// 点击音效播放节点（P1b，`installClickEffect` 装配；start 时连入 mainMixer，stop
+    /// 清理）。nil = 未装配（`scheduleClickEffect` 静默 no-op）。internal 只读缝供幂等
+    /// 钉测（节点同一性）与 bundle 资源装配验收。
+    private(set) var clickEffectPlayer: AVAudioPlayerNode?
+    /// 效果缓冲（AVAudioFile 处理格式装载；连接格式取其自带格式，mixer 输入端自行归一）。
+    private var clickEffectBuffer: AVAudioPCMBuffer?
+    /// 效果样本单条帧数上限（防错资源整文件装载爆内存）：点击音效应为 ≤1s 的短促样本。
+    private static let clickEffectMaxFrames: Int64 = 48_000
 
     init(masterFormat: AVAudioFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 2)!) {
         self.masterFormat = masterFormat
@@ -127,6 +145,20 @@ final class SystemAudioMixer {
             assembledMic = (node, ring, converter)
         }
         engine.connect(source, to: mainMixer, format: masterFormat)
+        // 点击音效效果路（P1b）：已装载的效果缓冲经播放节点连入 mainMixer（writer tap
+        // 上游——样本随混音输出进 AAC）；连接格式取缓冲自带格式（AVAudioFile 处理格式恒为
+        // Float32 非交错，mixer 输入端自行归一，无需手工转换）。无监听外放：硬件路仍由
+        // 下游音量 0 的 silencer 拦截（与既有录制链同一裁决）。
+        let clickAssembled: (node: AVAudioPlayerNode, format: AVAudioFormat)? = stateLock.withStateLock {
+            guard let buffer = clickEffectBuffer else { return nil }
+            let node = clickEffectPlayer ?? AVAudioPlayerNode()
+            clickEffectPlayer = node
+            return (node, buffer.format)
+        }
+        if let clickAssembled {
+            engine.attach(clickAssembled.node)
+            engine.connect(clickAssembled.node, to: mainMixer, format: clickAssembled.format)
+        }
         // 监听静音（T8 裁决）：tap 在 mainMixer 输出 bus（fader 之后），不能靠归零 mainMixer
         // 音量静音；下游插入音量 0 的静音 mixer 接通输出硬件。masterGain 是录制冷平封顶
         //（增益，缩放两路），与监听静音无关。
@@ -144,6 +176,7 @@ final class SystemAudioMixer {
         } catch {
             engine.detach(silencer)
             if let assembledMic { engine.detach(assembledMic.node) }
+            if let clickAssembled { engine.detach(clickAssembled.node) }
             engine.detach(source)
             throw error
         }
@@ -166,6 +199,7 @@ final class SystemAudioMixer {
             }
             engine.detach(silencer)
             if let assembledMic { engine.detach(assembledMic.node) }
+            if let clickAssembled { engine.detach(clickAssembled.node) }
             engine.detach(source)
             throw error
         }
@@ -186,7 +220,7 @@ final class SystemAudioMixer {
     /// delivery 与 micDelivery 两个串行队列——本方法返回时，已入队/在途的打包、append 与
     /// mic ring 写入全部完成（上层收尾 writer 前必须先调本方法），最后才清理共享状态并摘除节点。
     func stop() {
-        let teardown: (engine: AVAudioEngine, silencer: AVAudioMixerNode, source: AVAudioSourceNode, micNode: AVAudioSourceNode?, micTapInstalled: Bool)? = stateLock.withStateLock {
+        let teardown: (engine: AVAudioEngine, silencer: AVAudioMixerNode, source: AVAudioSourceNode, micNode: AVAudioSourceNode?, clickNode: AVAudioPlayerNode?, micTapInstalled: Bool)? = stateLock.withStateLock {
             guard isRunning else { return nil }
             isRunning = false
             guard let engine, let silencer, let sourceNode else { return nil }
@@ -196,12 +230,15 @@ final class SystemAudioMixer {
             outputHandler = nil
             let mic = micNode
             micNode = nil
+            let click = clickEffectPlayer
+            clickEffectPlayer = nil
+            clickEffectBuffer = nil // 效果装配随会话终结：install 为唯一（重）装配入口
             let installed = micTapInstalled
             micTapInstalled = false
             micRing = nil
             micConverter = nil
             isMicMuted = false
-            return (engine, silencer, sourceNode, mic, installed)
+            return (engine, silencer, sourceNode, mic, click, installed)
         }
         guard let teardown else { return }
         teardown.engine.mainMixerNode.removeTap(onBus: 0)
@@ -219,6 +256,9 @@ final class SystemAudioMixer {
         teardown.engine.detach(teardown.silencer)
         if let mic = teardown.micNode {
             teardown.engine.detach(mic)
+        }
+        if let click = teardown.clickNode {
+            teardown.engine.detach(click)
         }
         teardown.engine.detach(teardown.source)
     }
@@ -315,6 +355,49 @@ final class SystemAudioMixer {
             return isRunning ? micNode : nil
         }
         node?.volume = clamped
+    }
+
+    // MARK: - 点击音效效果路（P1b）
+
+    /// 装配点击音效效果路（P1b 简报 Produces 逐字）：读 wav → `AVAudioFile` 处理格式装载为
+    /// 效果缓冲 → 建 `AVAudioPlayerNode`（start 时连入 mainMixer，位于 writer tap 上游）。
+    /// **幂等**：已装配（节点非 nil）时直接返回，不重复建节点、不重读文件（start 侧的节点
+    /// 重建只发生在节点已被 stop 清理、缓冲仍在的恢复路径）。抛错 = 文件不可读 / 空文件 /
+    /// 超 `clickEffectMaxFrames` 上限 / 缓冲创建失败（上层降级为无声效，不阻断录制）。
+    /// 无 engine 依赖（可在 start 前装配，无头测试即据此钉幂等与资源验收）。
+    func installClickEffect(wavURL: URL) throws {
+        let existing: AVAudioPlayerNode? = stateLock.withStateLock { clickEffectPlayer }
+        if existing != nil { return } // 幂等：重复调用不重复建节点
+        let file = try AVAudioFile(forReading: wavURL)
+        let frames = file.length
+        guard frames > 0, frames <= Self.clickEffectMaxFrames else {
+            throw SystemAudioMixerError.clickEffectWavUnusable(wavURL, frames: frames)
+        }
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat,
+                                            frameCapacity: AVAudioFrameCount(frames)) else {
+            throw SystemAudioMixerError.clickEffectWavUnusable(wavURL, frames: frames)
+        }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        try file.read(into: buffer)
+        stateLock.withStateLock {
+            guard clickEffectPlayer == nil else { return } // 竞态兜底：仍以先到者为准
+            clickEffectBuffer = buffer
+            clickEffectPlayer = AVAudioPlayerNode()
+        }
+    }
+
+    /// 点击音效调度（P1b 简报 Produces 逐字）：效果缓冲入队播放。未装配（install 前 /
+    /// stop 后）或引擎未运行时静默 no-op 不抛错；引擎运行时连发安全——`scheduleBuffer`
+    /// 排队逐条顺播（缓冲仅 20ms，连击按序紧跟）。任意线程可调（tracker 主线程回调 →
+    /// 协调器暂停门 → recorder 转发；scheduleBuffer/play 线程安全）。
+    func scheduleClickEffect() {
+        let pending: (node: AVAudioPlayerNode, buffer: AVAudioPCMBuffer)? = stateLock.withStateLock {
+            guard isRunning, let clickEffectPlayer, let clickEffectBuffer else { return nil }
+            return (clickEffectPlayer, clickEffectBuffer)
+        }
+        guard let pending else { return }
+        pending.node.play()
+        pending.node.scheduleBuffer(pending.buffer)
     }
 
     // MARK: - 路由自愈（T18，裁定 5）

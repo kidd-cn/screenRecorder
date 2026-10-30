@@ -360,4 +360,84 @@ final class SystemAudioMixerTests: XCTestCase {
             return XCTFail("无已登记 mic 路径应判 .drop，实际 \(decision)")
         }
     }
+
+    // MARK: - P1b 点击音效效果路（无头：install/schedule 生命周期不启 engine——真实
+    // engine 渲染与成片落轨走真机验收，同本文件台账注记）
+
+    /// 生成最小测试 wav（16-bit PCM 单声道 44.1k，5ms 正弦，<1KB）：self-contained，
+    /// 不依赖 app bundle 资源；bundle 资源的存在性由 testBundledClickEffectResourceInstalls 钉。
+    private func makeTemporaryWav() throws -> URL {
+        let sampleRate = 44_100
+        let frameCount = 220 // 5ms
+        var pcm = Data()
+        func append(_ value: UInt32) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { raw in raw.forEach { pcm.append($0) } }
+        }
+        func append(_ value: UInt16) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { raw in raw.forEach { pcm.append($0) } }
+        }
+        func append(_ text: String) {
+            text.utf8.forEach { pcm.append($0) }
+        }
+        append("RIFF")
+        append(UInt32(36 + frameCount * 2))
+        append("WAVE")
+        append("fmt ")
+        append(UInt32(16))              // fmt chunk 大小（DWORD）
+        append(UInt16(1))               // 无压缩 PCM
+        append(UInt16(1))               // 单声道
+        append(UInt32(sampleRate))
+        append(UInt32(sampleRate * 2))  // 字节率
+        append(UInt16(2))               // 块对齐
+        append(UInt16(16))              // 位深
+        append("data")
+        append(UInt32(frameCount * 2))
+        for index in 0..<frameCount {
+            let sample = 0.5 * sin(2 * Double.pi * 1000 * Double(index) / Double(sampleRate))
+            let value = Int16(sample * 32767)
+            append(UInt16(bitPattern: value))
+        }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SystemAudioMixerTests-click-\(UUID().uuidString).wav")
+        try pcm.write(to: url)
+        return url
+    }
+
+    /// P1b 简报 Produces：未 install 时调度为静默 no-op——不抛错（API 非 throwing 由
+    /// 编译器保证）、不 crash、不建效果节点。
+    func testScheduleWithoutInstallIsNoOp() {
+        let mixer = SystemAudioMixer()
+
+        mixer.scheduleClickEffect()
+
+        XCTAssertNil(mixer.clickEffectPlayer, "未 install：调度不得创建效果节点")
+    }
+
+    /// P1b 简报 Produces：install 幂等——重复调用不重复建效果节点（节点同一性钉测）。
+    func testInstallIsIdempotent() throws {
+        let mixer = SystemAudioMixer()
+        let wavURL = try makeTemporaryWav()
+        defer { try? FileManager.default.removeItem(at: wavURL) }
+
+        try mixer.installClickEffect(wavURL: wavURL)
+        let first = try XCTUnwrap(mixer.clickEffectPlayer, "install 后效果节点就位")
+        try mixer.installClickEffect(wavURL: wavURL)
+
+        XCTAssertTrue(mixer.clickEffectPlayer === first, "重复 install 不得重建效果节点")
+    }
+
+    /// P1b 构建产物验收缝：app bundle 必须内置 mouse_click.wav 且可装配（TEST_HOST = app
+    /// 进程，`Bundle(for:)` = app bundle——资源漏注册进 target 此处即红）。
+    func testBundledClickEffectResourceInstalls() throws {
+        let wavURL = try XCTUnwrap(
+            Bundle(for: SystemAudioMixer.self).url(forResource: "mouse_click", withExtension: "wav"),
+            "app bundle 必须内置 mouse_click.wav")
+        let mixer = SystemAudioMixer()
+
+        try mixer.installClickEffect(wavURL: wavURL)
+
+        XCTAssertNotNil(mixer.clickEffectPlayer, "内置资源须可装配进效果路")
+    }
 }
