@@ -63,6 +63,26 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(clickHighlightEnabled, forKey: Self.clickHighlightEnabledKey) }
     }
 
+    /// 点击自动缩放总开关（P1a，opt-in 默认关；开录快照语义同 clickHighlightEnabled）。
+    @Published var autoZoomEnabled: Bool {
+        didSet { defaults.set(autoZoomEnabled, forKey: Self.autoZoomEnabledKey) }
+    }
+
+    /// 缩放档位（P1a，合法 1.35/1.6/1.9 默认 1.6）：越界 didSet 钳回 1.6，载入野值
+    /// 同样钳制——沿用 fps/countdownSeconds 钳制模式。注意 didSet 内再赋值会重入
+    /// didSet（@Published 包装器语义，与普通存储属性不同），仅在不等时收敛赋值一次，
+    /// 重入轮落库，避免无限递归。
+    @Published var autoZoomLevel: Double {
+        didSet {
+            let normalized = Self.normalizedAutoZoomLevel(autoZoomLevel)
+            guard normalized != autoZoomLevel else {
+                defaults.set(autoZoomLevel, forKey: Self.autoZoomLevelKey)
+                return
+            }
+            autoZoomLevel = normalized
+        }
+    }
+
     /// 上次使用的采集模式（T17 裁定：⇧⌘R「开始/停止」以最后使用的模式开录，每次开始录制时
     /// 由装配层持久化到此处）。默认全屏（主显示器）。`CaptureMode` Codable 编码整只落库，
     /// 解码失败（如枚举演化）回退默认；显示器拓扑变化由下一次开始重新持久化自然覆盖。
@@ -112,6 +132,10 @@ final class SettingsStore: ObservableObject {
         // T16 裁定：点击高亮默认关（opt-in）；早期脚手架曾以 true 落库，随本任务翻转为 false
         //（真源仍是 UserDefaults：外部 defaults write com.screenrecorder.app clickHighlightEnabled -bool true 开启）。
         self.clickHighlightEnabled = userDefaults.object(forKey: Self.clickHighlightEnabledKey) as? Bool ?? false
+        // P1a：点击自动缩放（opt-in 默认关）；档位载入野值钳回 1.6（init 内赋值不触发
+        // didSet，落库的野值原样保留、不回写，与 fps/countdown 同纪律）。
+        self.autoZoomEnabled = userDefaults.object(forKey: Self.autoZoomEnabledKey) as? Bool ?? false
+        self.autoZoomLevel = Self.normalizedAutoZoomLevel(userDefaults.object(forKey: Self.autoZoomLevelKey) as? Double)
         // T17：上次使用的采集模式（⇧⌘R 开录用）；缺省/解码失败回退全屏（主显示器）。
         if let data = userDefaults.data(forKey: Self.lastCaptureModeKey),
            let mode = try? JSONDecoder().decode(CaptureMode.self, from: data) {
@@ -138,6 +162,8 @@ final class SettingsStore: ObservableObject {
     private static let countdownSecondsKey = "countdownSeconds"
     private static let pipEnabledKey = "pipEnabled"
     private static let clickHighlightEnabledKey = "clickHighlightEnabled"
+    private static let autoZoomEnabledKey = "autoZoomEnabled"
+    private static let autoZoomLevelKey = "autoZoomLevel"
     private static let lastCaptureModeKey = "lastCaptureMode"
     private static let windowCaptureTargetKey = "windowCaptureTarget"
 
@@ -150,6 +176,12 @@ final class SettingsStore: ObservableObject {
     /// 合法倒计时档位 0/3/5/10；越界/缺失回退 5（审查修复轮 1）。
     private static func normalizedCountdown(_ raw: Int?) -> Int {
         guard let raw, [0, 3, 5, 10].contains(raw) else { return 5 }
+        return raw
+    }
+
+    /// 合法缩放档位 1.35/1.6/1.9；越界/缺失回退 1.6（P1a）。
+    private static func normalizedAutoZoomLevel(_ raw: Double?) -> Double {
+        guard let raw, raw == 1.35 || raw == 1.6 || raw == 1.9 else { return 1.6 }
         return raw
     }
 }

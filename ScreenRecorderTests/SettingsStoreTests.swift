@@ -110,6 +110,53 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(reloaded.micMuted)
     }
 
+    /// P1a：点击自动缩放默认关 + 档位默认 1.6（opt-in，同点击高亮）。
+    func testAutoZoomDefaultsToDisabledAndLevelOnePointSix() {
+        let store = SettingsStore(userDefaults: defaults)
+
+        XCTAssertFalse(store.autoZoomEnabled)
+        XCTAssertEqual(store.autoZoomLevel, 1.6)
+    }
+
+    /// P1a 简报钉测：非法档位 didSet 钳回 1.6（{1.35,1.6,1.9} 之外一律 1.6），
+    /// 合法档位原样通过。
+    func testAutoZoomLevelClampsInvalidToDefault() {
+        let store = SettingsStore(userDefaults: defaults)
+
+        store.autoZoomLevel = 99
+        XCTAssertEqual(store.autoZoomLevel, 1.6)
+
+        store.autoZoomLevel = 1.0
+        XCTAssertEqual(store.autoZoomLevel, 1.6)
+
+        store.autoZoomLevel = 1.35
+        XCTAssertEqual(store.autoZoomLevel, 1.35)
+
+        store.autoZoomLevel = 1.9
+        XCTAssertEqual(store.autoZoomLevel, 1.9)
+    }
+
+    /// P1a：开关与档位跨实例往返（UserDefaults 持久化，key = 属性名）。
+    func testAutoZoomSettingsPersistAcrossInstances() {
+        let store = SettingsStore(userDefaults: defaults)
+        store.autoZoomEnabled = true
+        store.autoZoomLevel = 1.9
+
+        let reloaded = SettingsStore(userDefaults: defaults)
+
+        XCTAssertTrue(reloaded.autoZoomEnabled)
+        XCTAssertEqual(reloaded.autoZoomLevel, 1.9)
+    }
+
+    /// defaults 外写野值（如 2.5）加载时钳回 1.6——沿用 fps/countdownSeconds 载入钳制模式。
+    func testOutOfRangePersistedAutoZoomLevelClampsToDefault() {
+        defaults.set(2.5, forKey: "autoZoomLevel")
+
+        let store = SettingsStore(userDefaults: defaults)
+
+        XCTAssertEqual(store.autoZoomLevel, 1.6)
+    }
+
     private var defaultOutputDirectory: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScreenRecorder", isDirectory: true)

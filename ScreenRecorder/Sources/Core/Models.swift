@@ -32,4 +32,9 @@ struct RecordingConfiguration {
     var codec: VideoCodec
     var outputURL: URL
     var clickHighlightEnabled: Bool
+    /// 点击自动缩放总开关（P1a 开录快照语义，同 clickHighlightEnabled）。缺省关。
+    var autoZoomEnabled: Bool = false
+    /// 缩放档位快照（1.35/1.6/1.9；`SettingsStore.autoZoomLevel` 载入/didSet 双钳制）。
+    /// 缺省 1.6（默认档）。
+    var autoZoomLevel: Double = 1.6
 }
