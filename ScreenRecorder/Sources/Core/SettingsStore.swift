@@ -69,9 +69,11 @@ final class SettingsStore: ObservableObject {
     }
 
     /// 缩放档位（P1a，合法 1.35/1.6/1.9 默认 1.6）：越界 didSet 钳回 1.6，载入野值
-    /// 同样钳制——沿用 fps/countdownSeconds 钳制模式。注意 didSet 内再赋值会重入
-    /// didSet（@Published 包装器语义，与普通存储属性不同），仅在不等时收敛赋值一次，
-    /// 重入轮落库，避免无限递归。
+    /// 同样钳制——沿用 fps/countdownSeconds 钳制模式。注意 `@Published` 包装器的每次
+    /// 赋值（didSet 内再赋值、含同值赋值）都会重入 didSet——无条件再赋值即无限递归；
+    /// 普通存储属性在 didSet 内再赋值则按 Swift 语义静默替换、不重入（两者已用独立
+    /// 脚本在本工具链实证）。T8/T12 复制本钳制模式须用「不等才收敛赋值一次、重入轮
+    /// 落库」写法。
     @Published var autoZoomLevel: Double {
         didSet {
             let normalized = Self.normalizedAutoZoomLevel(autoZoomLevel)

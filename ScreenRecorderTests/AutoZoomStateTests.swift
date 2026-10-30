@@ -144,6 +144,10 @@ final class AutoZoomStateTests: XCTestCase {
         let state = AutoZoomState(level: 1.9)
         state.click(atNormalizedPoint: CGPoint(x: 0.5, y: 0.5), now: 0)
 
+        // 复审轮 1 钉测：点击瞬间（progress 0）= 原始画面 → nil（ZoomTransforms
+        // 的 progress 0 守卫），自 1/10 attack 起开始爬升
+        XCTAssertNil(state.currentTransform(in: bounds, now: 0))
+
         var lastScale: CGFloat = 1
         for step in 1...10 {
             let now = AutoZoomState.attackDuration * Double(step) / 10
