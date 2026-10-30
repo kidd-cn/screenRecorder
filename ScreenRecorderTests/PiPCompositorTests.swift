@@ -619,7 +619,10 @@ final class PiPCompositorZoomTests: XCTestCase {
         assertYellowish(samplePixel(output, x: 166, y: 96), "环描边右弧应随缩放迁移到 (166,96)")
         assertYellowish(samplePixel(output, x: 128, y: 134), "环描边下弧同样随缩放迁移")
         assertColor(samplePixel(output, x: 128, y: 96), equals: screenColor, "环心透出屏幕内容（描边圈，无填充）")
-        assertColor(samplePixel(output, x: 76, y: 60), equals: screenColor, "原描边左弧位置不再有环（环随缩放整体位移）")
+        // (56,60) = 原环心 (80,60) 的描边带（半径 22–26）左弧中带（距环心恰 24px）：
+        // v1 次序下此处必是黄描边；v2 环已随内容迁移到 (128,96)，此处透出纯绿底——
+        // 断言真正区分 v1/v2（(76,60) 距环心仅 4px，位于透明环孔内，两种次序都过，作废）。
+        assertColor(samplePixel(output, x: 56, y: 60), equals: screenColor, "原描边左弧中带 (56,60) 不再有环——环随缩放整体位移")
     }
 
     /// Review Focus #1 的代码级钉子：相同输入连跑两帧必须命中同一 pooled buffer 池

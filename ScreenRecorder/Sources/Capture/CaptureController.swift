@@ -86,10 +86,11 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     /// 屏坐标 → 捕获像素的取数闭包装进 recorder（begin 时按当次几何一次性组装）。
     private let clickHighlightTracker: ClickHighlightTracker?
     /// P1a 暂停门（spec §5「暂停时不触发」钉死）：`.paused` 时丢弃**新**缩放点击。
-    /// 主线程限定的普通布尔——全部访问点都在主线程（begin 复位、pause/resume 由
-    /// @MainActor CaptureController 调用、feedZoomClick 走 tracker 主线程回调契约），
-    /// 无锁。只门控新点击喂入：攻击已在途的缩放自然走完（与点击环淡出同语义），
-    /// 暂停**不 reset**（不 snap-cut，见 `feedZoomClick`）。
+    /// 无锁，靠状态机的**时间互斥**保证无并发：begin 的复位写在 tracker 装机之前完成
+    ///（begin 本体非主 actor、跑在协作线程；而 pause/resume 由 @MainActor
+    /// CaptureController 调用、feedZoomClick 走 tracker 主线程回调契约——三者不可能与
+    /// begin 的执行窗口重叠）。只门控新点击喂入：攻击已在途的缩放自然走完（与点击环
+    /// 淡出同语义），暂停**不 reset**（不 snap-cut，见 `feedZoomClick`）。
     private var isRecordingPaused = false
 
     init(diskProvider: DiskFreeSpaceProviding = VolumeFreeSpaceProvider(),
@@ -106,9 +107,9 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 
     func begin(_ config: RecordingConfiguration) async throws {
         // P1a：新场恒未暂停——上一场以暂停收尾（stop 不经 resume）时门仍是关的，不清会
-        // 令下一场缩放静默失效。此写与主线程 pause/resume 无并发：state 尚非 .recording
-        //（pause 被 CaptureController 状态机挡住），tracker 亦未装机（start 在 begin 返回
-        // 之后，enterRecordingPhase）。
+        // 令下一场缩放静默失效。与主线程 pause/resume 之间是状态机的时间互斥：state 尚非
+        // .recording（pause 被 CaptureController 状态机挡住），tracker 亦未装机（start 在
+        // begin 返回之后，enterRecordingPhase）——复位先于任何 pause/喂入访问。
         isRecordingPaused = false
         // 即时磁盘检查：空间不足直接失败，不开录（T5 指针：轮询首触发在 pollInterval 后）
         if let free = diskProvider.freeBytes(at: config.outputURL), free < stopBelow {
