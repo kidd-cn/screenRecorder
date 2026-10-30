@@ -119,14 +119,16 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // T15：PiP 随录制启动（includeCamera 时）——摄像头 + 浮窗先热，首帧起 PiP 就位。
         // 几何解析失败 / 授权拒绝 / 无摄像头在内部降级为纯屏幕（T8 混音降级精神），不阻断。
         // （begin 本体非主 actor；浮窗/摄像头装配全主线程，MainActor.run 跳转。）
-        // T16：采集几何同场复用——PiP 摆放与点击换算共用一次 resolve（nil = 解析失败，
-        // 双效果均内部降级纯屏幕）。
+        // T16：采集几何同场复用——PiP 摆放、点击换算与缩放中心换算共用一次 resolve
+        //（nil = 解析失败，各效果内部降级纯屏幕）。
         // 裁定 6（零告警恢复）：resolve 结果一次性定为 let——var 捕获在 @Sendable 闭包
         //（MainActor.run / clickOverlayProvider）下触发 Swift 6 并发告警；行为不变
         //（两者均不开启时 resolve 原本就被跳过，nil 直通）。
         let wantsPiP = config.includeCamera && cameraPiP != nil
         let wantsClick = config.clickHighlightEnabled && clickHighlightTracker != nil
-        let geometry: PiPCaptureGeometry? = if wantsPiP || wantsClick {
+        // P1a：自动缩放骑同一点击源（tracker 的 onClick），几何同样用于点击中心换算。
+        let wantsZoom = config.autoZoomEnabled && clickHighlightTracker != nil
+        let geometry: PiPCaptureGeometry? = if wantsPiP || wantsClick || wantsZoom {
             await PiPCaptureGeometry.resolve(for: config.mode)
         } else {
             nil
@@ -140,17 +142,58 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // 原 buffer，与直通路径等价。
         recorder.pipPixelBufferProvider = cameraPiP?.latestPixelBuffer
         recorder.pipFrameProvider = cameraPiP?.currentPiPFrame
-        // 点击高亮取数缝（T16）：Cocoa 全局 → CG 全局 → 捕获像素，转换器按当次几何与
-        // 主屏翻转入口一次性组装；tracker 未启动/未衰减窗口内 currentState 返回 nil，
-        // 合成器按无高亮直通。几何解析失败（nil）不装缝 = 点击路整体降级关闭。
-        if config.clickHighlightEnabled, let clickHighlightTracker, let geometry {
+        // 点击高亮 + 自动缩放取数缝（T16 / P1a）：两者共用一次几何解析与主屏翻转高度。
+        // 转换器按当次几何与主屏翻转入口一次性组装；tracker 未启动/未衰减窗口内
+        // currentState 返回 nil，合成器按无高亮直通。几何解析失败（nil）不装缝 = 对应
+        // 效果整体降级关闭。
+        if let clickHighlightTracker, let geometry, wantsClick || wantsZoom {
             let flipHeight = await MainActor.run { ClickHighlightTracker.primaryScreenHeight() }
-            recorder.clickOverlayProvider = { [weak clickHighlightTracker] in
-                clickHighlightTracker?.currentState { cocoaPoint in
-                    let cgPoint = ClickHighlightTracker.cgGlobalPoint(
-                        fromCocoaGlobal: cocoaPoint,
-                        primaryScreenHeight: flipHeight)
-                    return geometry.capturePixelPoint(fromCGPoint: cgPoint)
+            if config.clickHighlightEnabled {
+                recorder.clickOverlayProvider = { [weak clickHighlightTracker] in
+                    clickHighlightTracker?.currentState { cocoaPoint in
+                        let cgPoint = ClickHighlightTracker.cgGlobalPoint(
+                            fromCocoaGlobal: cocoaPoint,
+                            primaryScreenHeight: flipHeight)
+                        return geometry.capturePixelPoint(fromCGPoint: cgPoint)
+                    }
+                }
+            }
+            // P1a 自动缩放接线：点击 → 归一化中心 → AutoZoomState.click；缩放仿射经
+            // zoomStateProvider 逐帧进合成器。换算链与点击环完全同源（Cocoa 全局 →
+            // CG 全局 → capturePixelPoint，同一几何与翻转入口），只补两步归一化：
+            // ÷ 画布尺寸；y 翻转为 CI 画布 y 向上口径（合成器 placeClickOverlay 的
+            // `bounds.height - y` 同一翻转）——缩放中心与环落在同一画面位置。
+            // zoomState 为本场新建（config 快照档位：录制中途改设置不影响进行中的录制；
+            // 时间线随 recorder 生命周期存亡，无需跨场 reset）。provider 缝强持有它
+            //（生命周期 = recorder = 单场录制）；onClick 弱引用防 tracker 跨场滞留。
+            if config.autoZoomEnabled {
+                await MainActor.run {
+                    let zoomState = AutoZoomState(level: CGFloat(config.autoZoomLevel))
+                    let canvasBounds = CGRect(origin: .zero, size: geometry.capturePixelSize)
+                    clickHighlightTracker.onClick = { [weak zoomState] cocoaPoint, _ in
+                        // tracker 回调主线程契约（类注释钉定）：assumeIsolated 直进主
+                        // actor，零调度延迟，时间线起点贴合点击帧。
+                        MainActor.assumeIsolated {
+                            guard let zoomState,
+                                  canvasBounds.width > 0, canvasBounds.height > 0 else { return }
+                            let cgPoint = ClickHighlightTracker.cgGlobalPoint(
+                                fromCocoaGlobal: cocoaPoint,
+                                primaryScreenHeight: flipHeight)
+                            let pixel = geometry.capturePixelPoint(fromCGPoint: cgPoint)
+                            zoomState.click(
+                                atNormalizedPoint: CGPoint(x: pixel.x / canvasBounds.width,
+                                                           y: 1 - pixel.y / canvasBounds.height),
+                                now: ProcessInfo.processInfo.systemUptime)
+                        }
+                    }
+                    recorder.zoomStateProvider = {
+                        // video 队列逐帧读（非隔离缝，锁保护锚点快照）；时钟 = 系统运行
+                        // 时长（与 CaptureController.monotonicNow 同口径，不受改时间影响）。
+                        // **强持有** zoomState：provider 缝是它唯一的宿主，生命周期 =
+                        // recorder = 单场录制（finish 收走 recorder 即释放）。
+                        zoomState.frameTransform(in: canvasBounds,
+                                                 now: ProcessInfo.processInfo.systemUptime)
+                    }
                 }
             }
         }
@@ -326,7 +369,9 @@ final class CaptureController: ObservableObject {
         config.mode = mode // start 的 mode 参数为准（简报签名 mode 与 config 并列）
         // T16：enabled 真源是录制开始的 config 快照（外部 defaults 改动自下一场录制生效）；
         // 监听中关闭时 tracker 内部立即摘除 monitor。
-        clickHighlightTracker?.setEnabled(config.clickHighlightEnabled)
+        // P1a：自动缩放骑同一点击源——只开缩放（高亮关）时 tracker 仍需监听点击；
+        // 环渲染由 coordinator 侧 clickOverlayProvider 装配缝独立门控（关高亮不画环）。
+        clickHighlightTracker?.setEnabled(config.clickHighlightEnabled || config.autoZoomEnabled)
         // T18：源丢失匹配目标随捕获模式确定（裁定 2）。
         sourceDisplayID = Self.capturedDisplayID(of: config.mode)
         hasBegun = false

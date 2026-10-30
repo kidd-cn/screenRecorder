@@ -98,7 +98,7 @@ struct PiPCaptureGeometry {
 /// - 画布尺寸以逐帧实测的 `screenFrame` 尺寸为准（修复轮 Minor #2：`init(pixelSize:)` 的
 ///   尺寸只是提示，消除「缓冲实际尺寸 == init 假设」前提）；
 /// - 无 PiP（pip / pipFrame 为 nil）或完全不相交时 PiP 路**零渲染**；无点击态或圈不可得时
-///   点击路**零渲染**；两路皆空时**直返原 buffer**；
+///   点击路**零渲染**；缩放仿射 nil 时缩放步恒等跳过；三路皆空时**直返原 buffer**；
 /// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append）；只在 PiP 或点击高亮开启时被调用
 ///   （调用方门控：`SCStreamRecorder` 按注入缝在位与否装配合成器）。
 /// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与两处 mask 缓存无需加锁。
@@ -143,16 +143,23 @@ final class PiPCompositor {
         self.pixelSize = pixelSize
     }
 
-    /// 逐帧合成（简报 Produces 签名逐字，T16 增 clickOverlay）。screen 为底；PiP 与点击高亮
-    /// 双缺省直返 screen（零渲染直返原 buffer）。单效果缺省时该路零渲染跳过，另一路照常。
+    /// 逐帧合成（二期 P1a：签名增 `zoomTransform`，合成次序总则 v2）。screen 为底；
+    /// 三效果全缺省直返 screen（零渲染直返原 buffer，与一期逐字节一致）。单效果缺省时
+    /// 该路零渲染跳过，另一路照常。
+    ///
+    /// 次序 v2（规格 §5）：底帧 → 点击环（内容锚定层）→ **统一施加缩放** → PiP（视口锚定层）。
+    /// 一期「环在 PiP 上」的次序自本签名起终结——环画在缩放之下，随缩放一起变换。
+    /// `zoomTransform` 为 CI 画布空间（y 向上，与 placeClickOverlay/placePip 的换算口径同源）
+    /// 的仿射；`transformed(by:)` 是惰性 CI recipe，热路径零位图分配。
     @discardableResult
     func composite(screenFrame: CVPixelBuffer,
                    pip: CVPixelBuffer?,
                    pipFrame: PiPFrame?,
                    clickOverlay: ClickOverlayState? = nil,
+                   zoomTransform: CGAffineTransform? = nil,
                    at pts: CMTime,
                    into context: CIContext) -> CVPixelBuffer {
-        guard pip != nil || clickOverlay != nil else { return screenFrame } // 双缺省：零开销直返原 buffer
+        guard pip != nil || clickOverlay != nil || zoomTransform != nil else { return screenFrame } // 全缺省：零开销直返原 buffer
         // 画布尺寸以 screenFrame 实测为准（修复轮 Minor #2）：与 init pixelSize 失配时按
         // 实测求交、换算与出图——不得误判越界直通，也不得输出错误尺寸。
         let bounds = CGRect(
@@ -162,13 +169,19 @@ final class PiPCompositor {
         let base = CIImage(cvPixelBuffer: screenFrame)
         var composed: CIImage?
 
-        // PiP（T15 管线原样搬移）：rect 空 / 不相交 / 源异常任一失败即本路零渲染直通。
-        if let pip, let pipFrame {
-            composed = placePip(pip, pipFrame: pipFrame, in: bounds, over: base)
-        }
-        // 点击高亮（T16）：出画由 CI 自然裁剪；圈不可得（半径/alpha 非法）本路直通不丢帧。
+        // 点击高亮（内容锚定层，v2）：先画在底帧上，置于缩放之下。出画由 CI 自然裁剪；
+        // 圈不可得（半径/alpha 非法）本路直通不丢帧。
         if let clickOverlay, let overlayImage = placeClickOverlay(clickOverlay, in: bounds) {
             composed = overlayImage.composited(over: composed ?? base)
+        }
+        // 统一缩放（v2）：对已含环的画面施加 zoomTransform（nil = 恒等跳过）。
+        if let zoomTransform {
+            composed = (composed ?? base).transformed(by: zoomTransform)
+        }
+        // PiP（视口锚定层，v2）：缩放后的画面为底。rect 空 / 不相交 / 源异常任一失败即
+        // 本路零渲染直通。
+        if let pip, let pipFrame {
+            composed = placePip(pip, pipFrame: pipFrame, in: bounds, over: composed ?? base)
         }
 
         guard let composed, let output = dequeueOutputBuffer(size: bounds.size) else { return screenFrame }
@@ -176,7 +189,8 @@ final class PiPCompositor {
         return output
     }
 
-    /// PiP 摆放（原 composite 主体逐行搬移）：返回合成后的整幅图像；nil = 本帧不合成 PiP。
+    /// PiP 摆放（原 composite 主体逐行搬移；`base` 形参名保留，v2 下传入的底图是
+    /// 缩放后的画面）：返回合成后的整幅图像；nil = 本帧不合成 PiP。
     private func placePip(_ pip: CVPixelBuffer, pipFrame: PiPFrame, in bounds: CGRect, over base: CIImage) -> CIImage? {
         let targetRect = pipFrame.rectInCapturePixels
         guard !targetRect.isEmpty, bounds.intersection(targetRect) != .null else { return nil }
@@ -297,6 +311,14 @@ final class PiPCompositor {
         context?.fillPath()
         return context?.makeImage()
     }
+
+    // MARK: 测试缝（Review Focus #1 代码级钉子）
+
+    /// 当前输出缓冲池与其尺寸（internal 只读）：PiPCompositorTests 钉「连帧命中同一池实例、
+    /// 池尺寸稳定」——逐帧重建池/直建兜底即逐帧分配，测试即红。只在 video 队列/测试读，
+    /// 与池字段同无锁纪律。
+    var activeOutputPool: CVPixelBufferPool? { bufferPool }
+    var activeOutputPoolSize: CGSize? { poolSize }
 
     /// 从池取输出缓冲（按 screenFrame 实测尺寸建池，尺寸变化时重建）；池不可用/耗尽时直建
     /// 兜底（罕见路径，宁分配不丢帧）。重建失败即弃池——错误尺寸的池化缓冲不得使用。

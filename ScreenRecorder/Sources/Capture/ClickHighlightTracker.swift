@@ -56,6 +56,26 @@ final class ClickHighlightTracker: NSObject {
     /// 已装监听句柄（nil = 未监听；主线程装卸，句柄读写一并锁保护供 isMonitoring 跨线程读）。
     private var globalMonitor: Any?
     private var localMonitor: Any?
+    /// 点击转发缝（P1a，Task 2/3 消费：自动缩放中心、点击音效）：每次 `recordClick` 触发
+    /// 一次，载荷 = 原始记录坐标与时刻。fire-and-forget：nil 安全、无返回值、handler 内部
+    /// 自负（tracker 不等待、不重试）。读写两端线程不同（接线层在 begin 装配、点击回调在
+    /// 主线程触发）——与 `enabled` 同一锁纪律，锁内读写、锁外触发（handler 不得在 tracker
+    /// 锁内回调 tracker）。
+    private var onClickHandler: ((CGPoint, Date) -> Void)?
+
+    /// 点击转发缝（P1a 简报 Produces 逐字）。缺省 nil = 无消费方，记录路径行为不变。
+    var onClick: ((CGPoint, Date) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return onClickHandler
+        }
+        set {
+            lock.lock()
+            onClickHandler = newValue
+            lock.unlock()
+        }
+    }
 
     /// - Parameters:
     ///   - enabled: 总开关（opt-in，默认 false；`start()` 仅在启用时装机）。
@@ -124,10 +144,13 @@ final class ClickHighlightTracker: NSObject {
     }
 
     /// 记录一次点击（internal 缝：单测直接注入坐标/时刻，生产回调传实时读数）。
+    /// P1a：记录后锁外转发 `onClick`（nil 安全 fire-and-forget）。
     func recordClick(point: CGPoint, at date: Date) {
         lock.lock()
-        defer { lock.unlock() }
         lastClick = ClickRecord(point: point, appearedAt: date)
+        let handler = onClickHandler
+        lock.unlock()
+        handler?(point, date) // 锁外触发：handler 不得在 tracker 锁内回调 tracker
     }
 
     /// 当前叠加态（简报 Produces 签名逐字）：`fadeDuration` 窗口内返回带衰减透明度的状态

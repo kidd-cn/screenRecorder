@@ -167,3 +167,34 @@ final class ClickHighlightCoordinateTests: XCTestCase {
             CGPoint(x: 0, y: 900), "Cocoa 左下原点 = CG 左上原点")
     }
 }
+
+// MARK: - onClick 转发缝（P1a：缩放/点击音效等消费方装配用）
+
+final class ClickHighlightOnClickTests: XCTestCase {
+    func testDefaultIsNilAndRecordClickSurvives() {
+        let tracker = ClickHighlightTracker(enabled: true)
+        XCTAssertNil(tracker.onClick, "未装配消费方时转发缝缺省 nil")
+        tracker.recordClick(point: CGPoint(x: 1, y: 2), at: Date()) // handler 缺省：nil 安全不崩
+    }
+
+    func testOnClickFiresWithRecordedPayload() {
+        let tracker = ClickHighlightTracker(enabled: true)
+        var received: [(point: CGPoint, date: Date)] = []
+        tracker.onClick = { received.append((point: $0, date: $1)) }
+        let t0 = Date(timeIntervalSinceReferenceDate: 42)
+
+        tracker.recordClick(point: CGPoint(x: 100, y: 200), at: t0)
+
+        XCTAssertEqual(received.count, 1, "每次记录恰好转发一次（fire-and-forget）")
+        XCTAssertEqual(received[0].point, CGPoint(x: 100, y: 200), "载荷 = 原始记录坐标")
+        XCTAssertEqual(received[0].date, t0, "载荷 = 原始点击时刻")
+    }
+
+    func testOnClickCanBeClearedAndStaysNilSafe() {
+        let tracker = ClickHighlightTracker(enabled: true)
+        tracker.onClick = { _, _ in }
+        tracker.onClick = nil
+        tracker.recordClick(point: .zero, at: Date()) // 清空后再记录：nil 安全
+        XCTAssertNil(tracker.onClick)
+    }
+}

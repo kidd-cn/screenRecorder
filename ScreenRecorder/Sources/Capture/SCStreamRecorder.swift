@@ -6,9 +6,9 @@ import Foundation
 import ScreenCaptureKit
 
 /// SCStream 采集 → `AssetWriterSession` 落盘的录制会话。
-/// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧合成（仅 PiP / 点击高亮开启，T15/T16；
-/// 合成在暂停平移判定之后、append 之前，PTS 原样透传）→ append；双效果全关时为逐帧直通
-/// （合成器 nil，零开销）。
+/// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧合成（PiP / 点击高亮 / 点击自动缩放
+/// 任一开启，T15/T16/P1a；合成在暂停平移判定之后、append 之前，PTS 原样透传）→ append；
+/// 三效果全关时为逐帧直通（合成器 nil，零开销）。
 /// 音频路径（Task 9，captureSystemAudio 或 captureMicrophone 时）：`SystemAudioMixer` 双路混音
 /// ——系统声：SCStream audio 队列样本；麦克风：engine inputNode tap（SCStream 的 `.microphone`
 /// 输出 macOS 15+ 才有，维持丢弃）——混音为单条 AAC 轨，混音器启动失败时降级为纯视频轨继续录制。
@@ -59,6 +59,10 @@ final class SCStreamRecorder: NSObject {
     /// nil（未注入或 clickHighlightEnabled=false）= 点击路全关，热路径与今日逐字节一致。
     /// 仅 video 队列调用（tracker 内部锁保护快照）。
     var clickOverlayProvider: (() -> ClickOverlayState?)?
+    /// P1a 点击自动缩放注入缝：当帧缩放仿射取数（CI 画布空间 y 向上，与合成器画布口径
+    /// 一致）。nil（未注入或 autoZoomEnabled=false）= 缩放步恒等跳过。
+    /// 仅 video 队列调用（AutoZoomState 锁保护锚点快照读，时间线推导与 MainActor 版共用）。
+    var zoomStateProvider: (() -> CGAffineTransform?)?
 
     /// `stop()` 完成后的成片 URL；nil 表示本次无产出（启动失败 / 流失败 / 零样本）。
     private(set) var finishedFileURL: URL?
@@ -99,12 +103,14 @@ final class SCStreamRecorder: NSObject {
     func start() async throws {
         let target = try await resolveTarget()
         let session = try AssetWriterSession(config: config, pixelSize: target.pixelSize)
-        // T15/T16：合成器按需装配——PiP 开启（摄像头 + 位置注入缝在位）或点击高亮开启
-        //（取数注入缝在位）时建（CIContext/CVPixelBufferPool 均惰性持有，未走到合成不产生
-        // 缓冲分配）。两者都关时保持 nil = 直通路径零开销。
+        // T15/T16：合成器按需装配——PiP 开启（摄像头 + 位置注入缝在位）、点击高亮开启
+        //（取数注入缝在位）或自动缩放开启（P1a，取数缝在位）时建（CIContext/
+        // CVPixelBufferPool 均惰性持有，未走到合成不产生缓冲分配）。全关时保持 nil =
+        // 直通路径零开销。
         let pipActive = config.includeCamera && pipPixelBufferProvider != nil && pipFrameProvider != nil
         let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
-        if pipActive || clickActive {
+        let zoomActive = config.autoZoomEnabled && zoomStateProvider != nil
+        if pipActive || clickActive || zoomActive {
             pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
         }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
@@ -427,8 +433,8 @@ extension SCStreamRecorder: SCStreamOutput {
                 session.startWriting()
                 writerArmed = true
             }
-            // T15/T16：逐帧合成（任一效果开启时到达此处；合成器内部对缺省输入各自零渲染
-            // 直通，双缺省直返原 buffer）——合成不改变时间轴，PTS 原样透传（append 仍用
+            // T15/T16/P1a：逐帧合成（任一效果开启时到达此处；合成器内部对缺省输入各自零渲染
+            // 直通，全缺省直返原 buffer）——合成不改变时间轴，PTS 原样透传（append 仍用
             // shiftedPTS）；合成器 nil 时直通路径零开销（同 T8–T14 行为）。
             let outputBuffer: CVPixelBuffer
             if let pipCompositor {
@@ -437,6 +443,7 @@ extension SCStreamRecorder: SCStreamOutput {
                     pip: pipPixelBufferProvider?(),
                     pipFrame: pipFrameProvider?(),
                     clickOverlay: clickOverlayProvider?(),
+                    zoomTransform: zoomStateProvider?(),
                     at: shiftedPTS,
                     into: pipCompositor.context)
             } else {

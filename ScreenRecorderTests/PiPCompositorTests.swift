@@ -533,3 +533,133 @@ final class PiPCompositorClickOverlayTests: XCTestCase {
         assertColor(samplePixel(output, x: 60, y: 160), equals: screenColor, "圈心透出屏幕内容")
     }
 }
+
+// MARK: - P1a 缩放接入合成热路径（v2 次序：底帧 → 点击环 → 施加 zoomTransform → PiP）
+
+final class PiPCompositorZoomTests: XCTestCase {
+    /// 软渲染上下文：无头环境确定性出图（生产用 compositor 自带的 GPU context）。
+    private lazy var softwareContext = CIContext(options: [.useSoftwareRenderer: true])
+
+    private let canvasSize = CGSize(width: 320, height: 240)
+    private let screenColor = BGRAColor(blue: 0, green: 255, red: 0, alpha: 255) // 纯绿
+    private let otherColor = BGRAColor(blue: 255, green: 0, red: 0, alpha: 255)  // 纯蓝
+
+    private func makeCompositor() -> PiPCompositor {
+        PiPCompositor(pixelSize: canvasSize)
+    }
+
+    /// 带空间结构的底帧：左带（x < splitX）绿、其余蓝——纯色底帧放大后像素不变，
+    /// 缩放位移只能用有结构的画面被采样区分。
+    private func makeTwoToneScreen(splitX: Int = 80) -> CVPixelBuffer {
+        let buffer = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return buffer }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        for row in 0..<CVPixelBufferGetHeight(buffer) {
+            let rowBase = base.advanced(by: row * bytesPerRow)
+            for column in splitX..<CVPixelBufferGetWidth(buffer) {
+                let pixel = rowBase.advanced(by: column * 4).assumingMemoryBound(to: UInt8.self)
+                pixel[0] = otherColor.blue
+                pixel[1] = otherColor.green
+                pixel[2] = otherColor.red
+                pixel[3] = otherColor.alpha
+            }
+        }
+        return buffer
+    }
+
+    /// 满档位（progress 1）缩放仿射：走 Task 1 真源 API 构造，不手拼矩阵。
+    private func fullZoom(center: CGPoint, level: CGFloat = 1.6) -> CGAffineTransform {
+        ZoomTransforms.contentTransform(
+            center: center, level: level, progress: 1,
+            in: CGRect(origin: .zero, size: canvasSize))!
+    }
+
+    /// 热路径回归守卫（v2 总则）：三效果全缺省仍逐字节直返原 buffer（零渲染）。
+    func testAllEffectsNilReturnsSameBuffer() {
+        let compositor = makeCompositor()
+        let screen = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        let result = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
+            zoomTransform: nil, at: .zero, into: softwareContext)
+        XCTAssertTrue(result === screen, "全效果缺省必须直返原 buffer（=== 同实例，与一期逐字节一致）")
+    }
+
+    /// 同一底帧：nil 缩放（直通原像素）vs 满档位缩放后，同一取样点内容位移可区分。
+    /// 底帧左带（x<80）绿、其余蓝；中心 1.6x 缩放把输出 (50,120) 映射回底帧 x≈91.25（蓝带）。
+    func testZoomAltersOutputPixels() {
+        let compositor = makeCompositor()
+        let screen = makeTwoToneScreen()
+        let zoomed = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
+            zoomTransform: fullZoom(center: CGPoint(x: 0.5, y: 0.5)), at: .zero, into: softwareContext)
+
+        XCTAssertFalse(zoomed === screen, "有缩放必须合成输出（新 buffer，不污染采集侧缓冲）")
+        XCTAssertEqual(CVPixelBufferGetWidth(zoomed), 320)
+        XCTAssertEqual(CVPixelBufferGetHeight(zoomed), 240)
+        assertColor(samplePixel(screen, x: 50, y: 120), equals: screenColor, "无缩放：底帧 x=50 仍是左带绿色")
+        assertColor(samplePixel(zoomed, x: 50, y: 120), equals: otherColor, "缩放后：x=50 应显示原 x≈91.25 的蓝带内容")
+    }
+
+    /// v2 次序钉测：点击环画在底帧上、随后随 zoomTransform 一起被变换（环在缩放之下）。
+    /// 环心缓冲 (80,60)（CI y-up 空间 (80,180)）在中心 1.6x 满档位下落到缓冲 (128,96)，
+    /// 描边半径随缩放 24×1.6=38.4；原描边位置不再有环。
+    func testRingRendersUnderZoom() {
+        let compositor = makeCompositor()
+        let screen = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: ClickOverlayState(point: CGPoint(x: 80, y: 60), appearedAt: Date()),
+            zoomTransform: fullZoom(center: CGPoint(x: 0.25, y: 0.75)), at: .zero, into: softwareContext)
+
+        XCTAssertFalse(output === screen, "有缩放必须合成输出（新 buffer，不污染采集侧缓冲）")
+        // 环随缩放迁移：缩放中心钳制后 requested center (80,180)→(100,165)，仿射 p ↦ 1.6p+(0,−144)，
+        // 环心 (80,180) ↦ (128,144) = 缓冲 (128,96)；描边带（原 22–26）放大为 35.2–41.6。
+        assertYellowish(samplePixel(output, x: 166, y: 96), "环描边右弧应随缩放迁移到 (166,96)")
+        assertYellowish(samplePixel(output, x: 128, y: 134), "环描边下弧同样随缩放迁移")
+        assertColor(samplePixel(output, x: 128, y: 96), equals: screenColor, "环心透出屏幕内容（描边圈，无填充）")
+        assertColor(samplePixel(output, x: 76, y: 60), equals: screenColor, "原描边左弧位置不再有环（环随缩放整体位移）")
+    }
+
+    /// Review Focus #1 的代码级钉子：相同输入连跑两帧必须命中同一 pooled buffer 池
+    ///（池实例不逐帧重建、尺寸稳定）——逐帧重建池/直建兜底即逐帧分配，测试即红。
+    func testPerFrameNoAllocation() {
+        let compositor = makeCompositor()
+        let screen = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        let zoom = fullZoom(center: CGPoint(x: 0.5, y: 0.5))
+
+        let first = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
+            zoomTransform: zoom, at: .zero, into: softwareContext)
+        XCTAssertNotNil(first)
+        let poolAfterFirstFrame = compositor.activeOutputPool
+        XCTAssertNotNil(poolAfterFirstFrame, "首帧应建立输出缓冲池（不得走直建兜底）")
+        XCTAssertEqual(compositor.activeOutputPoolSize, CGSize(width: 320, height: 240))
+
+        let second = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
+            zoomTransform: zoom, at: .zero, into: softwareContext)
+        XCTAssertNotNil(second)
+        XCTAssertTrue(compositor.activeOutputPool === poolAfterFirstFrame,
+                      "第二帧必须命中同一池实例（逐帧重建池即逐帧分配）")
+        XCTAssertEqual(compositor.activeOutputPoolSize, CGSize(width: 320, height: 240), "池尺寸不得漂移重建")
+        XCTAssertEqual(CVPixelBufferGetWidth(second), 320)
+        XCTAssertEqual(CVPixelBufferGetHeight(second), 240)
+    }
+
+    // MARK: 助手
+
+    /// 描边像素带式断言（与 PiPCompositorClickOverlayTests 同口径）：浓黄（R ≥ 220）+
+    /// G 保持 255 + B 近零——缩放重采样不改变描边主色。
+    private func assertYellowish(
+        _ actual: BGRAColor,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertGreaterThanOrEqual(Int(actual.red), 220, message, file: file, line: line)
+        XCTAssertTrue(abs(Int(actual.green) - 255) <= 3, "\(message)（G 应保持 255）", file: file, line: line)
+        XCTAssertLessThanOrEqual(Int(actual.blue), 20, message, file: file, line: line)
+    }
+}

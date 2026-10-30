@@ -176,6 +176,35 @@ final class AutoZoomStateTests: XCTestCase {
         XCTAssertEqual(config.autoZoomLevel, 1.6)
     }
 
+    // MARK: video 队列非隔离读缝（Task 2 接线）
+
+    /// `frameTransform`（nonisolated，SCStream video 队列逐帧读）与 MainActor 版
+    /// `currentTransform` 同输入同输出——共用时间线推导的回归钉（idle / 攻击中段 /
+    /// hold / release / 走完全相位对齐，含双 nil）。
+    func testFrameTransformMatchesCurrentTransformAcrossPhases() {
+        let state = AutoZoomState(level: 1.9)
+        state.click(atNormalizedPoint: CGPoint(x: 0.3, y: 0.7), now: 1.0)
+
+        let probes: [TimeInterval] = [1.0, 1.05, 1.2, 1.3, 1.6, 2.7] // 点击瞬间/攻击中/hold/release/走完
+        for now in probes {
+            XCTAssertEqual(state.frameTransform(in: bounds, now: now),
+                           state.currentTransform(in: bounds, now: now),
+                           "now=\(now)：非隔离读缝必须与 MainActor 版同输出")
+        }
+        XCTAssertNil(state.frameTransform(in: bounds, now: 3.0), "时间线走完后两版同为 nil")
+    }
+
+    /// 重点击换锚点后两版读缝仍一致（锚点跨线程快照读的活性钉）。
+    func testFrameTransformFollowsReclick() throws {
+        let state = AutoZoomState(level: 1.6)
+        state.click(atNormalizedPoint: CGPoint(x: 0.2, y: 0.5), now: 0)
+        state.click(atNormalizedPoint: CGPoint(x: 0.8, y: 0.5), now: 2.0) // hold 内重点击重启 attack
+
+        let window = zoomWindow(
+            of: try XCTUnwrap(state.frameTransform(in: bounds, now: 2.25)), in: bounds)
+        XCTAssertEqual(window.midX, 68.75, accuracy: Self.accuracy, "非隔离读缝应跟随重点击后的新中心")
+    }
+
     // MARK: 助手
 
     /// 放大窗口：viewport（bounds）经仿射逆映射回底帧内容的矩形（纯缩放+平移，无旋转，

@@ -153,6 +153,7 @@ private struct GeneralTab: View {
 
 /// 录制源页：系统声音 / 麦克风区（终审 F2：包含麦克风=开始时刻快照；录制中静音=live 下发；
 /// 音量滑杆=live 增益）、摄像头画中画（T15）、鼠标点击高亮（T16，默认关）、
+/// 点击自动缩放（P1a，默认关；档位三选）、
 /// 「窗口捕获」组（T20：当前目标 + 选择器入口 + 快捷键提示）。
 private struct RecordingSourcesTab: View {
     @ObservedObject var settings: SettingsStore
@@ -178,6 +179,15 @@ private struct RecordingSourcesTab: View {
             }
             Toggle("摄像头画中画", isOn: $settings.pipEnabled)
             Toggle("鼠标点击高亮", isOn: $settings.clickHighlightEnabled)
+            // P1a 点击自动缩放：opt-in 默认关（快照语义同点击高亮——下一场录制生效）；
+            // 档位三选与 SettingsStore 的钳制档位一一对应。
+            Toggle("点击自动缩放", isOn: $settings.autoZoomEnabled)
+            Picker("缩放档位", selection: $settings.autoZoomLevel) {
+                Text("1.35x").tag(1.35)
+                Text("1.6x").tag(1.6)
+                Text("1.9x").tag(1.9)
+            }
+            .disabled(!settings.autoZoomEnabled)
             Section("窗口捕获") {
                 windowTargetRow
                 Button("选择窗口…") { onPickWindowTarget() }

@@ -194,7 +194,9 @@ final class AppAssembly: ObservableObject {
             fps: settings.fps,
             codec: settings.videoCodec,
             outputURL: outputURL,
-            clickHighlightEnabled: settings.clickHighlightEnabled
+            clickHighlightEnabled: settings.clickHighlightEnabled,
+            autoZoomEnabled: settings.autoZoomEnabled,
+            autoZoomLevel: settings.autoZoomLevel
         )
     }
 
