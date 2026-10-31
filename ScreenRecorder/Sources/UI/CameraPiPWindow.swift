@@ -79,11 +79,15 @@ final class CameraPiPWindowController {
 
     /// 录制开始（coordinator.begin 调用）：启动摄像头 + 显示浮窗 + 发布拖动锚点。
     /// geometry nil 或摄像头失败 → 降级纯屏幕（不抛错，不阻断录制）。
-    func beginRecording(geometry: PiPCaptureGeometry?) {
+    /// P5：`backgroundProcessor` 随本场开录快照装配（off → nil），**先于 start** 装机——
+    /// 帧回调自首帧起即走正确路径（nil = 一期旁路，blur/builtin = 处理流水线）。
+    func beginRecording(geometry: PiPCaptureGeometry?,
+                        backgroundProcessor: CameraBackgroundProcessor? = nil) {
         guard let geometry else {
             NSLog("CameraPiP: 本模式无可用的 PiP 换算几何，本次录制为纯屏幕")
             return
         }
+        camera.backgroundProcessor = backgroundProcessor
         do {
             try startCamera(camera)
         } catch {

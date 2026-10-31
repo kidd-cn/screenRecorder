@@ -59,6 +59,17 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(pipEnabled, forKey: Self.pipEnabledKey) }
     }
 
+    /// 摄像头画中画背景（P5，默认 off 原画面）：off/blur/builtin 三态枚举整只 JSON 落库
+    ///（lastCaptureMode 同款 Codable 模式；枚举无野值档位，解码失败回退默认）。开录快照
+    /// 语义（同 pipEnabled——下一场录制生效），录制中改设置不影响进行中的录制。
+    @Published var cameraBackground: CameraBackgroundMode {
+        didSet {
+            if let data = try? JSONEncoder().encode(cameraBackground) {
+                defaults.set(data, forKey: Self.cameraBackgroundKey)
+            }
+        }
+    }
+
     @Published var clickHighlightEnabled: Bool {
         didSet { defaults.set(clickHighlightEnabled, forKey: Self.clickHighlightEnabledKey) }
     }
@@ -179,6 +190,13 @@ final class SettingsStore: ObservableObject {
         }
         self.countdownSeconds = Self.normalizedCountdown(userDefaults.object(forKey: Self.countdownSecondsKey) as? Int)
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false
+        // P5：摄像头画中画背景（默认 off 原画面）；解码失败（枚举演化）回退默认。
+        if let data = userDefaults.data(forKey: Self.cameraBackgroundKey),
+           let background = try? JSONDecoder().decode(CameraBackgroundMode.self, from: data) {
+            self.cameraBackground = background
+        } else {
+            self.cameraBackground = .off
+        }
         // T16 裁定：点击高亮默认关（opt-in）；早期脚手架曾以 true 落库，随本任务翻转为 false
         //（真源仍是 UserDefaults：外部 defaults write com.screenrecorder.app clickHighlightEnabled -bool true 开启）。
         self.clickHighlightEnabled = userDefaults.object(forKey: Self.clickHighlightEnabledKey) as? Bool ?? false
@@ -219,6 +237,7 @@ final class SettingsStore: ObservableObject {
     private static let outputDirectoryKey = "outputDirectory"
     private static let countdownSecondsKey = "countdownSeconds"
     private static let pipEnabledKey = "pipEnabled"
+    private static let cameraBackgroundKey = "cameraBackground"
     private static let clickHighlightEnabledKey = "clickHighlightEnabled"
     private static let autoZoomEnabledKey = "autoZoomEnabled"
     private static let autoZoomLevelKey = "autoZoomLevel"

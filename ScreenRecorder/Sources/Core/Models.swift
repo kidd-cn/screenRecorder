@@ -27,6 +27,29 @@ enum CaptureMode: Equatable, Codable {
     case windowRegion(window: CGWindowID, rect: CGRect)
 }
 
+/// 摄像头画中画的背景模式（P5）：原画面 / 人像模糊 / 内置程序生成背景。开录快照语义
+///（同 `includeCamera`——录制中途改设置不影响进行中的录制）。Codable（关联值均可编码）：
+/// `SettingsStore.cameraBackground` 以 JSON 整只落库 UserDefaults。Hashable：SwiftUI
+/// Picker selection/tag 的约束（与 Equatable/Codable 并存的合成实现，不改值语义）。
+enum CameraBackgroundMode: Equatable, Hashable, Codable {
+    /// 原画面直通（默认）：帧路径零开销旁路——不建处理器、不调 Vision、缓冲原样入库。
+    case off
+    /// 人像分割 + 虚化：前景叠「自身高斯模糊」底。
+    case blur
+    /// 内置程序生成背景（CIImage 渐变/纯色，零素材文件）。
+    case builtin(BuiltinBackground)
+}
+
+/// 内置背景样式（P5）：全部 CIImage 程序生成，不内置照片素材。
+enum BuiltinBackground: Equatable, Hashable, Codable {
+    /// 暖渐变（橙 → 绯红对角）。
+    case gradientWarm
+    /// 冷渐变（青 → 蓝对角）。
+    case gradientCool
+    /// 纯色灰蓝（slate）。
+    case solidSlate
+}
+
 /// 一次录制会话的完整参数快照：启动录制时由上层从 `SettingsStore` + `RecordingFileStore` 装配，
 /// 之后采集/落盘各环节只读本快照——录制中途改设置不影响进行中的录制。
 struct RecordingConfiguration {
@@ -40,6 +63,9 @@ struct RecordingConfiguration {
     /// 语义）。录制中改「录制中静音麦克风」走 live 下发链，不影响本快照。缺省 false。
     var micMuted: Bool = false
     var includeCamera: Bool
+    /// 摄像头画中画背景模式（P5 开录快照语义，同 `includeCamera`）。缺省 off（原画面，
+    /// 帧路径零开销旁路——不建处理器、不调 Vision）。
+    var cameraBackground: CameraBackgroundMode = .off
     var fps: Int
     var codec: VideoCodec
     var outputURL: URL

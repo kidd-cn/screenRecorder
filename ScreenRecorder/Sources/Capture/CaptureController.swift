@@ -169,7 +169,18 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
             nil
         }
         if wantsPiP, let cameraPiP {
-            await MainActor.run { cameraPiP.beginRecording(geometry: geometry) }
+            // P5：摄像头背景处理器随本场开录快照装配（config.cameraBackground）。off →
+            // nil = 帧路径零开销旁路（不建处理器、不调 Vision）；blur/builtin → 处理器在
+            // start 之前装机（beginRecording 内），帧回调自首帧起走处理流水线。
+            let backgroundProcessor: CameraBackgroundProcessor? = if config.cameraBackground == .off {
+                nil
+            } else {
+                CameraBackgroundProcessor(mode: config.cameraBackground,
+                                          segmenter: VisionPersonSegmenter.shared)
+            }
+            await MainActor.run {
+                cameraPiP.beginRecording(geometry: geometry, backgroundProcessor: backgroundProcessor)
+            }
         }
 
         let recorder = SCStreamRecorder(config: config)

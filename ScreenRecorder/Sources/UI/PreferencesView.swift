@@ -184,6 +184,20 @@ private struct RecordingSourcesTab: View {
                     .foregroundStyle(.secondary)
             }
             Toggle("摄像头画中画", isOn: $settings.pipEnabled)
+            // P5 摄像头背景：off=原画面、blur=模糊、builtin=三内置（程序生成，零素材）。
+            // 开录快照语义（同 pipEnabled——下一场录制生效）；无画中画时背景无意义，
+            // 随画中画开关联动禁用。
+            Picker("摄像头背景", selection: $settings.cameraBackground) {
+                Text("原画面").tag(CameraBackgroundMode.off)
+                Text("模糊").tag(CameraBackgroundMode.blur)
+                Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
+                Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
+                Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+            }
+            .disabled(!settings.pipEnabled)
+            Text("摄像头背景在开始录制时生效。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Toggle("鼠标点击高亮", isOn: $settings.clickHighlightEnabled)
             // P1a 点击自动缩放：opt-in 默认关（快照语义同点击高亮——下一场录制生效）；
             // 档位三选与 SettingsStore 的钳制档位一一对应。

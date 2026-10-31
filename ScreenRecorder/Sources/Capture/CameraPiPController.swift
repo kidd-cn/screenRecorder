@@ -8,6 +8,8 @@ import Foundation
 /// 摄像头画中画采集控制器（T15，简报 Produces 逐字）：前置广角 + `.vga640x480` +
 /// videoDataOutput 专用串行队列；最新一帧以 NSLock 保护暴露（`latestPixelBuffer`，合成在
 /// SCStream video 队列逐帧读取），预览层供浮窗（`CameraPiPWindow`）安装。
+/// P5：帧路径上游挂背景处理器（`backgroundProcessor`，开录快照装配）——blur/builtin 场
+/// dataOutput 帧先进异步处理流水线（序号守卫入库，见字段注释），off 场与一期逐字节一致。
 ///
 /// 失败通道（`start() throws`）：授权拒绝 / 无摄像头 / 会话装配失败一律抛可诊断错误，
 /// 由装配层（`CameraPiPWindowController.beginRecording`）降级为纯屏幕录制并留日志
@@ -72,7 +74,8 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
         label: "screenRecorder.CameraPiP.lifecycle", qos: .userInitiated)
     /// 样本回调专用串行队列（简报钉死；与屏幕采集的 video 队列互不干扰）。
     private let videoQueue = DispatchQueue(label: "screenRecorder.CameraPiP.video", qos: .userInitiated)
-    /// `latestFrame` 的锁（帧写在自有 video 队列，读在 SCStream video 队列——跨队列锁保护）。
+    /// `latestFrame` 的锁（帧写在自有 video 队列，读在 SCStream video 队列——跨队列锁保护；
+    /// P5 起同锁保护背景处理器与处理流水线序号——装配主线程写、video/协作线程读写）。
     private let frameLock = NSLock()
     private var latestFrame: CVPixelBuffer?
 
@@ -80,6 +83,24 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     var latestPixelBuffer: CVPixelBuffer? {
         frameLock.withStateLock { latestFrame }
     }
+
+    // MARK: P5 摄像头背景（dataOutput 帧 → processor → latestFrame 上游的挂点）
+
+    /// 背景处理器（本场开录快照装配，开录 start 之前由 `CameraPiPWindowController` 装机；
+    /// nil = 背景路全关——帧路径与一期逐字节一致）。主线程写、video 队列逐帧读——frameLock
+    /// 保护（与 latestFrame 同纪律）。
+    var backgroundProcessor: CameraBackgroundProcessor? {
+        get { frameLock.withStateLock { backgroundProcessorStorage } }
+        set { frameLock.withStateLock { backgroundProcessorStorage = newValue } }
+    }
+    private var backgroundProcessorStorage: CameraBackgroundProcessor?
+    /// 处理流水线的帧序号（video 队列串行自增）/ 已入库序号与场次代号（frameLock 保护）。
+    /// 处理为异步（Vision 专用队列 + 协作线程渲染），完成可能乱序：入库以「序号更大且同
+    /// 场次」为准——慢帧后到不得把 latestFrame 拨回旧帧（合成器逐帧读，回退即成片 PiP
+    /// 倒闪一帧）；stop 清帧并推进场次代号，在途完成不得越过 stop 把旧帧带进下一场开头。
+    private var processedFrameSequence: UInt64 = 0
+    private var deliveredFrameSequence: UInt64 = 0
+    private var processingGeneration: UInt64 = 0
 
     /// 预览层（`start()` 成功后非 nil；浮窗安装，浮窗负责 frame 与圆角裁切）。
     private(set) var previewLayer: AVCaptureVideoPreviewLayer?
@@ -178,17 +199,69 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
         if session.isRunning {
             session.stopRunning()
         }
-        frameLock.withStateLock { latestFrame = nil }
+        frameLock.withStateLock {
+            latestFrame = nil
+            // P5：清处理流水线序号并推进场次代号——stop 前派发的在途处理完成后以场次
+            // 失配被拒，不得在清帧后复活旧帧进下一场开头（latestFrame 语义与一期一致）。
+            processedFrameSequence = 0
+            deliveredFrameSequence = 0
+            processingGeneration &+= 1
+        }
         previewLayer = nil // 浮窗已由装配层收起；下次录制重新安装
     }
 
     // MARK: AVCaptureVideoDataOutputSampleBufferDelegate
 
-    /// video 队列串行执行。
+    /// video 队列串行执行。背景处理器在位（P5 blur/builtin 场）→ 帧进异步处理流水线；
+    /// 缺位（off 场/未装配）→ 与一期逐字节一致（零 Vision 调用、原缓冲直通入库）。
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        recordFrameIfNeeded(sampleBuffer)
+        handleDeliveredFrame(sampleBuffer)
+    }
+
+    /// 帧入口收敛点（internal 供无头测试直接驱动——AVCaptureOutput/Connection 形参无法在
+    /// 无头测试进程构造）：按处理器在位与否分流旁路/处理流水线。
+    func handleDeliveredFrame(_ sampleBuffer: CMSampleBuffer) {
+        guard let processor = backgroundProcessor else {
+            recordFrameIfNeeded(sampleBuffer)
+            return
+        }
+        deliverFrameForProcessing(sampleBuffer, processor: processor)
+    }
+
+    /// 帧入处理流水线（video 队列串行）：retain 像素缓冲（独立于 CMSampleBuffer 生命周期，
+    /// recordFrameIfNeeded 同语义）→ 取票据（序号 + 场次代号）→ 派异步处理。不阻塞采集
+    /// 回调（分割/渲染在 Vision 专用队列与协作线程，video 队列只排队）。
+    private func deliverFrameForProcessing(_ sampleBuffer: CMSampleBuffer,
+                                           processor: CameraBackgroundProcessor) {
+        guard CMSampleBufferDataIsReady(sampleBuffer),
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let ticket = nextProcessingTicket()
+        Task { [weak self] in
+            let processed = await processor.process(pixelBuffer)
+            self?.storeProcessedFrame(processed, ticket: ticket)
+        }
+    }
+
+    /// 处理票据（video 队列取号）：序号供乱序守卫，场次代号供 stop 边界守卫。
+    private func nextProcessingTicket() -> (sequence: UInt64, generation: UInt64) {
+        frameLock.withStateLock {
+            processedFrameSequence &+= 1
+            return (processedFrameSequence, processingGeneration)
+        }
+    }
+
+    /// 处理完成的帧入库（协作线程）：序号更大且同场次才覆盖——乱序完成的慢帧不得把
+    /// latestFrame 拨回旧帧；stop 后的迟到完成以场次失配被拒。
+    private func storeProcessedFrame(_ frame: CVPixelBuffer,
+                                     ticket: (sequence: UInt64, generation: UInt64)) {
+        frameLock.withStateLock {
+            guard ticket.generation == processingGeneration,
+                  ticket.sequence > deliveredFrameSequence else { return }
+            deliveredFrameSequence = ticket.sequence
+            latestFrame = frame
+        }
     }
 
     /// 帧入口收敛点（internal 供无头测试直接驱动「锁保护 latestPixelBuffer 语义」）：

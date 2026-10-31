@@ -214,6 +214,40 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2)
     }
 
+    // MARK: P5 摄像头背景（Task 10 简报钉测）
+
+    /// 默认 off（原画面）；blur 与三个内置背景跨实例往返——枚举整只 JSON 落库
+    /// （lastCaptureMode 同款 Codable 模式，key = cameraBackground；枚举无野值档位）。
+    func testCameraBackgroundRoundTripAcrossInstances() {
+        let store = SettingsStore(userDefaults: defaults)
+        XCTAssertEqual(store.cameraBackground, .off, "P5 默认原画面（帧路径零开销旁路）")
+
+        store.cameraBackground = .blur
+        XCTAssertEqual(SettingsStore(userDefaults: defaults).cameraBackground, .blur)
+
+        store.cameraBackground = .builtin(.gradientWarm)
+        XCTAssertEqual(SettingsStore(userDefaults: defaults).cameraBackground,
+                       .builtin(.gradientWarm), "关联值枚举往返保值")
+
+        store.cameraBackground = .builtin(.gradientCool)
+        XCTAssertEqual(SettingsStore(userDefaults: defaults).cameraBackground,
+                       .builtin(.gradientCool))
+
+        store.cameraBackground = .builtin(.solidSlate)
+        XCTAssertEqual(SettingsStore(userDefaults: defaults).cameraBackground,
+                       .builtin(.solidSlate))
+    }
+
+    /// 落库野值（解码失败）加载回退默认 off——沿 lastCaptureMode/windowCaptureTarget
+    /// 的「解码失败回退默认」模式。
+    func testCorruptedPersistedCameraBackgroundFallsBackToOff() {
+        defaults.set(Data("not-a-codable-payload".utf8), forKey: "cameraBackground")
+
+        let store = SettingsStore(userDefaults: defaults)
+
+        XCTAssertEqual(store.cameraBackground, .off, "解码失败必须回退默认原画面")
+    }
+
     private var defaultOutputDirectory: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScreenRecorder", isDirectory: true)
