@@ -17,7 +17,12 @@ final class RecordingSchedulerTests: XCTestCase {
     private var fakeNow = Date(timeIntervalSinceReferenceDate: 800_000_000)
     /// timerFactory 捕获的心跳闭包（生产每秒一拍；测试直调 = 到点一拍）。
     private var tickBody: (() -> Void)?
+    /// start 缝被调次数（含被拒——R1 次生变体钉测用）。
+    private var startAttempts = 0
+    /// start 缝受理次数（返回 true 的调用）。
     private var startCalls = 0
+    /// start 缝返回值开关（false = 模拟起录未成立：空闲预检失败/begin 失败/开录即被停）。
+    private var startAccepted = true
     private var stopCalls = 0
     /// 普通通知（忙/锁屏跳过路径）记录：标题 + 正文。
     private var notifications: [(title: String, body: String?)] = []
@@ -50,6 +55,8 @@ final class RecordingSchedulerTests: XCTestCase {
             },
             start: { [weak self] in
                 guard let self else { return false }
+                self.startAttempts += 1
+                guard self.startAccepted else { return false }
                 self.startCalls += 1
                 return true
             },
@@ -209,5 +216,55 @@ final class RecordingSchedulerTests: XCTestCase {
 
         XCTAssertEqual(self.stopCalls, 1, "上限到点自动 stop 恰一次")
         XCTAssertEqual(self.startCalls, 1, "上限停录不重复 start")
+    }
+
+    // MARK: - R1 修复轮钉测（会话存活闩：残留 deadline 不得误停后续手动场）
+
+    /// R1 Important 1 主复现链：排程带上限 → 到点 fire（deadline 武装）→ 定时场存活确认
+    ///（busy 命中闩转 confirmed）→ 用户手动终场（confirmed 后转闲 → 撤销停录等待）→
+    /// 用户手动开新场 → 原 deadline 到点不得误停新场。stop 缝签名不变，身份归调度器内部
+    /// 存活闩，判定用既有 isBusy 缝（审阅修复方向逐字）。
+    func testStopDeadlineDisarmedWhenScheduledSessionEndsBeforeLimit() async {
+        let scheduler = makeScheduler()
+        let startAt = fakeNow
+        scheduler.schedule(makeSchedule(startAt: startAt, durationLimit: 60))
+
+        tickBody?() // 到点 fire：deadline 武装（awaitingStart）
+        await waitFor { self.startCalls == 1 }
+
+        busy = true // 定时场存活
+        tickBody?() // 闩重估：awaitingStart + 忙 → confirmed
+        XCTAssertEqual(self.stopCalls, 0, "上限未到不 stop")
+
+        busy = false // 用户手动停止定时场
+        fakeNow = startAt.addingTimeInterval(30)
+        tickBody?() // 闩重估：confirmed + 闲 → 撤销停录等待
+        XCTAssertEqual(self.stopCalls, 0, "定时场已终结：不 stop")
+
+        busy = true // 用户手动开新场
+        fakeNow = startAt.addingTimeInterval(60) // 原 deadline 到点
+        tickBody?()
+        XCTAssertEqual(self.stopCalls, 0, "残留 deadline 已撤销：不得误停新手动场")
+        XCTAssertEqual(self.startCalls, 1, "上限停录不重复 start")
+    }
+
+    /// R1 Important 1 次生变体钉测：fire 时空闲预检通过、起录未成立（start 缝返回 false——
+    /// 生产 = Task 落地时二次 guard 失败 / begin 失败 / 开录即被停）→ 撤销停录等待：原
+    /// deadline 到点不 stop，其后在忙的手动场不受残留 deadline 波及。
+    func testStartRefusalDisarmsStopDeadline() async {
+        let scheduler = makeScheduler()
+        let startAt = fakeNow
+        startAccepted = false
+        scheduler.schedule(makeSchedule(startAt: startAt, durationLimit: 60))
+
+        tickBody?() // fire：deadline 武装，起录发起但未成立
+        await waitFor { self.startAttempts == 1 }
+        for _ in 0..<20 { await Task.yield() } // 让 Task 内「未成立 → 撤销等待」续延落地（同 CountdownOverlayControllerTests 纪律）
+
+        busy = true // 用户手动场接管
+        fakeNow = startAt.addingTimeInterval(60) // 原 deadline 到点
+        tickBody?()
+        XCTAssertEqual(self.stopCalls, 0, "起录未成立：deadline 已撤销，到点不得 stop")
+        XCTAssertEqual(self.startAttempts, 1, "起录缝恰被调一次（未重试）")
     }
 }

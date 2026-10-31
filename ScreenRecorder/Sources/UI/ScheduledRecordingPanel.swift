@@ -20,6 +20,9 @@ struct ScheduledRecordingPanelView: View {
     @State private var limitEnabled = false
     /// 时长上限档位（分钟）。
     @State private var limitMinutes = ScheduledRecordingPanelView.defaultLimitMinutes
+    /// 排定时刻过期被拒（R1 Minor 3 ②）：面板敞开期间时刻流逝，渲染期校验可能已陈旧——
+    /// 排定 action 内复验过期即拒绝并就地提示；重选时刻即复位。
+    @State private var expiredRejected = false
 
     /// 默认提前量（分钟）。
     private static let defaultLeadMinutes = 10
@@ -50,7 +53,7 @@ struct ScheduledRecordingPanelView: View {
                     Text("时长上限：\(limitMinutes) 分钟")
                 }
             }
-            if isStartAtPast {
+            if isStartAtPast || expiredRejected {
                 Label("开始时刻早于当前时间，不能排定", systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.orange)
                     .font(.callout)
@@ -60,6 +63,12 @@ struct ScheduledRecordingPanelView: View {
                 Button("取消", action: onClose)
                     .keyboardShortcut(.cancelAction)
                 Button("排定") {
+                    // 排定时刻复验（R1 Minor 3 ②）：以动作执行时刻为准，过期拒绝排定且
+                    // 不关面板（防排定即触发调度器错过路径）。
+                    guard startAt >= Date() else {
+                        expiredRejected = true
+                        return
+                    }
                     onSchedule(RecordingScheduler.Schedule(
                         startAt: startAt,
                         durationLimit: limitEnabled ? TimeInterval(limitMinutes) * 60 : nil))
@@ -67,6 +76,9 @@ struct ScheduledRecordingPanelView: View {
                 .keyboardShortcut(.defaultAction)
                 .disabled(isStartAtPast)
             }
+        }
+        .onChange(of: startAt) { _ in
+            expiredRejected = false // 重选时刻即复位过期拒绝提示
         }
         .padding()
         .frame(width: 400)

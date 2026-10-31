@@ -68,6 +68,19 @@ final class RecordingScheduler: ObservableObject {
     private var timerCancellable: AnyCancellable?
     /// fire 后的停录时刻（时长上限从排定时刻起算：startAt + limit——begin 延迟不挤占上限）。
     private var stopDeadline: Date?
+    /// 停录等待的会话存活闩（P6b R1 Important 1）：deadline 武装只代表「定时场应当活着」，
+    /// 上限到点执行 stop 需要存活证据——否则用户手动终场后再手动开新场，残留 deadline 会在
+    /// 到点误停新场（fire 已消费 active，菜单「取消定时录制」随之消失，armed 窗口内无解除
+    /// 手段）。身份归调度器内部状态，判定用既有 isBusy 缝（零新缝，stop 缝签名不变）：
+    /// - `.awaitingStart`：fire 已武装、起录受理在途（尚无会话存活证据）；
+    /// - `.confirmed`：心跳重估命中 isBusy()——定时场确认存活。
+    /// start 缝返回 false（空闲预检失败/begin 失败/开录即被停）→ Task 续延撤销整个等待
+    ///（deadline + 闩），防「定时场没起、deadline 照样武装」的次生变体。
+    private enum StopLiveness {
+        case awaitingStart
+        case confirmed
+    }
+    private var stopLiveness: StopLiveness?
 
     init(now: @escaping () -> Date,
          timerFactory: @escaping (@escaping () -> Void) -> AnyCancellable,
@@ -97,26 +110,43 @@ final class RecordingScheduler: ObservableObject {
         timerCancellable = timerFactory { [weak self] in self?.tick() }
     }
 
-    /// 取消排程（菜单「取消定时录制」）：清排程与停录等待、沉降心跳。等待期后本方法
-    /// 无 UI 入口（fire 已消费 active），语义上 = 撤销一切尚未发生的定时动作。
+    /// 取消排程（菜单「取消定时录制」）：清排程与停录等待（含存活闩）、沉降心跳。等待期后
+    /// 本方法无 UI 入口（fire 已消费 active），语义上 = 撤销一切尚未发生的定时动作。
     func cancel() {
         active = nil
         stopDeadline = nil
+        stopLiveness = nil
         timerCancellable?.cancel()
         timerCancellable = nil
     }
 
     // MARK: 心跳重估（四路径，全同步判态——通知恰一条的前提）
 
-    /// 心跳重估：先结算时长上限停录，再判到点触发。未到点不消费（等下一拍）。
+    /// 心跳重估：先重估会话存活闩与时长上限停录，再判到点触发。未到点不消费（等下一拍）。
     private func tick() {
         let current = now()
-        // 1) 时长上限停录（优先：录制已在进行，到点即 stop；stop 自守卫，空闲/收尾 no-op）
+        // 1) 会话存活闩重估（先于停录判定；全同步——与心跳同拍的确定性）：
+        //    awaitingStart + 会话在忙 → 定时场确认存活；confirmed + 会话已闲 → 定时场已终结
+        //   （手动停/失败收尾/自动保存）→ 撤销停录等待，残留 deadline 不再武装（R1 Important 1）。
+        if stopDeadline != nil {
+            switch stopLiveness {
+            case .awaitingStart where isBusy():
+                stopLiveness = .confirmed
+            case .confirmed where !isBusy():
+                stopDeadline = nil
+                stopLiveness = nil
+            default:
+                break
+            }
+        }
+        // 2) 时长上限停录：到点即 stop。confirmed 存活是常规路径；awaitingStart 仍是兜底
+        //   （起录续延极端滞留的窗口，stop 自守卫：空闲/收尾 no-op——与既有语义一致）。
         if let deadline = stopDeadline, current >= deadline {
             stopDeadline = nil
+            stopLiveness = nil
             stop()
         }
-        // 2) 到点触发（未到点不消费）
+        // 3) 到点触发（未到点不消费）
         guard let schedule = active, current >= schedule.startAt else {
             settleTimer()
             return
@@ -147,11 +177,24 @@ final class RecordingScheduler: ObservableObject {
             return
         }
         // 6) 空闲路径：到点且空闲 → start（定时起录不走倒计时——绕行缝在装配层）；
-        //    有时长上限则武装停录时刻（从排定时刻起算）。
+        //    有时长上限则武装停录时刻（从排定时刻起算）+ 存活闩置 awaitingStart（R1）。
         if let limit = schedule.durationLimit {
             stopDeadline = schedule.startAt.addingTimeInterval(limit)
+            stopLiveness = .awaitingStart
         }
-        Task { _ = await self.start() }
+        Task {
+            let accepted = await self.start()
+            guard accepted else {
+                // 起录未成立（空闲预检失败/begin 失败/开录即被停）：撤销停录等待——定时场
+                // 没起，残留 deadline 会在上限到点误停用户后续手动开的新场（R1 Important 1
+                // 次生变体）。受理后不动闩：awaitingStart → confirmed 交由 tick 的 isBusy
+                // 重估（同步确定，不与本续延的落地时序耦合）。
+                self.stopDeadline = nil
+                self.stopLiveness = nil
+                self.settleTimer()
+                return
+            }
+        }
         settleTimer()
     }
 
