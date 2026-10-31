@@ -15,7 +15,7 @@ enum CaptureMode: Equatable, Codable {
     case region(rect: CGRect, displayID: CGDirectDisplayID)
     /// App 内容录制（P3a）：一个应用的全部普通层窗口合成单一采集源。bundleID 是解析
     /// 锚点——start 时经 WindowPicker 现场枚举该 bundle 的窗口建
-    /// `SCContentFilter(desktopIndependentWindows:)`（零窗口 → 走 begin 失败路径）；
+    /// `SCContentFilter(display:including:)`（零窗口 → 走 begin 失败路径）；
     /// 录制期新开窗口不入画、部分关闭继续录、全部关闭走源丢失自动保存（规格画布纪律）。
     case app(bundleID: String)
 }

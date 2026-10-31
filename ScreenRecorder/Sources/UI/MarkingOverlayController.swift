@@ -258,9 +258,6 @@ final class MarkingOverlayController: ObservableObject {
 
     /// 窗口当前 CG bounds 落点的显示器 id（含窗口中心的显示器；取不到回主屏，再取不到 nil）。
     private static func displayID(containingWindow windowID: CGWindowID) -> CGDirectDisplayID? {
-        func screenNumber(_ screen: NSScreen) -> CGDirectDisplayID? {
-            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
-        }
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
                 as? [[String: Any]] else { return nil }
         guard let window = list.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
@@ -271,7 +268,7 @@ final class MarkingOverlayController: ObservableObject {
 
     /// App（P3a）union 包围盒中心落点的显示器 id：bundle 的 on-screen 普通层窗口 CG
     /// bounds 取 union 后同窗口逻辑求含点。归属解析同
-    /// `SourceLossMonitor.onScreenAppWindowCount`（窗口清单无 bundle id 键，经所有者
+    /// `SourceLossMonitor.existingAppWindowCount`（窗口清单无 bundle id 键，经所有者
     /// PID → NSRunningApplication 解析）；无窗口/清单不可读取返回 nil。
     private static func displayID(containingAppBundle bundleID: String) -> CGDirectDisplayID? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)

@@ -43,11 +43,12 @@ struct AppSourceLostError: LocalizedError {
 /// 不加任何 lock-screen 出口）。
 ///
 /// App 模式（P3a）：`start(displayID:appBundleID:)` 的 appBundleID 非 nil 时改为轮询该
-/// bundle 的 on-screen 普通层窗口数——**全部窗口关闭（计数 0）才触发**源丢失，部分关闭
-/// 继续录制（规格画布纪律：新窗口不入画、部分关闭继续、全关自动保存）；显示器移除事件
-/// 不参与判定（app 窗口可跨屏存活，拔显示器 ≠ 源丢失）。窗口关闭无系统级推送通知，轮询
-/// 是唯一口径（DispatchSourceTimer，DiskSpaceMonitor 同款模式）；窗口清单读取失败按
-/// 「未知」处理不判定，绝不因读取失败误杀录制。
+/// bundle 的**仍存在普通层窗口数（全窗口清单口径）**——最小化（进 Dock）、⌘H 隐藏、切到
+/// 其他 Space 的窗口都算存在，只有真正关闭才从清单消失；**全部窗口关闭（计数 0）才触发**
+/// 源丢失（不可见 ≠ 关闭），部分关闭继续录制（规格画布纪律：新窗口不入画、部分关闭继续、
+/// 全关自动保存）；显示器移除事件不参与判定（app 窗口可跨屏存活，拔显示器 ≠ 源丢失）。
+/// 窗口关闭无系统级推送通知，轮询是唯一口径（DispatchSourceTimer，DiskSpaceMonitor 同款
+/// 模式）；窗口清单读取失败按「未知」处理不判定，绝不因读取失败误杀录制。
 ///
 /// API 偏差台账：brief 写 `CGDisplayWasRemovedNotification`——该符号在现行 SDK 无公开声明
 ///（全 SDK 头文件检索无果），改用其公开等价物 `CGDisplayRegisterReconfigurationCallback`
@@ -164,7 +165,7 @@ final class SourceLossMonitor {
     }
 
     /// 测试缝（P3a）：模拟一次 App 窗口计数读数（生产 = 轮询节拍的
-    /// `onScreenAppWindowCount` 读数），与生产轮询走完全相同的判定与投递路径。
+    /// `existingAppWindowCount` 读数），与生产轮询走完全相同的判定与投递路径。
     /// nil = 窗口清单读取失败（未知不判定）。
     func simulateAppWindowCount(_ count: Int?) {
         handleAppWindowCount(count)
@@ -188,21 +189,24 @@ final class SourceLossMonitor {
         lock.unlock()
     }
 
-    /// 轮询节拍（appPollQueue）：读当前 bundle 的 on-screen 普通层窗口数 → 判定。
+    /// 轮询节拍（appPollQueue）：读当前 bundle 的仍存在普通层窗口数 → 判定。
     /// bundleID 由 timer 装配时定格（start 换场必经 restartAppPolling 重建 timer，不读错场）。
     private func pollAppWindows(ofBundleID bundleID: String) {
         let isLive: Bool = lock.withStateLock { armed && capturedBundleID == bundleID }
         guard isLive else { return }
-        handleAppWindowCount(Self.onScreenAppWindowCount(ofBundleID: bundleID))
+        handleAppWindowCount(Self.existingAppWindowCount(ofBundleID: bundleID))
     }
 
-    /// 生产窗口计数（P3a）：on-screen 窗口清单里该 bundle 的普通层（layer 0）窗口数。
+    /// 生产窗口计数（P3a）：**全窗口清单**里该 bundle 的普通层（layer 0）窗口数——
+    /// `.optionAll` 含最小化（进 Dock）、⌘H 隐藏、切到其他 Space 的窗口（都算存在），
+    /// 只有真正关闭的窗口才从清单消失，因此计数 0 = 全部窗口关闭（不可见 ≠ 关闭——
+    /// 修复轮 1 Important 1：on-screen 口径会把最小化/隐藏/跨 Space 误判成已关闭）。
     /// 窗口清单没有 bundle id 键（`kCGWindowOwnerBundleID` 在现行 SDK 头文件中不存在，
     /// 实测字典亦无此键），归属经所有者 PID → `NSRunningApplication.bundleIdentifier`
     /// 解析；解析不出 App 的窗口（Window Server 等）不属于用户 App，自然不匹配。
     /// 清单读取失败返回 nil（未知不判定——绝不因读取失败误杀录制）。
-    static func onScreenAppWindowCount(ofBundleID bundleID: String) -> Int? {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+    static func existingAppWindowCount(ofBundleID bundleID: String) -> Int? {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
         var count = 0
@@ -215,9 +219,9 @@ final class SourceLossMonitor {
         return count
     }
 
-    /// App 模式判定与投递（P3a）：计数 0 = 全部窗口关闭 → fire-once 闩 → 主线程投递；
-    /// 计数 > 0（部分关闭继续录）与 nil（读取失败不判定）不触发。与 display 路径共用
-    /// 同一闩位（fired）与同一投递契约（主线程内联 / 非主线程主队列跳转）。
+    /// App 模式判定与投递（P3a）：仍存在窗口数 0 = 全部窗口关闭 → fire-once 闩 → 主线程
+    /// 投递；计数 > 0（部分关闭/部分不可见继续录）与 nil（读取失败不判定）不触发。与
+    /// display 路径共用同一闩位（fired）与同一投递契约（主线程内联 / 非主线程主队列跳转）。
     private func handleAppWindowCount(_ count: Int?) {
         let shouldFire: Bool = lock.withStateLock {
             guard armed, !fired, capturedBundleID != nil else { return false }

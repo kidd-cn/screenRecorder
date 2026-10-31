@@ -225,7 +225,7 @@ final class WindowPickerEnumeratedAppsTests: XCTestCase {
 
     /// App 模式 filter 构造（裁定：SCContentFilter 需 SCK 授权对象，无头不可构造——钉
     /// 构造入参收集函数）：收集该 bundle 的全部普通层非零面积窗口（即
-    /// `SCContentFilter(desktopIndependentWindows:)` 的入参），别家/非零层/零面积不入画。
+    /// `SCContentFilter(display:including:)` 的入参），别家/非零层/零面积不入画。
     func testAppModeFilterConstruction() {
         let windows = [
             makeWindow(id: 10, title: "主窗", appName: "Alpha", bundleID: "com.alpha.app"),

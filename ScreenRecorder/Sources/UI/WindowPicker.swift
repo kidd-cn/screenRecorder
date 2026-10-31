@@ -207,7 +207,8 @@ enum WindowPicker {
     /// App 模式 filter 构造的入参收集（P3a 纯函数，无头钉测；`SCContentFilter` 需 SCK
     /// 授权对象无头不可构造，裁定钉构造入参）：与选择器同一可见窗口口径（`selectableWindows`）
     /// 再按 bundle id 收集该 App 的全部窗口——start 时现场枚举的结果经本函数喂
-    /// `SCContentFilter(desktopIndependentWindows:)`，保证「用户看到的窗口数 = filter 窗口数」。
+    /// `SCContentFilter(display:including:)`（API 偏差台账见 SCStreamRecorder），
+    /// 保证「用户看到的窗口数 = filter 窗口数」。
     static func appWindows(ofBundleID bundleID: String, from windows: [ShareableWindow]) -> [ShareableWindow] {
         selectableWindows(from: windows, excludingBundleID: selfBundleID).filter { $0.appBundleID == bundleID }
     }
