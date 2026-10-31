@@ -155,6 +155,15 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    /// 开机自启（P6a，opt-in 默认关）：只有开关本身——副作用（SMAppService register/
+    /// unregister、失败回翻 + 失败通知）在装配层 sink（LaunchAtLoginCoordinator），
+    /// 不进 didSet（接线裁定：失败回翻经 sink 写回本属性，@Published didSet 内写回必重入）。
+    /// didSet 只做持久化（cameraBackground 先例：纯落库、无自赋值、无重入）——失败回翻
+    /// 写回的结果态随之落库，重启后开关与真实注册态一致。
+    @Published var launchAtLogin: Bool {
+        didSet { defaults.set(launchAtLogin, forKey: Self.launchAtLoginKey) }
+    }
+
     /// 窗口捕获目标（T20）：nil = 未配置。稳定标识 = owner bundle id（取不到 ownerName 兜底）
     /// + 窗口标题（裁定 1，CGWindowID 从不持久化——重启后 id 必变）。Codable JSON 整只落库，
     /// 解码失败回退未配置；置 nil 同时移除落库键（不留死数据）。只在选定时刻写入——
@@ -219,6 +228,10 @@ final class SettingsStore: ObservableObject {
         } else {
             self.lastCaptureMode = .display(CGMainDisplayID())
         }
+        // P6a：开机自启（opt-in 默认关）；落库值即上次结果态（注册失败回翻亦落库），
+        // 注册态的外部变化（系统设置里移除）不回写落库——与诸开关同纪律，真源补齐
+        // 属 SMAppService.status 启动对齐，非本任务范围。
+        self.launchAtLogin = userDefaults.object(forKey: Self.launchAtLoginKey) as? Bool ?? false
         // T20：窗口捕获目标（⇧⌘W 开录用）；缺省/解码失败回退未配置（nil）。
         if let data = userDefaults.data(forKey: Self.windowCaptureTargetKey),
            let target = try? JSONDecoder().decode(WindowCaptureTarget.self, from: data) {
@@ -248,6 +261,7 @@ final class SettingsStore: ObservableObject {
     private static let keyboardOverlayLingerSecondsKey = "keyboardOverlayLingerSeconds"
     private static let lastCaptureModeKey = "lastCaptureMode"
     private static let windowCaptureTargetKey = "windowCaptureTarget"
+    private static let launchAtLoginKey = "launchAtLogin"
 
     /// 合法帧率档位 30/60；越界/缺失回退 30（审查修复轮 1）。
     private static func normalizedFps(_ raw: Int?) -> Int {

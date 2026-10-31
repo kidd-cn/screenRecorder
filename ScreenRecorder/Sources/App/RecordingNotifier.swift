@@ -19,6 +19,12 @@ final class UNRecordingNotifier: RecordingNotifying {
         post(title: "磁盘空间不足", body: "剩余空间偏低，录制可能即将中断并自动保存。")
     }
 
+    /// P6a：开机自启注册/注销失败通知（开关已回翻，真实态优先于 UI 态）——同
+    /// notifySaved 纪律的尽力而为副通道，授权被拒/投递失败静默跳过。
+    func notifyLaunchAtLoginFailure(message: String) {
+        post(title: "开机自启设置失败", body: message)
+    }
+
     private func post(title: String, body: String) {
         let content = UNMutableNotificationContent()
         content.title = title

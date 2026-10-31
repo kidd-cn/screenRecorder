@@ -91,6 +91,11 @@ final class AppAssembly: ObservableObject {
     /// 终审 F2：麦克风设置 live 下发链的订阅保活（与容器同寿）。快照链（开始时刻读
     /// config）与 live 链并存：初值由快照负责，live 只发变化。
     private var liveMicCancellables: Set<AnyCancellable> = []
+    /// 开机自启装配单元（P6a）：所有权进本容器（装配红线）。开关变化经其内部 Combine
+    /// sink 消费（接线裁定：副作用不进 SettingsStore didSet——sink 内的失败回翻若改走
+    /// didSet 接线即自赋值重入；sink 侧重入护栏闩见 LaunchAtLoginCoordinator），失败回翻
+    /// + 通知都收在该单元。
+    private let launchAtLoginCoordinator: LaunchAtLoginCoordinator
 
     init() {
         let settings = SettingsStore()
@@ -162,11 +167,23 @@ final class AppAssembly: ObservableObject {
             Task { @MainActor in controller?.showDiskSpaceWarning() }
         }
 
+        // P6a 开机自启：装配单元在两段式初始化内构造（self 尚不可用，只捕局部量），
+        // sink 消费开关变化（重入护栏在 coordinator 内）；失败通知走 UNRecordingNotifier
+        // → UNUserNotificationCenter（请求授权被拒/失败静默跳过，不弹窗）。闭包强捕获
+        // notifier 局部量（controller.onFinishedFile 同款，与容器同寿，无环）；设置赋值
+        // 都在主线程，sink 同步消费无需队列跳转。
+        let launchAtLoginCoordinator = LaunchAtLoginCoordinator(
+            settings: settings,
+            service: SMAppLoginItemService(),
+            onRegistrationFailure: { message in
+                notifier.notifyLaunchAtLoginFailure(message: message)
+            })
         self.settings = settings
         self.controller = controller
         self.fileStore = fileStore
         self.sourceLossMonitor = sourceLossMonitor
         self.microphoneRouteWatcher = microphoneRouteWatcher
+        self.launchAtLoginCoordinator = launchAtLoginCoordinator
         self.floatingBarPanel = FloatingControlBarPanel(controller: controller)
         // PiP 拖动锚点（T15）：浮窗初始摆放避让浮条（浮条 frame 单向喂数，无反向依赖）
         cameraPiP.controlBarFrameProvider = { [weak floatingBarPanel] in

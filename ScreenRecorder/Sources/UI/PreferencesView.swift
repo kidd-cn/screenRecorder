@@ -108,6 +108,9 @@ private struct GeneralTab: View {
                 Text("60 fps").tag(60)
             }
             codecPicker
+            // P6a 开机自启：只有开关本身——副作用（SMAppService 注册/注销、失败回翻
+            // + 失败通知）在装配层 sink（LaunchAtLoginCoordinator），视图不做装配副作用。
+            Toggle("开机自启", isOn: $settings.launchAtLogin)
         }
     }
 
