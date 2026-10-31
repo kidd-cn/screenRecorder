@@ -141,7 +141,9 @@ final class MarkingToolbarPanel {
         panel.contentView = hostingView
     }
 
-    /// 显隐（幂等：重复 show 不重定位/重前置，重复 hide 不重复 orderOut）。
+    /// 显隐。show 路：`orderFrontRegardless` 每次都跑（AppKit 对已在屏面板幂等、无扰动，
+    /// 成本可忽略），**重定位**才有 `isShowing` 护栏（已显示不重摆）；hide 路有护栏
+    /// （重复 hide 不重复 orderOut）。
     func setVisible(_ visible: Bool) {
         if visible {
             if !isShowing {

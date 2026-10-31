@@ -50,10 +50,11 @@ private final class MarkingOverlayView: NSView {
 
 /// 边录边标记的覆盖层控制器（Task 5）：
 /// - **显隐**：`markingEnabled && (state == .recording || .paused)`——装配层在
-///   `controller.$state` / `$markingEnabled` 变化时调 `refreshVisibility()` 重估
-///   （拉取式 provider + 显式重估，与 CountdownOverlayController 的订阅驱动同效果、
-///   缝更薄，headless 测试直接改 provider 后重估即钉）。暂停态保持可见（spec §5 P2：
-///   暂停中可继续画，画的内容恢复后可见——无暂停门控）。
+///   `controller.$state` / `$markingEnabled` 变化时调 `refreshVisibility(enabled:state:)`，
+///   以 CombineLatest **发射值直传**重估（sink 在 @Published willSet 阶段同步执行，此刻
+///   属性与 provider 回拉都是旧值——修复轮2 Critical 1；拉取式 `shouldShowOverlays()`
+///   保留为测试缝）。暂停态保持可见（spec §5 P2：暂停中可继续画，画的内容恢复后可见
+///   ——无暂停门控）。
 /// - **面板**：每场录制一张（当前各捕获模式至多一个被录显示器），铺满被录显示器 bounds
 ///   （全屏 = 该显示器；区域 = 所在显示器——越出采集 rect 的点由换算层丢弃，见下）；
 ///   nonactivating borderless NSPanel，接事件不夺焦点（浮条宿主同款 styleMask），
@@ -116,12 +117,12 @@ final class MarkingOverlayController: ObservableObject {
         self.panelFactory = panelFactory
     }
 
-    // MARK: 显隐（装配层在 state / markingEnabled 变化时重估）
+    // MARK: 显隐（装配层在 state / markingEnabled 变化时以发射值直传重估）
 
-    /// 显隐判定（纯拉取，headless 钉测点）：开关开 且 录制/暂停中。
-    func shouldShowOverlays() -> Bool {
-        guard markingEnabledProvider() else { return false }
-        switch stateProvider() {
+    /// 显隐判定（纯函数，headless 钉测点）：开关开 且 录制/暂停中。
+    static func isVisible(enabled: Bool, state: CaptureState) -> Bool {
+        guard enabled else { return false }
+        switch state {
         case .recording, .paused:
             return true
         case .idle, .countdown, .finishing:
@@ -129,9 +130,18 @@ final class MarkingOverlayController: ObservableObject {
         }
     }
 
-    /// 重估显隐（幂等：已显示不重复 orderFront，已隐藏不重复 orderOut）。
-    func refreshVisibility() {
-        if shouldShowOverlays() {
+    /// 拉取式判定（provider 读缝便捷面，headless 钉测 / 自检用）。装配热路径不走此门：
+    /// sink 在 @Published willSet 阶段同步触发，此刻回拉 provider 拿到的是旧值（修复轮2
+    /// Critical 1）——生产一律走 `refreshVisibility(enabled:state:)` 发射值直传。
+    func shouldShowOverlays() -> Bool {
+        Self.isVisible(enabled: markingEnabledProvider(), state: stateProvider())
+    }
+
+    /// 重估显隐（幂等：已显示不重复 orderFront，已隐藏不重复 orderOut）。参数为装配层
+    /// CombineLatest 的**发射值直传**——同步、时序确定、headless 可钉；方法体内不得回拉
+    /// provider（willSet 阶段属性仍是旧值）。
+    func refreshVisibility(enabled: Bool, state: CaptureState) {
+        if Self.isVisible(enabled: enabled, state: state) {
             show()
         } else {
             hide()

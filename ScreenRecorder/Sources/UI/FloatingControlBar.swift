@@ -359,21 +359,28 @@ final class FloatingControlBarPanel {
 
     // MARK: 边录边标记开关接线（P2，AppAssembly 在装配完成后调用）
 
-    /// 注入画笔按钮的开关态读缝与切换出口，并立即换装（rootView 整只替换——SwiftUI
-    /// 重新求值；按钮 frame 不随态变化，尺寸探测无需重跑，但保持与既有探测口径一致）。
-    /// 开关真源在 AppAssembly（@Published markingEnabled，会话态不持久化）。
+    /// 注入画笔按钮的开关态读缝与切换出口，并按当前值立即换装（装配期一次性挂载，无
+    /// 订阅副作用）。开关真源在 AppAssembly（@Published markingEnabled，会话态不持久化）；
+    /// **录制中的态变化**走 `refreshMarkingToggle(enabled:)` 发射值直传换装。
     func attachMarkingToggle(provider: @escaping () -> Bool, toggle: @escaping () -> Void) {
         markingEnabledProvider = provider
         onToggleMarkingAction = toggle
-        refreshRootView()
+        refreshRootView(enabled: provider())
     }
 
-    private func refreshRootView() {
+    /// 开关态变化换装（装配层 `refreshMarkingSurfaces` 每次 state/开关变化时调；幂等——
+    /// 重复调用仅重赋 rootView，无重挂载副作用）。参数为 CombineLatest **发射值直传**
+    /// （willSet 阶段 provider 回拉是旧值，修复轮2 Critical 1 同款约束），不得回拉 provider。
+    func refreshMarkingToggle(enabled: Bool) {
+        refreshRootView(enabled: enabled)
+    }
+
+    private func refreshRootView(enabled: Bool) {
         hostingView.rootView = FloatingControlBar(
             controller: controller,
             discardConfirmation: discardConfirmation,
             regionRegistry: regionRegistry,
-            isMarkingEnabled: markingEnabledProvider?() ?? false,
+            isMarkingEnabled: enabled,
             onToggleMarking: { [weak self] in self?.onToggleMarkingAction?() })
     }
 

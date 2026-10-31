@@ -102,7 +102,8 @@ struct PiPCaptureGeometry {
 ///   零栅格化）；缩放仿射 nil 时缩放步恒等跳过；多路皆空时**直返原 buffer**；
 /// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append）；只在 PiP 或点击高亮开启时被调用
 ///   （调用方门控：`SCStreamRecorder` 按注入缝在位与否装配合成器）。
-/// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与两处 mask 缓存无需加锁。
+/// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与三处缓存（圆角
+/// mask / 点击环 mask / 笔画位图单槽）无需加锁。
 final class PiPCompositor {
     /// 单实例复用的渲染上下文（简报钉死：useSoftwareRenderer: false）。
     let context = CIContext(options: [.useSoftwareRenderer: false])

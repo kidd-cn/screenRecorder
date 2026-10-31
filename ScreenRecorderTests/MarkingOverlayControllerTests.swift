@@ -6,7 +6,8 @@ import XCTest
 
 // MARK: - 测试夹具（与 CountdownOverlayControllerTests 同款：注入 provider + 记录面板）
 
-/// provider 取数盒：测试逐段改写后再调 `refreshVisibility()` 重估。
+/// provider 取数盒：喂控制器 init 钉定缝（mode/state/enabled/geometry 读缝）；显隐驱动
+/// 走 `refreshVisibility(enabled:state:)` 发射值直传（修复轮2），盒值仅在拉取式缝断言段同步。
 @MainActor
 private final class VisibilityStateBox {
     var mode: CaptureMode? = .display(1)
@@ -120,11 +121,14 @@ final class MarkingOverlayControllerTests: XCTestCase {
         XCTAssertEqual(roundTripped.y, drawnCI.y, accuracy: 1e-6, "存储点经缩放回投应落回原绘制点（逆映射步生效）")
     }
 
-    // MARK: 显隐逻辑（testPanelVisibilityFollowsState，简报 Step 1 逐字——经 stateProvider 注入）
+    // MARK: 显隐逻辑（testPanelVisibilityFollowsState，简报 Step 1 逐字——发射值直传驱动）
 
     /// 判定真源：markingEnabled && (state == .recording || .paused)。recording 与 paused
     /// 同样可见（暂停中可继续画，spec §5 P2）；其余状态（idle/countdown/finishing）与
-    /// 开关关闭一律不可见。面板复用：一场显隐周期只建一次。
+    /// 开关关闭一律不可见。面板复用：一场显隐周期只建一次。驱动走修复轮2 的**参数化
+    /// 签名** `refreshVisibility(enabled:state:)`（装配层 CombineLatest 发射值直传）——
+    /// 装配层真实 willSet 时序无 headless 位，此处以「provider 滞后旧值 + 参数新值」段
+    /// 钉死判定必须取参数不回拉（Critical 1 的判别面）。
     func testPanelVisibilityFollowsState() {
         let box = VisibilityStateBox()
         let spy = SpyMarkingPanel()
@@ -141,58 +145,71 @@ final class MarkingOverlayControllerTests: XCTestCase {
             })
 
         // 初始 idle + 关：不显示。
-        controller.refreshVisibility()
+        controller.refreshVisibility(enabled: false, state: .idle)
         XCTAssertEqual(spy.orderFrontCount, 0, "初始 idle 且开关关闭不得显示覆盖层")
         XCTAssertFalse(controller.isShowingOverlays)
 
         // 录制中但开关关：不显示（开关是必要条件）。
-        box.state = .recording
-        controller.refreshVisibility()
+        controller.refreshVisibility(enabled: false, state: .recording)
         XCTAssertEqual(spy.orderFrontCount, 0, "录制中但标记开关关闭不得显示覆盖层")
-        XCTAssertFalse(controller.shouldShowOverlays(), "判定：录制 + 开关关 = 隐藏")
+        XCTAssertFalse(MarkingOverlayController.isVisible(enabled: false, state: .recording),
+                       "判定：录制 + 开关关 = 隐藏")
 
         // 开关开：显示。
-        box.markingEnabled = true
-        controller.refreshVisibility()
+        controller.refreshVisibility(enabled: true, state: .recording)
         XCTAssertEqual(spy.orderFrontCount, 1, "录制 + 开关开 = 显示")
         XCTAssertTrue(controller.isShowingOverlays)
-        XCTAssertTrue(controller.shouldShowOverlays(), "判定：录制 + 开关开 = 显示")
+        XCTAssertTrue(MarkingOverlayController.isVisible(enabled: true, state: .recording),
+                      "判定：录制 + 开关开 = 显示")
+
+        // Critical 1 判别面：sink 在 @Published willSet 阶段同步执行，此刻 provider 回拉
+        // 是旧值——参数化签名必须采用**发射值**（enabled: true）而非回拉（box.markingEnabled
+        // 仍 false 模拟 willSet 实况），覆盖层才会在「录制中开标记」时如期出现。
+        controller.refreshVisibility(enabled: true, state: .recording)
+        XCTAssertEqual(spy.orderFrontCount, 1, "provider 滞后时参数值仍驱动显示（幂等不重复前置）")
+        XCTAssertTrue(controller.isShowingOverlays, "判定取发射值，不回拉滞后 provider")
 
         // 暂停：保持可见且不重复 orderFront（暂停中可继续画）。
-        box.state = .paused
-        controller.refreshVisibility()
+        controller.refreshVisibility(enabled: true, state: .paused)
         XCTAssertEqual(spy.orderFrontCount, 1, "暂停态保持可见，不得重复前置面板")
-        XCTAssertTrue(controller.shouldShowOverlays(), "判定：暂停 + 开关开 = 显示（spec §5 P2）")
+        XCTAssertTrue(MarkingOverlayController.isVisible(enabled: true, state: .paused),
+                      "判定：暂停 + 开关开 = 显示（spec §5 P2）")
 
         // 收尾：隐藏。
-        box.state = .finishing
-        controller.refreshVisibility()
+        controller.refreshVisibility(enabled: true, state: .finishing)
         XCTAssertEqual(spy.orderOutCount, 1, "离开录制/暂停即收起")
         XCTAssertFalse(controller.isShowingOverlays)
-        XCTAssertFalse(controller.shouldShowOverlays(), "判定：收尾 = 隐藏")
+        XCTAssertFalse(MarkingOverlayController.isVisible(enabled: true, state: .finishing),
+                       "判定：收尾 = 隐藏")
 
         // 再次录制：重新显示（复用同一面板）。
-        box.state = .recording
-        controller.refreshVisibility()
+        controller.refreshVisibility(enabled: true, state: .recording)
         XCTAssertEqual(spy.orderFrontCount, 2, "下一场录制重新显示")
         XCTAssertTrue(controller.isShowingOverlays)
 
-        // 录制中关闭开关：隐藏。
-        box.markingEnabled = false
-        controller.refreshVisibility()
+        // 录制中关闭开关：隐藏（发射值 false 直传；同段滞后判别：provider 仍 true 不得回拉）。
+        controller.refreshVisibility(enabled: false, state: .recording)
         XCTAssertEqual(spy.orderOutCount, 2, "录制中关闭标记开关即收起")
-        XCTAssertFalse(controller.isShowingOverlays)
+        XCTAssertFalse(controller.isShowingOverlays, "关闭判定取发射值，不回拉滞后 provider")
 
         // 面板复用：整个显隐周期工厂只调一次。
         XCTAssertEqual(factoryCalls, 1, "面板懒建且复用，不随显隐周期重建")
 
-        // 判定边界：开关开但倒计时/收尾态 = 隐藏。
+        // 判定边界（纯函数）：开关开但倒计时/收尾/idle = 隐藏；开关关 + 录制 = 隐藏。
+        XCTAssertFalse(MarkingOverlayController.isVisible(enabled: true, state: .countdown(secondsLeft: 3)),
+                       "判定：倒计时 = 隐藏")
+        XCTAssertFalse(MarkingOverlayController.isVisible(enabled: true, state: .finishing),
+                       "判定：收尾 = 隐藏")
+        XCTAssertFalse(MarkingOverlayController.isVisible(enabled: true, state: .idle),
+                       "判定：idle = 隐藏")
+        XCTAssertFalse(MarkingOverlayController.isVisible(enabled: false, state: .paused),
+                       "判定：开关关 = 隐藏（暂停也不可见）")
+
+        // 拉取式缝（provider 读路径）语义一致：真源同步后 shouldShowOverlays 同判。
+        box.state = .recording
         box.markingEnabled = true
-        box.state = .countdown(secondsLeft: 3)
-        XCTAssertFalse(controller.shouldShowOverlays(), "判定：倒计时 = 隐藏")
-        box.state = .finishing
-        XCTAssertFalse(controller.shouldShowOverlays(), "判定：收尾 = 隐藏")
-        box.state = .idle
-        XCTAssertFalse(controller.shouldShowOverlays(), "判定：idle = 隐藏")
+        XCTAssertTrue(controller.shouldShowOverlays(), "拉取式缝与纯函数同一判定真源")
+        box.markingEnabled = false
+        XCTAssertFalse(controller.shouldShowOverlays(), "拉取式缝与纯函数同一判定真源")
     }
 }

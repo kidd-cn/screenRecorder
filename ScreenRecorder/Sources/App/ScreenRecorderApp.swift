@@ -391,10 +391,15 @@ final class AppAssembly: ObservableObject {
         }
     }
 
-    /// 标记显隐面重估（state / markingEnabled 任一变化时；含几何解析去重闸）。
+    /// 标记显隐面重估（state / markingEnabled 任一变化时；含几何解析去重闸）。全部显隐/
+    /// 换装判定只消费 CombineLatest 的**发射值**——sink 在 @Published willSet 阶段同步
+    /// 执行，此刻属性与 provider 回拉都是旧值（T5 修复轮2 Critical 1），一处都不回拉。
     private func refreshMarkingSurfaces(state: CaptureState, enabled: Bool) {
-        markingOverlayController.refreshVisibility()
+        markingOverlayController.refreshVisibility(enabled: enabled, state: state)
         markingToolbarPanel.setVisible(enabled && (state == .recording || state == .paused))
+        // 画笔按钮换装（发射值直传，修复轮2 Important 2：不并刷则图标/help/a11y 冻结在
+        // attach 时刻的初态）。
+        floatingBarPanel.refreshMarkingToggle(enabled: enabled)
         // 开启时刻现场解析采集几何（覆盖层换算用）；disable 复位闸，re-enable 再解析。
         if enabled {
             if state == .recording || state == .paused,
