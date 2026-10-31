@@ -19,6 +19,8 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 - **Floating control bar**: draggable, non-activating, breathing red dot; discard requires a two-click confirm
 - **Global hotkeys**: `⇧⌘R` start/stop (remembers last mode), `⇧⌘P` pause/resume, `⇧⌘W` record a chosen window — rebindable in preferences, no Accessibility permission needed
 - **Countdown**: 0 / 3 / 5 / 10 s with an on-screen overlay, cancellable
+- **Scheduled recording**: start automatically at a chosen time (or in N minutes) with the last-used mode, with an optional duration cap that stops on time; a missed schedule (sleep) sends a follow-up notification with a "Start recording" action, and busy/locked sessions are skipped with a notice
+- **Launch at login**: one-click login item (SMAppService); a failed registration reverts the toggle and notifies
 - **Encoding**: H.264 / HEVC (hardware), 30 or 60 fps
 - **Interruption protection**: captured window closed or display unplugged → auto-save; recording survives lock; low disk space → auto-finalize the take
 - **Quit protection**: quitting mid-recording offers Save & Quit / Discard & Quit / Cancel
