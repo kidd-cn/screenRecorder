@@ -472,7 +472,9 @@ final class CaptureController: ObservableObject {
 
     /// 启动录制：`countdownSeconds > 0` 时先走逐秒倒计时（每步可被 `cancelAndDiscard` 打断回
     /// `.idle`），随后 begin 并进入 `.recording`。倒计时只是状态机（视觉覆盖层为 Task 12）。
-    func start(mode: CaptureMode, config: RecordingConfiguration) async {
+    /// P6b：`bypassCountdown = true` 时跳过倒计时直接 begin——唯一调用方是装配层定时到点
+    /// 起录（简报钉定：定时起录不走倒计时，无论倒计时设置为何）；手动路径默认 false 不变。
+    func start(mode: CaptureMode, config: RecordingConfiguration, bypassCountdown: Bool = false) async {
         guard state == .idle, !startInFlight else { return }
         startInFlight = true
         defer { startInFlight = false }
@@ -491,7 +493,7 @@ final class CaptureController: ObservableObject {
         hasBegun = false
         pendingDiscard = false
         pendingFailure = nil
-        if countdownSeconds > 0 {
+        if !bypassCountdown, countdownSeconds > 0 {
             let task = Task { await self.runCountdown(totalSeconds: countdownSeconds) }
             countdownTask = task
             let completed = await task.value

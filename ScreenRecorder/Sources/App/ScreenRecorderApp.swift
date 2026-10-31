@@ -3,6 +3,7 @@ import Combine
 import CoreGraphics
 import KeyboardShortcuts
 import SwiftUI
+import UserNotifications
 
 /// App 装配容器（修复轮 1 Important #1）：整条有状态装配链（settings / fileStore /
 /// coordinator / notifier / controller / 浮条面板）收敛在单个 `@StateObject` 持有的对象里。
@@ -96,6 +97,22 @@ final class AppAssembly: ObservableObject {
     /// didSet 接线即自赋值重入；sink 侧重入护栏闩见 LaunchAtLoginCoordinator），失败回翻
     /// + 通知都收在该单元。
     private let launchAtLoginCoordinator: LaunchAtLoginCoordinator
+    /// 定时录制调度器（P6b，P6a 同款装配红线）：所有权进本容器；菜单/状态图标经
+    /// @ObservedObject 直读 `active`（装配层 Combine sink 教训：能直绑不 sink）。
+    /// 懒建（同 markingOverlayController 先例）：起录缝要捕获 self 走 startRecording
+    /// 统一入口，两段式初始化内不可得；首次访问 = App 首帧菜单栏/菜单装配（即生产接线
+    /// 时点），错过通知的 category 注册与 UNUserNotificationCenter delegate 挂载一并在此
+    /// 完成（装配层接线，真机验收）。
+    private(set) lazy var scheduler: RecordingScheduler = makeScheduledRecorder()
+    /// 错过通知「开始录制」动作的路由宿主（UNUserNotificationCenter delegate）：delegate
+    /// 按系统语义弱引用，必须由容器强持有（属性默认值在 init 前构造，懒建调度器闭包可引）。
+    private let scheduledMissedDelegate = ScheduledMissedNotifyDelegate()
+    /// 定时录制面板窗口控制器（P6b）：窗口归装配容器（装配红线），懒建单例复用
+    ///（isReleasedWhenClosed = false，同偏好设置/文件列表窗口）。
+    private var scheduledPanelWindowController: NSWindowController?
+    /// 通知器（P6b 起提升为容器成员，构造仍归 init 局部量段）：控制器的 `notifier` 注入
+    /// 与定时录制调度器的跳过通知缝共用同一实例（UNUserNotificationCenter 单例通道）。
+    private let notifier: UNRecordingNotifier
 
     init() {
         let settings = SettingsStore()
@@ -181,6 +198,7 @@ final class AppAssembly: ObservableObject {
         self.settings = settings
         self.controller = controller
         self.fileStore = fileStore
+        self.notifier = notifier
         self.sourceLossMonitor = sourceLossMonitor
         self.microphoneRouteWatcher = microphoneRouteWatcher
         self.launchAtLoginCoordinator = launchAtLoginCoordinator
@@ -272,7 +290,9 @@ final class AppAssembly: ObservableObject {
     /// 唯一的开始装配点：持久化「上次使用的模式」（裁定 2：每次开始都记）→ 建输出目录 →
     /// 从 SettingsStore 快照装配 config → 进入控制器状态机（快照语义：录制中途改设置
     /// 不影响进行中的录制）。控制器自守卫（非 `.idle` 一律 no-op），此处不重复判态。
-    private func startRecording(mode: CaptureMode) {
+    /// P6b：`bypassCountdown` 仅供定时到点起录（简报钉定：定时起录不走倒计时，无论
+    /// 倒计时设置为何）；手动路径默认 false 形状不变。
+    private func startRecording(mode: CaptureMode, bypassCountdown: Bool = false) {
         settings.lastCaptureMode = mode
         // 标记会话态复位（计划钉定「每次录制重新开关」——非持久化、跨录制不保留）：
         // 关闭开关（显隐订阅随之收起覆盖层/工具条）+ 画布清空（新录制从空白开始，
@@ -289,7 +309,7 @@ final class AppAssembly: ObservableObject {
             settings: settings,
             mode: mode,
             outputURL: fileStore.nextFileURL())
-        Task { await controller.start(mode: mode, config: config) }
+        Task { await controller.start(mode: mode, config: config, bypassCountdown: bypassCountdown) }
     }
 
     /// 开始时刻的 config 快照（唯一装配点的纯函数抽取，internal 供无头钉测）：从
@@ -350,6 +370,120 @@ final class AppAssembly: ObservableObject {
         let newStore = RecordingFileStore(baseDirectory: url)
         fileStore = newStore
         controller.updateStore(newStore)
+    }
+
+    // MARK: 定时录制（P6b：调度器缝接线 / 面板 / 错过补通知）
+
+    /// 调度器缝接线（懒建，见 `scheduler` 属性注释）：起录走 `startScheduledRecording`
+    ///（last-used 模式 + 绕过倒计时）；停录转发 `controller.stop`（自守卫：非录制/暂停
+    /// no-op——上限到点时会话已空闲则无声落地）；忙/锁屏跳过通知走 UNRecordingNotifier
+    ///（Task 11 先例：新通知类型进 notifier，强捕获局部量与容器同寿无环）；错过补通知走
+    /// 独立带动作缝——动作闭包挂到 delegate（UNUserNotificationCenter「开始录制」按钮的
+    /// 真实派发通道），投递走 category 内容（装配层接线，无头不可钉，真机验收）。锁屏判定
+    /// 生产默认 CGSessionCopyCurrentDictionary（测试绝不触真——调度器钉测注入假值）；忙 =
+    /// 控制器非 idle（录制/暂停/收尾/倒计时都算——已有一场将启，定时起录让位并通知）。
+    /// 闭包 [weak controller]（终审 F4 保留环同款纪律）、[weak self]（懒建闭包持有容器弱
+    /// 引，容器与进程同寿故弱引永不悬空释放为 no-op）。
+    private func makeScheduledRecorder() -> RecordingScheduler {
+        // 闭包捕局部量（notifier 强捕获 = controller.onFinishedFile 同款，与容器同寿无环；
+        // delegate 同理——通知中心对其弱引用，容器强持有）。
+        let notifier = self.notifier
+        let missedDelegate = scheduledMissedDelegate
+        UNUserNotificationCenter.current().delegate = missedDelegate
+        Self.registerScheduledMissedCategory()
+        return RecordingScheduler(
+            now: { Date() },
+            timerFactory: { body in
+                // 主 run loop 每秒一拍（common mode：菜单拖拽等 UI 事件循环中也心跳）；
+                // 仅排程/停录等待期保活（调度器 settleTimer 沉降摘除）。sink 闭包继承
+                // @MainActor 装配语境，body 直调 tick 与调度器隔离一致。
+                Timer.publish(every: 1, on: .main, in: .common)
+                    .autoconnect()
+                    .sink { _ in body() }
+            },
+            start: { [weak self] in await self?.startScheduledRecording() ?? false },
+            stop: { [weak controller] in controller?.stop() },
+            notify: { title, body in
+                notifier.notifyScheduledRecordingSkipped(title: title, body: body)
+            },
+            notifyMissed: { title, body, startAction in
+                missedDelegate.startAction = startAction
+                Self.postMissedNotification(title: title, body: body)
+            },
+            isLocked: { RecordingScheduler.isScreenLocked() },
+            isBusy: { [weak controller] in controller?.state != .idle })
+    }
+
+    /// 定时到点起录（调度器 start 缝的生产接线）：走既有 startRecording 装配路径
+    ///（last-used 模式持久化、标记复位、输出目录、config 快照一条不落），仅绕过倒计时
+    ///（简报钉定：定时起录不走倒计时，无论倒计时设置为何）。返回是否受理（空闲预检）；
+    /// begin 失败的失败通知由控制器既有路径发出（含权限引导文案），此处不重复。
+    func startScheduledRecording() async -> Bool {
+        guard controller.state == .idle else { return false }
+        startRecording(mode: settings.lastCaptureMode, bypassCountdown: true)
+        return true
+    }
+
+    /// 打开定时录制面板（菜单「定时录制…」入口）：窗口归装配容器（装配红线），懒建单例
+    /// 复用（`isReleasedWhenClosed = false`）；LSUIElement 应用需激活再前置（同偏好设置
+    /// 窗口）。排定回调 = 调度器 schedule（重复排定整只替换）+ 收起面板；取消回调只收起
+    ///（撤销既有排程走菜单「取消定时录制」）。
+    func openScheduledRecordingPanel() {
+        if scheduledPanelWindowController == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 400, height: 240),
+                styleMask: [.titled, .closable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "定时录制"
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: ScheduledRecordingPanelView(
+                onSchedule: { [weak self] schedule in
+                    self?.scheduler.schedule(schedule)
+                    self?.scheduledPanelWindowController?.window?.orderOut(nil)
+                },
+                onClose: { [weak self] in
+                    self?.scheduledPanelWindowController?.window?.orderOut(nil)
+                }))
+            window.center()
+            scheduledPanelWindowController = NSWindowController(window: window)
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        scheduledPanelWindowController?.showWindow(nil)
+        scheduledPanelWindowController?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// 错过补通知的投递（装配层接线，无头不可钉）：带 category（「开始录制」动作按钮挂在
+    /// category 上），授权尽力申请，被拒/失败静默——UNRecordingNotifier.post 同纪律。
+    private static func postMissedNotification(title: String, body: String?) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        if let body {
+            content.body = body
+        }
+        content.categoryIdentifier = ScheduledMissedNotifyDelegate.categoryID
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        let center = UNUserNotificationCenter.current()
+        Task {
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+            try? await center.add(request)
+        }
+    }
+
+    /// 错过通知 category 注册（「开始录制」动作按钮挂在 category 上）：`setNotification
+    /// Categories` 是整体替换语义——App 既有通知均无 category，替换无既有影响。
+    private static func registerScheduledMissedCategory() {
+        let startAction = UNNotificationAction(
+            identifier: ScheduledMissedNotifyDelegate.startActionID,
+            title: "开始录制",
+            options: [])
+        let category = UNNotificationCategory(
+            identifier: ScheduledMissedNotifyDelegate.categoryID,
+            actions: [startAction],
+            intentIdentifiers: [],
+            options: [])
+        UNUserNotificationCenter.current().setNotificationCategories([category])
     }
 
     // MARK: 偏好设置窗口
@@ -746,6 +880,31 @@ private struct WindowPickerHostView: View {
     }
 }
 
+/// 定时录制错过通知的 UNUserNotificationCenter delegate（P6b 装配层接线，无头不可钉，
+/// 真机验收）：唯一职责是把通知上的「开始录制」动作派发到挂载的闭包（调度器 notifyMissed
+/// 缝在投递时刻挂载，闭包内部路由 start 缝 → `startScheduledRecording`）。delegate 回调
+/// 无主线程保证，经 `Task { @MainActor }` 跳转后调用（装配层 sink 教训同款跳转纪律）。
+/// 按系统语义 delegate 被弱引用，由 AppAssembly 强持有（`scheduledMissedDelegate`）。
+private final class ScheduledMissedNotifyDelegate: NSObject, UNUserNotificationCenterDelegate {
+    /// 错过通知的 category 标识（内容侧 `categoryIdentifier` 与此对齐）。
+    static let categoryID = "screenRecorder.scheduledMissed"
+    /// 「开始录制」动作标识。
+    static let startActionID = "screenRecorder.scheduledMissed.start"
+    /// 最近一条错过通知挂载的「开始录制」动作（主 actor 内调用；后投递覆盖前投递——
+    /// 两动作同源同语义，覆盖无行为差异）。
+    var startAction: (() -> Void)?
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        if response.actionIdentifier == Self.startActionID {
+            let action = startAction
+            Task { @MainActor in action?() }
+        }
+        completionHandler()
+    }
+}
+
 /// 文件列表窗口控制器（审查修复轮 1 #1）：复用窗口（`isReleasedWhenClosed = false`）使
 /// SwiftUI `.task` 只在窗口生命周期首帧执行——关闭后再前置（makeKeyAndOrderFront）不会
 /// 重触发；以窗口 `didBecomeKeyNotification`（仅本窗口为 object，主队列投递）补「每次
@@ -924,18 +1083,22 @@ struct ScreenRecorderApp: App {
             MenuBarView(
                 controller: assembly.controller,
                 settings: assembly.settings,
+                scheduler: assembly.scheduler,
                 onStartDisplay: { assembly.startDisplayRecording(on: $0) },
                 onStartWindowPicker: { assembly.openWindowPicker(startsRecordingOnSelection: true) },
                 onStartAppPicker: { assembly.openAppPicker() },
                 onStartRegion: { assembly.startRegionRecording() },
                 onStartWindowRegion: { assembly.startWindowRegionRecording() },
                 onOpenRecordingList: { assembly.openRecordingList() },
+                onOpenScheduledPanel: { assembly.openScheduledRecordingPanel() },
+                onCancelScheduled: { assembly.scheduler.cancel() },
                 onOpenPreferences: { assembly.openPreferences() }
             )
         } label: {
             // T19：状态图标（idle/countdown/recording/paused/finishing 逐态换装），
             // 独立视图自持 @ObservedObject，状态变化不经 App body 重跑直达菜单栏。
-            MenuBarStatusIcon(controller: assembly.controller)
+            // P6b：排程等待期 idle 用倒计时态（timer），故 label 同持调度器。
+            MenuBarStatusIcon(controller: assembly.controller, scheduler: assembly.scheduler)
         }
         Window("授权设置", id: "permission-onboarding") {
             PermissionOnboardingWindowContent()

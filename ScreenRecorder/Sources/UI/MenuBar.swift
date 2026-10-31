@@ -13,6 +13,9 @@ struct MenuBarView: View {
     /// 摄像头画中画开关绑定（T15 同一 `@Published`：菜单与偏好设置窗口同源实时同步）。
     /// 快照语义：翻转只影响下一场录制（开始时刻由装配层读入 config）。
     @ObservedObject var settings: SettingsStore
+    /// 定时录制调度器（P6b）：排程态（`active`）驱动「取消定时录制」项的显隐；呈现与
+    /// 取消都走装配层闭包缝（窗口所有权与调度器所有权归 AppAssembly，同 T17 装配红线）。
+    @ObservedObject var scheduler: RecordingScheduler
     /// 开始全屏录制指定显示器（「全屏」子菜单的显示器列表项）。
     let onStartDisplay: (CGDirectDisplayID) -> Void
     /// 打开窗口选择器、选定即开始录制（复用 ⇧⌘W 的选择器路径，T20）。
@@ -26,6 +29,10 @@ struct MenuBarView: View {
     let onStartWindowRegion: () -> Void
     /// 打开文件列表窗口（T18，窗口与控制器归 AppAssembly，见 T17 装配红线）。
     let onOpenRecordingList: () -> Void
+    /// 打开定时录制面板（P6b，窗口归 AppAssembly，见 openScheduledRecordingPanel）。
+    let onOpenScheduledPanel: () -> Void
+    /// 取消当前定时排程（仅排程等待期出现；调度器 cancel 即清排程与停录等待）。
+    let onCancelScheduled: () -> Void
     /// 打开偏好设置窗口（窗口与控制器归 AppAssembly，见 T17 装配红线）。
     let onOpenPreferences: () -> Void
 
@@ -65,6 +72,17 @@ struct MenuBarView: View {
             controller.stop()
         }
         .disabled(!isSessionActive)
+        Divider()
+        // 定时录制（P6b）：入口恒可用（录制中也可排未来的场，到点忙路径会跳过并通知）；
+        // 已排程时追加「取消定时录制」（仅排程等待期出现——fire 即消费 active）。
+        Button("定时录制…") {
+            onOpenScheduledPanel()
+        }
+        if scheduler.active != nil {
+            Button("取消定时录制") {
+                onCancelScheduled()
+            }
+        }
         Divider()
         Toggle(isOn: $settings.pipEnabled) {
             Label("摄像头画中画", systemImage: "person.crop.rectangle")
@@ -157,7 +175,9 @@ struct MenuBarView: View {
 
 /// 菜单栏状态图标（T19）：随 `CaptureController.state` 实时换装（作为 MenuBarExtra 的
 /// label 独立观察控制器，App body 不因录制状态重跑）。逐态选择与理由：
-/// - `.idle` → `record.circle`（brief 指定：空心录制圈 = 待命）。
+/// - `.idle` → `record.circle`（brief 指定：空心录制圈 = 待命）；**有定时排程等待时
+///   （P6b）→ `timer`**（简报钉定：排程等待期状态图标用既有倒计时态——「已排定、
+///   即将开始」与倒计时同一视觉语言；active 消费/取消即回空心圈）。
 /// - `.countdown` → `timer`（倒计时数字在屏幕覆盖层上，菜单栏用计时器符号给「已触发、
 ///   即将开始」的反馈；每秒换数字不做——图标语义不变，避免逐秒抖动）。
 /// - `.recording` → 红色实心 `stop.circle.fill`（brief 指定：实心 + 红色与 idle 空心形成
@@ -169,11 +189,13 @@ struct MenuBarView: View {
 /// （空心/实心/符号差异）仍承载状态区分（终验清单菜单本体项肉眼确认）。
 struct MenuBarStatusIcon: View {
     @ObservedObject var controller: CaptureController
+    /// 定时录制排程态（P6b）：`.idle` + 排程等待 → 倒计时态图标。
+    @ObservedObject var scheduler: RecordingScheduler
 
     var body: some View {
         switch controller.state {
         case .idle:
-            Image(systemName: "record.circle")
+            Image(systemName: scheduler.active != nil ? "timer" : "record.circle")
         case .countdown:
             Image(systemName: "timer")
         case .recording:

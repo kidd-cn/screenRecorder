@@ -25,6 +25,13 @@ final class UNRecordingNotifier: RecordingNotifying {
         post(title: "开机自启设置失败", body: message)
     }
 
+    /// P6b：定时录制跳过通知（忙/锁屏路径，标题正文透传，无动作按钮）——同
+    /// notifySaved 纪律的尽力而为副通道。错过补通知带「开始录制」UNNotificationAction
+    ///（category + delegate 派发），归装配层接线（见 AppAssembly / ScheduledMissedNotifyDelegate）。
+    func notifyScheduledRecordingSkipped(title: String, body: String?) {
+        post(title: title, body: body ?? "")
+    }
+
     private func post(title: String, body: String) {
         let content = UNMutableNotificationContent()
         content.title = title
