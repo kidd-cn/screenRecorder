@@ -139,13 +139,25 @@ final class MarkingOverlayController: ObservableObject {
 
     /// 重估显隐（幂等：已显示不重复 orderFront，已隐藏不重复 orderOut）。参数为装配层
     /// CombineLatest 的**发射值直传**——同步、时序确定、headless 可钉；方法体内不得回拉
-    /// provider（willSet 阶段属性仍是旧值）。
+    /// provider（willSet 阶段属性仍是旧值）。P7a 例外：audioOnly 会话标注覆盖层永不激活
+    ///（无视频帧可标注）——`isAudioOnlySession` 读 `modeProvider`（lastCaptureMode 在
+    /// startRecording 起录时刻定格为当次模式，会话期内稳定），非发射值时序敏感读，
+    /// 与 willSet 直传纪律不冲突。
     func refreshVisibility(enabled: Bool, state: CaptureState) {
-        if Self.isVisible(enabled: enabled, state: state) {
+        if Self.isVisible(enabled: enabled, state: state), !isAudioOnlySession {
             show()
         } else {
             hide()
         }
+    }
+
+    /// 当次捕获模式是否为仅声音（P7a）：nil / 其余模式 false。audioOnly 会话无视频帧，
+    /// 覆盖层（事件泵面板）全链路不装配——开启标记开关也不上屏（几何同样恒 nil，画笔
+    /// 无处落点）。
+    private var isAudioOnlySession: Bool {
+        guard let mode = modeProvider() else { return false }
+        if case .audioOnly = mode { return true }
+        return false
     }
 
     private func show() {
@@ -238,7 +250,8 @@ final class MarkingOverlayController: ObservableObject {
     /// window = 窗口当前落点的显示器（窗口可跨屏移动，显示时刻现场解析）；app（P3a）=
     /// 窗口集 union 包围盒中心落点的显示器（工具条单点摆放，多屏窗口集取主画布近似）；
     /// windowRegion（P3b）= 锚定窗口当前落点的显示器（同窗口逻辑——工具条摆放在窗口所在
-    /// 屏，窗口相对 rect 不参与显示器裁决）。
+    /// 屏，窗口相对 rect 不参与显示器裁决）；audioOnly（P7a）= nil（无视频源——覆盖层
+    /// 永不激活的判定在 `refreshVisibility`，此处仅表态「无被录显示器」）。
     /// 取不到回 nil（面板保持原 frame——headless 测试的注入面板不受影响）。
     static func recordedDisplayFrame(for mode: CaptureMode) -> NSRect? {
         let displayID: CGDirectDisplayID?
@@ -253,6 +266,8 @@ final class MarkingOverlayController: ObservableObject {
             displayID = Self.displayID(containingWindow: windowID)
         case .app(let bundleID):
             displayID = Self.displayID(containingAppBundle: bundleID)
+        case .audioOnly:
+            displayID = nil
         }
         guard let displayID else { return nil }
         return NSScreen.screens.first { screen in

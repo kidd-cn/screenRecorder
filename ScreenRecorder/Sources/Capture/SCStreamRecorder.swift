@@ -9,6 +9,11 @@ import ScreenCaptureKit
 /// 视频路径：首帧装配 writer 输入并 startWriting → 逐帧合成（PiP / 点击高亮 / 点击自动缩放
 /// 任一开启，T15/T16/P1a；合成在暂停平移判定之后、append 之前，PTS 原样透传）→ append；
 /// 三效果全关时为逐帧直通（合成器 nil，零开销）。
+/// 仅声音路径（P7a，`mode == .audioOnly`）：无 `.screen` data output（SCStream filter 锚
+/// 主屏仅为 SCK API 形参要求，不装视频输出即永无视频帧）→ 首个混音包装配 writer（仅
+/// addAudioInput + startWriting，无视频 input）→ appendAudio；锚点由首包自动确立（无视频
+/// 锚定先导门槛）。成片为纯音轨 `.m4a`（outputURL 扩展名 m4a，容器选择见
+/// `AssetWriterSession`）。
 /// 音频路径（Task 9；P1b 起 captureSystemAudio / captureMicrophone / clickSoundEnabled 任一
 /// 开启即建音轨，见 `includesAudioTrack`——双源全关+音效开为「效果专用音轨」：mixer 无输入
 /// tap、只有效果路）：`SystemAudioMixer` 双路混音——系统声：SCStream audio 队列样本；麦克风：
@@ -102,7 +107,8 @@ final class SCStreamRecorder: NSObject {
     private var writerSession: AssetWriterSession?
     /// 系统声音混音器（captureSystemAudio 且启动成功时非 nil；engine 由混音器持有）。
     private var mixer: SystemAudioMixer?
-    /// 仅 videoQueue 触碰：writer 输入是否已在首帧装配完毕。
+    /// 仅 videoQueue 触碰（P7a 起：audioOnly 会话无视频帧，改由混音器 delivery 队列在
+    /// 首个音频包上装配——单会话内两队列不同时活跃，仍单写者）：writer 输入是否已装配完毕。
     private var writerArmed = false
     /// 仅 videoQueue 触碰（start() 在 startCapture 前发布，回调建立即天然的内存序栅栏）：
     /// includeCamera 且注入缝在位时创建的合成器；nil = 直通路径。
@@ -146,21 +152,25 @@ final class SCStreamRecorder: NSObject {
     /// 输入装配推迟到首帧（需要首帧格式描述做 sourceFormatHint）。
     func start() async throws {
         let target = try await resolveTarget()
-        let session = try AssetWriterSession(config: config, pixelSize: target.pixelSize)
+        // P7a：audioOnly 无视频画布——pixelSize 以 .zero 占位（纯音轨会话永不
+        // addVideoInput，该值不参与任何装配，见 AssetWriterSession.init 注释）。
+        let session = try AssetWriterSession(config: config, pixelSize: target?.pixelSize ?? .zero)
         // T15/T16：合成器按需装配——PiP 开启（摄像头 + 位置注入缝在位）、点击高亮开启
         //（取数注入缝在位）、自动缩放开启（P1a，取数缝在位）或笔画快照桥在位（P2：标记
         // 开关是录制中会话态，可中途开——桥在位即按「笔画可能活跃」装配）时建（CIContext/
         // CVPixelBufferPool 均惰性持有，未走到合成不产生缓冲分配）。全关时保持 nil =
-        // 直通路径零开销。
-        let pipActive = config.includeCamera && pipPixelBufferProvider != nil && pipFrameProvider != nil
-        let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
-        let zoomActive = config.autoZoomEnabled && zoomStateProvider != nil
-        let strokesActive = strokeOverlayProvider != nil
-        // P4 键帽路同 strokes 惯例：凡装配了快照桥（生产恒装配）即视「键帽可能活跃」，
-        // 合成器按需装配；逐帧无键帽由合成器全缺省直返兜住（零渲染直通）。
-        let keyboardActive = keyboardOverlayProvider != nil
-        if pipActive || clickActive || zoomActive || strokesActive || keyboardActive {
-            pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
+        // 直通路径零开销。P7a：audioOnly 无视频帧，合成器永不触及，整体不装配。
+        if let target {
+            let pipActive = config.includeCamera && pipPixelBufferProvider != nil && pipFrameProvider != nil
+            let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
+            let zoomActive = config.autoZoomEnabled && zoomStateProvider != nil
+            let strokesActive = strokeOverlayProvider != nil
+            // P4 键帽路同 strokes 惯例：凡装配了快照桥（生产恒装配）即视「键帽可能活跃」，
+            // 合成器按需装配；逐帧无键帽由合成器全缺省直返兜住（零渲染直通）。
+            let keyboardActive = keyboardOverlayProvider != nil
+            if pipActive || clickActive || zoomActive || strokesActive || keyboardActive {
+                pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
+            }
         }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
         // 时混音器同样在位（系统声源节点持续渲染静音，与麦克风混合）。启动失败（如无输出设备
@@ -199,24 +209,44 @@ final class SCStreamRecorder: NSObject {
         }
         do {
             let streamConfig = SCStreamConfiguration()
-            streamConfig.width = Int(target.pixelSize.width.rounded())
-            streamConfig.height = Int(target.pixelSize.height.rounded())
-            streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(config.fps, 1)))
-            streamConfig.queueDepth = 3
-            streamConfig.showsCursor = true
-            streamConfig.pixelFormat = kCVPixelFormatType_32BGRA // 与 adaptor 的像素格式声明一致
-            if let sourceRect = target.sourceRect {
-                streamConfig.sourceRect = sourceRect // points，显示器逻辑坐标系
-            }
-            streamConfig.capturesAudio = config.captureSystemAudio
-            streamConfig.excludesCurrentProcessAudio = true // 不把本 App 自己触发的提示音录进去
-            streamConfig.sampleRate = 48000
-            streamConfig.channelCount = 2
+            let stream: SCStream
+            if let target {
+                streamConfig.width = Int(target.pixelSize.width.rounded())
+                streamConfig.height = Int(target.pixelSize.height.rounded())
+                streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(config.fps, 1)))
+                streamConfig.queueDepth = 3
+                streamConfig.showsCursor = true
+                streamConfig.pixelFormat = kCVPixelFormatType_32BGRA // 与 adaptor 的像素格式声明一致
+                if let sourceRect = target.sourceRect {
+                    streamConfig.sourceRect = sourceRect // points，显示器逻辑坐标系
+                }
+                streamConfig.capturesAudio = config.captureSystemAudio
+                streamConfig.excludesCurrentProcessAudio = true // 不把本 App 自己触发的提示音录进去
+                streamConfig.sampleRate = 48000
+                streamConfig.channelCount = 2
 
-            let stream = SCStream(filter: target.filter, configuration: streamConfig, delegate: self)
-            try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
-            if config.captureSystemAudio {
-                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+                stream = SCStream(filter: target.filter, configuration: streamConfig, delegate: self)
+                try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: videoQueue)
+                if config.captureSystemAudio {
+                    try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+                }
+            } else {
+                // P7a 仅声音：SCStream 必须携带内容 filter（API 形参要求）——锚主屏仅为
+                // 满足构造，**不装 `.screen` data output 即永无视频帧**（视频相关配置
+                // width/height/帧率/像素格式一概不动，不做无消费者的帧缓冲布局）；音频
+                // 参数与视频路径同口径（48k 双声道、排除本进程提示音）。
+                streamConfig.capturesAudio = config.captureSystemAudio
+                streamConfig.excludesCurrentProcessAudio = true
+                streamConfig.sampleRate = 48000
+                streamConfig.channelCount = 2
+                let mainDisplay = try await findDisplay(CGMainDisplayID())
+                stream = SCStream(
+                    filter: SCContentFilter(display: mainDisplay, excludingWindows: []),
+                    configuration: streamConfig,
+                    delegate: self)
+                if config.captureSystemAudio {
+                    try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
+                }
             }
             stateLock.withStateLock {
                 self.stream = stream
@@ -385,7 +415,9 @@ final class SCStreamRecorder: NSObject {
         let sourceRect: CGRect?
     }
 
-    private func resolveTarget() async throws -> ResolvedTarget {
+    /// 按模式构造 `SCContentFilter` 与采集几何；nil = 无视频目标（P7a audioOnly——start
+    /// 据此走仅音频装配：SCStream 只装 `.audio` 输出、writer 无视频 input）。
+    private func resolveTarget() async throws -> ResolvedTarget? {
         switch config.mode {
         case .display(let displayID):
             let display = try await findDisplay(displayID)
@@ -465,6 +497,11 @@ final class SCStreamRecorder: NSObject {
                 pixelSize: clampedRect.size,
                 sourceRect: clampedRect
             )
+        case .audioOnly:
+            // P7a：仅声音无目标窗口/显示器——nil 形语义。调用方（start）据 nil 走仅音频
+            // 装配：SCStream filter 锚主屏仅为 SCK API 形参要求，不装 `.screen` 输出即
+            // 无视频帧、writer 无视频 input（成片纯音轨 .m4a）。
+            return nil
         }
     }
 
@@ -525,14 +562,33 @@ extension SCStreamRecorder: SCStreamOutput {
     /// writer 可靠拒绝（macOS 27 实测被静默钳到成片起点），有暂停时原始 PTS 与成片时间轴
     /// 相差累计暂停量，直接用原始 PTS 校验会漏放录制前内容；时钟层的音频轨单调护栏则
     /// 挡住暂停边界在途的回跳包（两者互补，先护栏后锚点兜底）。
+    /// P7a 仅声音分支：无视频轨即无「视频锚定先导门槛」——首个音频包在本队列装配 writer
+    ///（addAudioInput + startWriting，`writerArmed` 同旗标）并经 appendAudio 以自身 PTS
+    /// 定锚；回跳包由时钟层音频单调护栏挡（上文 shiftedPTS nil）。
     private func handleMixedAudio(_ sampleBuffer: CMSampleBuffer) {
         let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard let shiftedPTS = stateLock.withStateLock({ mediaClock.shiftedPTS(rawPTS, for: .audio) }) else { return }
         let session: AssetWriterSession? = stateLock.withStateLock { writerSession }
         guard let session else { return } // stop() 已收走会话：丢弃尾部样本
-        let anchor = session.isReadyForVideoMediaTime
-        guard anchor.isValid, anchor.isNumeric else { return } // 视频未锚定：录制尚未开始，丢弃
-        guard CMTimeCompare(shiftedPTS, anchor) >= 0 else { return } // 文件基：不得早于锚点
+        if case .audioOnly = config.mode {
+            // 首包装配（无视频帧可依，delivery 队列单写者）；装配失败按失败通道上报。
+            if !writerArmed {
+                let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+                guard let mixer else { return } // 无混音器即无音轨来源（装配层恒建，防御）
+                do {
+                    try session.addAudioInput(with: mixer.masterFormat)
+                    session.startWriting()
+                    writerArmed = true
+                } catch {
+                    recordFailure(error)
+                    return
+                }
+            }
+        } else {
+            let anchor = session.isReadyForVideoMediaTime
+            guard anchor.isValid, anchor.isNumeric else { return } // 视频未锚定：录制尚未开始，丢弃
+            guard CMTimeCompare(shiftedPTS, anchor) >= 0 else { return } // 文件基：不得早于锚点
+        }
         // 平移落盘：换时浅拷贝（数据与时长保真，仅 PTS 置为平移值）；打包失败丢包
         guard let retimed = AudioSampleBridge.sampleBuffer(copying: sampleBuffer, presentationTimeStamp: shiftedPTS) else { return }
         do {

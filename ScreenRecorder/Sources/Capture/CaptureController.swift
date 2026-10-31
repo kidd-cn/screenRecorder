@@ -451,6 +451,10 @@ final class CaptureController: ObservableObject {
     private var sourceDisplayID: CGDirectDisplayID?
     /// 当前会话被采集 App 的 bundle id（P3a；nil = 非 App 模式）。
     private var sourceBundleID: String?
+    /// 当前会话是否采集视频（P7a）：audioOnly = false——纯声音录制不以显示器为源，源丢失
+    /// 监视整体不武装（显示器断连不构成仅声音会话的中断；若照搬窗口模式的 nil 全台语义，
+    /// 拔掉任一显示器都会误杀一场纯声音录制）。
+    private var sourceCapturesVideo = true
 
     init(session: CaptureSessionManaging,
          store: RecordingFileStore,
@@ -488,8 +492,11 @@ final class CaptureController: ObservableObject {
         // 经协调器暂停门直接调度混音器）。
         clickHighlightTracker?.setEnabled(config.clickHighlightEnabled || config.autoZoomEnabled || config.clickSoundEnabled)
         // T18：源丢失匹配目标随捕获模式确定（裁定 2；P3a 起 App 模式另记 bundle id）。
+        // P7a：audioOnly 会话整体不武装源丢失监视（nil 在 audioOnly 是「无源可失」，
+        // 不是窗口模式的「采集全台」——分流见 sourceCapturesVideo）。
         sourceDisplayID = Self.capturedDisplayID(of: config.mode)
         sourceBundleID = Self.capturedAppBundleID(of: config.mode)
+        sourceCapturesVideo = config.mode != .audioOnly
         hasBegun = false
         pendingDiscard = false
         pendingFailure = nil
@@ -546,7 +553,11 @@ final class CaptureController: ObservableObject {
         state = .recording
         startElapsedTimer()
         clickHighlightTracker?.start() // T16：点击监听随录制启动（disabled 未装机为 no-op）
-        sourceLossMonitor?.start(displayID: sourceDisplayID, appBundleID: sourceBundleID) // T18：源丢失监视随录制启动（P3a：App 模式轮询窗口数）
+        // T18：源丢失监视随录制启动（P3a：App 模式轮询窗口数）；P7a：audioOnly 不武装
+        //（sourceCapturesVideo false——显示器断连不构成纯声音会话的中断）。
+        if sourceCapturesVideo {
+            sourceLossMonitor?.start(displayID: sourceDisplayID, appBundleID: sourceBundleID)
+        }
         microphoneRouteWatcher?.start() // T18：路由变化观察随录制启动（混音器自愈，无 UI）
     }
 
@@ -554,13 +565,16 @@ final class CaptureController: ObservableObject {
     /// 显示器（窗口可移动/跨屏）→ nil = 采集全台语义，任一显示器移除即源丢失；app 模式
     ///（P3a）无定显示器（窗口可跨屏）→ nil，源丢失改由 bundle 窗口计数轮询判定；
     /// windowRegion（P3b）锚定单窗口，沿用窗口模式同款语义（nil，不做 App 式窗口计数
-    /// ——窗口关闭跟随一期窗口模式的既有路径，显示器移除按全台语义自动保存）。
+    /// ——窗口关闭跟随一期窗口模式的既有路径，显示器移除按全台语义自动保存）；
+    /// audioOnly（P7a）→ nil = 无源可失语义（纯声音会话的监视由 `sourceCapturesVideo`
+    /// 整体不武装，见 start——nil 在此与窗口模式的「采集全台」语义分流）。
     private static func capturedDisplayID(of mode: CaptureMode) -> CGDirectDisplayID? {
         switch mode {
         case .display(let displayID): return displayID
         case .region(_, let displayID): return displayID
         case .window, .windowRegion: return nil
         case .app: return nil
+        case .audioOnly: return nil
         }
     }
 
@@ -652,6 +666,7 @@ final class CaptureController: ObservableObject {
         microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
         sourceDisplayID = nil
         sourceBundleID = nil
+        sourceCapturesVideo = false
         let url = await session.finish()
         resetElapsed()
         state = .idle
@@ -676,6 +691,7 @@ final class CaptureController: ObservableObject {
         microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
         sourceDisplayID = nil
         sourceBundleID = nil
+        sourceCapturesVideo = false
         let url = await session.finish()
         resetElapsed()
         state = .idle

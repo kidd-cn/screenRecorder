@@ -5,9 +5,10 @@ import Foundation
 
 /// AVAssetWriter 落盘会话：视频走 `AVAssetWriterInputPixelBufferAdaptor`，
 /// 音频走 AAC 编码（`AVFormatIDKey: kAudioFormatMPEG4AAC` 的 outputSettings + PCM 格式提示，
-/// appendAudio 写入 PCM 样本、writer 负责编码），输出 MP4。生命周期：init（预检 + claim 占位）
-/// → addVideoInput / addAudioInput → startWriting → appendVideo / appendAudio
-///（首个到轨样本自动 startSession 锚定时间轴）→ finish。
+/// appendAudio 写入 PCM 样本、writer 负责编码）。输出容器按 outputURL 扩展名选择
+///（P7a）：`.m4a` → 纯音轨 m4a 容器（仅声音录制），其余 → MP4（既有）。生命周期：
+/// init（预检 + claim 占位）→ addVideoInput / addAudioInput → startWriting →
+/// appendVideo / appendAudio（首个到轨样本自动 startSession 锚定时间轴）→ finish。
 ///
 /// 不覆盖既有录像（硬约束）——预检 + claim 双保险：
 /// 1. init 预检 `outputURL` 本体已存在 → 直接抛 `outputAlreadyExists`；
@@ -113,6 +114,8 @@ final class AssetWriterSession {
     /// 预检目标 + claim 原子占位 + 装配 writer；本体已存在抛 `outputAlreadyExists`，
     /// claim 已被占抛 `outputBusy`（绝不覆盖既有录像）。目录须由调用方先行创建
     ///（全代码库唯一创建点是 `RecordingFileStore.ensureDirectory`）。
+    /// `pixelSize` 仅参与视频输入装配（addVideoInput 的画布尺寸）；纯音轨会话（P7a
+    /// 仅声音录制，永不 addVideoInput）传 `.zero` 占位，不参与任何装配。
     init(config: RecordingConfiguration, pixelSize: CGSize) throws {
         self.pixelSize = pixelSize
         self.codec = config.codec
@@ -136,8 +139,9 @@ final class AssetWriterSession {
 
         do {
             // 真实文件由 writer 自建（macOS 27 拒写已存在文件——占位真实路径会让 startWriting
-            // 直接 .failed；13–26 上 writer 打开本体前已有预检 + claim 双保险封住覆盖窗口）
-            writer = try AVAssetWriter(url: config.outputURL, fileType: .mp4)
+            // 直接 .failed；13–26 上 writer 打开本体前已有预检 + claim 双保险封住覆盖窗口）。
+            // 容器按输出扩展名精确声明（P7a）：.m4a → 纯音轨 m4a 容器，其余 → MP4（既有）。
+            writer = try AVAssetWriter(url: config.outputURL, fileType: Self.containerType(for: config.outputURL))
         } catch {
             // 不能调 self.removeClaim()——两段式初始化未完成前禁用实例方法，走纯本地路径
             try? FileManager.default.removeItem(at: URL(fileURLWithPath: claimPath))
@@ -147,6 +151,13 @@ final class AssetWriterSession {
 
     deinit {
         removeClaim() // 会话被半途遗弃时的兜底，防 claim 残留
+    }
+
+    /// 输出容器类型（P7a，按扩展名精确声明避免 writer 对 URL/容器错配的版本差异）：
+    /// `.m4a` → `.m4a`（纯音轨，仅声音录制），其余 → `.mp4`（既有）。两者同为 ISO BMFF
+    /// 家族，区别仅在惯例扩展名与轨道构成（纯音轨 vs 含视频轨）。
+    private static func containerType(for url: URL) -> AVFileType {
+        url.pathExtension.lowercased() == "m4a" ? .m4a : .mp4
     }
 
     // MARK: - 输入装配

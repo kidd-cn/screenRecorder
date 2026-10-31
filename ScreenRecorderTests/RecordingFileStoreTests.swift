@@ -92,4 +92,46 @@ final class RecordingFileStoreTests: XCTestCase {
                        "只保留 .mp4 成片（.claim/.txt/.part 均不进列表）")
         XCTAssertEqual(names.count, 2)
     }
+
+    /// P7a：列表放宽为 mp4/m4a 双成片扩展名（五文件矩阵扩为六）——仅声音录制的
+    /// `.m4a` 成片进列表；`.claim` 占位（含 audioOnly 场景的 `.m4a.claim`）、`.part`
+    /// 残留与无关文件仍滤除（终审 F7 纪律不变，成片扩展名矩阵由一扩二，大小写不敏感）。
+    func testContentsIncludesM4aExcludesClaimAndPart() throws {
+        try store.ensureDirectory()
+        let mp4 = directory.appendingPathComponent("录屏_2026-10-25_14-30-05.mp4")
+        let upper = directory.appendingPathComponent("CAM.MP4")
+        let m4a = directory.appendingPathComponent("录屏_2026-10-25_14-30-07.m4a")
+        let m4aClaim = directory.appendingPathComponent("录屏_2026-10-25_14-30-06.m4a.claim")
+        let partial = directory.appendingPathComponent("half.mp4.part")
+        let txt = directory.appendingPathComponent("notes.txt")
+        for file in [mp4, upper, m4a, m4aClaim, partial, txt] {
+            try Data("x".utf8).write(to: file)
+        }
+
+        let names = store.contents().map(\.name)
+
+        XCTAssertEqual(
+            Set(names),
+            ["录屏_2026-10-25_14-30-05.mp4", "CAM.MP4", "录屏_2026-10-25_14-30-07.m4a"],
+            "mp4×2 + m4a 进列表（.m4a.claim/.part/.txt 均不进）")
+        XCTAssertEqual(names.count, 3)
+    }
+
+    /// P7a：`nextFileURL` 扩展名参数——audioOnly 路径传 "m4a" 产出 .m4a 名；缺省
+    /// "mp4" 既有行为不变（既有调用方零改动）。同名冲突递增后缀同样保持参数扩展名。
+    func testNextFileURLExtensionParameter() throws {
+        try store.ensureDirectory()
+        XCTAssertEqual(
+            store.nextFileURL(now: Self.fixedDate).lastPathComponent,
+            "录屏_2026-10-25_14-30-05.mp4",
+            "缺省扩展名不变（既有调用方零改动）")
+
+        let m4a = store.nextFileURL(now: Self.fixedDate, extension: "m4a")
+        XCTAssertEqual(m4a.lastPathComponent, "录屏_2026-10-25_14-30-05.m4a")
+        try Data().write(to: m4a)
+
+        let second = store.nextFileURL(now: Self.fixedDate, extension: "m4a")
+        XCTAssertEqual(second.lastPathComponent, "录屏_2026-10-25_14-30-05 (2).m4a",
+                       "冲突递增后缀保持参数扩展名")
+    }
 }

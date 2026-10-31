@@ -25,6 +25,11 @@ enum CaptureMode: Equatable, Codable {
     /// 坑）。开录时 rect 与窗口 frame 求交钳制一次固定（SCStreamRecorder.resolveTarget）；
     /// 录制中窗口缩小沿用一期窗口模式语义（无 live 重配置，不重钳制）。
     case windowRegion(window: CGWindowID, rect: CGRect)
+    /// 仅声音录制（P7a）：不采集任何视频内容——SCStream 只装 `.audio` 输出（filter 锚
+    /// 主屏仅为 SCK API 形参要求，无 `.screen` data output 即永无视频帧），落盘为纯音轨
+    /// `.m4a`（无视频 input 的 AVAssetWriter 会话）。无关联值：`lastCaptureMode`
+    /// （⇧⌘R 上次使用模式）与 Codable 落库同其余模式。
+    case audioOnly
 }
 
 /// 摄像头画中画的背景模式（P5）：原画面 / 人像模糊 / 内置程序生成背景。开录快照语义

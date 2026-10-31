@@ -36,9 +36,11 @@ struct RecordingFileStore {
         return "录屏_\(formatter.string(from: date)).\(ext)"
     }
 
-    /// 返回当前不存在的文件 URL；同名冲突时追加 " (2)" 并递增。不创建目录或文件。
-    func nextFileURL(now: Date = Date()) -> URL {
-        let baseName = Self.fileName(for: now)
+    /// 返回当前不存在的文件 URL；同名冲突时追加 " (2)" 并递增（后缀保持参数扩展名）。
+    /// 不创建目录或文件。`extension` 缺省 "mp4"（既有调用方零改动）；仅声音录制（P7a）
+    /// 传 "m4a" 产出 `.m4a` 名。
+    func nextFileURL(now: Date = Date(), extension ext: String = "mp4") -> URL {
+        let baseName = Self.fileName(for: now, extension: ext)
         let stem = (baseName as NSString).deletingPathExtension
         let ext = (baseName as NSString).pathExtension
 
@@ -51,7 +53,8 @@ struct RecordingFileStore {
         return candidate
     }
 
-    /// 列出目录内录像成片（新在前，只列 `.mp4`），目录不存在或读失败时返回空数组。
+    /// 列出目录内录像成片（新在前，只列 `.mp4` / `.m4a`——P7a 起仅声音成片同为成片），
+    /// 目录不存在或读失败时返回空数组。
     /// 终审 F7：过滤器收窄为成片扩展名——异常退出残留的 `.claim` 占位与无关文件不进列表
     ///（此前只滤目录与隐藏文件，`.claim` 会以 0 字节条目混入文件列表）。
     func contents() -> [RecordingFileMetadata] {
@@ -67,7 +70,7 @@ struct RecordingFileStore {
         }
 
         return fileURLs
-            .filter { !$0.hasDirectoryPath && $0.pathExtension.lowercased() == "mp4" }
+            .filter { !$0.hasDirectoryPath && ["mp4", "m4a"].contains($0.pathExtension.lowercased()) }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
             .map { url in
                 let values = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey])

@@ -113,6 +113,11 @@ struct PiPCaptureGeometry {
                     y: window.frame.origin.y + rect.minY),
                 scale: 1,
                 capturePixelSize: rect.size)
+        case .audioOnly:
+            // P7a：仅声音无视频画布——nil = 无采集几何，点击高亮/缩放/标记各取数缝整体
+            // 不装配（composite 直通语义的上游；audioOnly 会话本无视频帧，composite 永不
+            // 触及，此 nil 是穷尽性表态 + 视效链路的双保险）。
+            return nil
         }
     }
 }

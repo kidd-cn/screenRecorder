@@ -287,6 +287,12 @@ final class AppAssembly: ObservableObject {
         }
     }
 
+    /// 菜单「开始录制 → 仅声音」入口（P7a）：不采集任何视频内容，落盘纯音轨 `.m4a`
+    ///（输出扩展名与 SCStream 仅音频装配均由 `startRecording` / config 快照按模式分流）。
+    func startAudioOnlyRecording() {
+        startRecording(mode: .audioOnly)
+    }
+
     /// 唯一的开始装配点：持久化「上次使用的模式」（裁定 2：每次开始都记）→ 建输出目录 →
     /// 从 SettingsStore 快照装配 config → 进入控制器状态机（快照语义：录制中途改设置
     /// 不影响进行中的录制）。控制器自守卫（非 `.idle` 一律 no-op），此处不重复判态。
@@ -307,10 +313,12 @@ final class AppAssembly: ObservableObject {
         // 此处只对齐开关（监听中翻 false 立即摘除，KeyboardMonitor.setEnabled 自理）。
         keyboardMonitor.setEnabled(settings.keyboardOverlayEnabled)
         try? fileStore.ensureDirectory()
+        // P7a：仅声音输出 .m4a（纯音轨容器）；其余模式缺省 mp4（既有调用形状不变）。
+        let outputExtension: String = if case .audioOnly = mode { "m4a" } else { "mp4" }
         let config = Self.makeConfiguration(
             settings: settings,
             mode: mode,
-            outputURL: fileStore.nextFileURL())
+            outputURL: fileStore.nextFileURL(extension: outputExtension))
         return Task { await controller.start(mode: mode, config: config, bypassCountdown: bypassCountdown) }
     }
 
@@ -320,14 +328,18 @@ final class AppAssembly: ObservableObject {
     /// 静默忽略（live 下发链只覆盖录制中的翻转，兜不了开录初值）。P1b：点击音效开关
     /// 同为快照字段（开录时刻入照，录制中途改设置不影响进行中的录制）。P5：摄像头背景
     /// 同为快照字段（coordinator.begin 据此装配背景处理器，off = 帧路径零开销旁路）。
+    /// P7a 仅声音装配裁定：系统声恒开（该模式的定义性音源——用户关掉系统声的偏好只对
+    /// 视频模式生效，否则一场仅声音录制零音源、必走 nothingWritten 无成片）；摄像头画中画
+    /// 恒关（无视频轨可叠，开着只会凭空弹摄像头浮窗）。
     static func makeConfiguration(settings: SettingsStore, mode: CaptureMode, outputURL: URL) -> RecordingConfiguration {
-        RecordingConfiguration(
+        let audioOnly: Bool = if case .audioOnly = mode { true } else { false }
+        return RecordingConfiguration(
             mode: mode,
-            captureSystemAudio: settings.captureSystemAudio,
+            captureSystemAudio: audioOnly || settings.captureSystemAudio,
             captureMicrophone: settings.captureMicrophone,
             micVolume: settings.micVolume,
             micMuted: settings.micMuted,
-            includeCamera: settings.pipEnabled,
+            includeCamera: !audioOnly && settings.pipEnabled,
             cameraBackground: settings.cameraBackground, // P5：开录快照（下一场录制生效）
             fps: settings.fps,
             codec: settings.videoCodec,
@@ -1100,6 +1112,7 @@ struct ScreenRecorderApp: App {
                 onStartAppPicker: { assembly.openAppPicker() },
                 onStartRegion: { assembly.startRegionRecording() },
                 onStartWindowRegion: { assembly.startWindowRegionRecording() },
+                onStartAudioOnly: { assembly.startAudioOnlyRecording() },
                 onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenScheduledPanel: { assembly.openScheduledRecordingPanel() },
                 onCancelScheduled: { assembly.scheduler.cancel() },

@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 
 @testable import ScreenRecorder
@@ -75,5 +76,82 @@ final class SCStreamRecorderPauseTests: XCTestCase {
         await recorder.stop()
         XCTAssertEqual(recorder.pausedDroppedVideoFrameCount, 3, "重复 stop 不得覆盖快照")
         XCTAssertEqual(recorder.pausedDroppedAudioPacketCount, 5, "重复 stop 不得覆盖快照")
+    }
+}
+
+// MARK: - P7a 仅声音录制：audioOnly 音轨装配的 writer 层钉测（无头）
+
+extension SCStreamRecorderPauseTests {
+    /// audioOnly 会话的音轨装配形状（生产 = SCStreamRecorder 仅音频分支在首个混音包上
+    /// 装配）：writer 会话以 .m4a 输出 URL + 纯音轨（无 addVideoInput）走
+    /// addAudioInput → startWriting → appendAudio → finish，产物可读且**恰为一条 AAC
+    /// 音轨、零视频轨**（.m4a 纯音轨容器契约；QuickLook 原生可播的前提）。
+    /// 与 AssetWriterSessionTests 的音画双轨钉测互补：此处钉「无视频 input 也能收尾成片」。
+    func testAudioOnlyWriterProducesPureAudioM4a() async throws {
+        let outputURL = directory.appendingPathComponent("录屏_audio_only.m4a")
+        let config = RecordingConfiguration(
+            mode: .audioOnly,
+            captureSystemAudio: true,
+            captureMicrophone: false,
+            includeCamera: false,
+            fps: 30,
+            codec: .h264,
+            outputURL: outputURL,
+            clickHighlightEnabled: false
+        )
+        // audioOnly 无视频画布：pixelSize 仅占位（纯音轨会话永不 addVideoInput）。
+        let session = try AssetWriterSession(config: config, pixelSize: .zero)
+        let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2)!
+        try session.addAudioInput(with: format)
+        session.startWriting()
+
+        // 8 段 × 1024 帧 @48k（~0.17s）恒幅 0.25，PTS 从 1s 起。
+        for chunk in 0..<8 {
+            guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024) else {
+                return XCTFail("AVAudioPCMBuffer 创建失败")
+            }
+            pcm.frameLength = 1024
+            for index in 0..<1024 {
+                pcm.floatChannelData![0][index] = 0.25
+                pcm.floatChannelData![1][index] = -0.25
+            }
+            var descriptionOut: CMFormatDescription?
+            var asbd = format.streamDescription.pointee
+            let status = CMAudioFormatDescriptionCreate(
+                allocator: kCFAllocatorDefault,
+                asbd: &asbd,
+                layoutSize: 0,
+                layout: nil,
+                magicCookieSize: 0,
+                magicCookie: nil,
+                extensions: nil,
+                formatDescriptionOut: &descriptionOut)
+            XCTAssertEqual(status, noErr)
+            let description = try XCTUnwrap(descriptionOut, "CMFormatDescription 创建失败")
+            let sample = try XCTUnwrap(
+                AudioSampleBridge.makeSampleBuffer(
+                    pcm: pcm,
+                    skipFrames: 0,
+                    pts: CMTime(value: CMTimeValue(48_000 + chunk * 1024), timescale: 48_000),
+                    formatDescription: description),
+                "CMSampleBuffer 打包失败")
+            try session.appendAudio(sample)
+        }
+
+        let finishedURL = try await session.finish()
+        XCTAssertEqual(finishedURL, outputURL, "成片 URL 即 .m4a 输出 URL")
+
+        let asset = AVURLAsset(url: finishedURL)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, ".m4a 成片恰含一条音轨")
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        XCTAssertTrue(videoTracks.isEmpty, "纯音轨成片不得含视频轨")
+        let descriptions = try await audioTracks[0].load(.formatDescriptions)
+        for description in descriptions {
+            XCTAssertEqual(
+                CMFormatDescriptionGetMediaSubType(description),
+                FourCharCode(kAudioFormatMPEG4AAC),
+                "音轨编码必须是 AAC")
+        }
     }
 }
