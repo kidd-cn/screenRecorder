@@ -1,6 +1,7 @@
 import CoreGraphics
 import CoreImage
 import CoreMedia
+import CoreText
 import CoreVideo
 import Foundation
 import ScreenCaptureKit
@@ -127,11 +128,12 @@ struct PiPCaptureGeometry {
 ///   尺寸只是提示，消除「缓冲实际尺寸 == init 假设」前提）；
 /// - 无 PiP（pip / pipFrame 为 nil）或完全不相交时 PiP 路**零渲染**；无点击态或圈不可得时
 ///   点击路**零渲染**；笔画快照空/nil 时笔画路**零渲染**（未在画的常态帧掩图缓存直取，
-///   零栅格化）；缩放仿射 nil 时缩放步恒等跳过；多路皆空时**直返原 buffer**；
-/// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append）；只在 PiP 或点击高亮开启时被调用
+///   零栅格化）；缩放仿射 nil 时缩放步恒等跳过；键帽快照 nil/文本空时键帽路**零渲染**
+///   （文本不变的常态帧键帽位图缓存直取，零栅格化零 CoreText 排版）；多路皆空时**直返原 buffer**；
+/// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append）；只在任一效果缝在位时被调用
 ///   （调用方门控：`SCStreamRecorder` 按注入缝在位与否装配合成器）。
-/// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与三处缓存（圆角
-/// mask / 点击环 mask / 笔画位图单槽）无需加锁。
+/// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与四处缓存（圆角
+/// mask / 点击环 mask / 笔画位图单槽 / 键帽位图单槽）无需加锁。
 final class PiPCompositor {
     /// 单实例复用的渲染上下文（简报钉死：useSoftwareRenderer: false）。
     let context = CIContext(options: [.useSoftwareRenderer: false])
@@ -173,6 +175,20 @@ final class PiPCompositor {
                                    canvasWidth: Int,
                                    canvasHeight: Int,
                                    image: CIImage)?
+
+    /// 键帽位图单槽缓存（P4）：键为快照值（文本 + 样式）——键帽位图只依赖快照，画布无关
+    /// （底部居中的摆放平移逐帧做，零成本仿射）。文本不变（linger 窗口内）逐帧零分配直取；
+    /// 新按键/样式切换使快照不等即重排 CoreText 重栅格化。
+    private var keycapLayerCache: (snapshot: KeyboardOverlaySnapshot, image: CIImage)?
+
+    /// 键帽底边距（捕获像素，简报钉定）：键帽底边距画布下沿 24px，水平居中。
+    static let keycapBottomMargin: CGFloat = 24
+    /// 键帽配色（P4 两色单选）：主色 = 深底白字（半透明 0.65，悬浮观感不遮底内容重心），
+    /// 备选色 = 浅底黑字（0.85）。取色在合成器（SettingsStore 只存布尔档位）。
+    private static let keycapPrimaryFill = (CGFloat(0.1), CGFloat(0.1), CGFloat(0.1), CGFloat(0.65))
+    private static let keycapPrimaryText = (CGFloat(1), CGFloat(1), CGFloat(1), CGFloat(1))
+    private static let keycapAlternateFill = (CGFloat(1), CGFloat(1), CGFloat(1), CGFloat(0.85))
+    private static let keycapAlternateText = (CGFloat(0), CGFloat(0), CGFloat(0), CGFloat(1))
 
     /// 笔画彩色位图（premultiplied RGBA：笔画带各自色值、其余透明，边沿 AA）。
     /// 坐标：笔画点为底帧归一化（左上原点、y 向下 0…1），CGContext 原点左下、y 向上——
@@ -226,13 +242,14 @@ final class PiPCompositor {
         self.pixelSize = pixelSize
     }
 
-    /// 逐帧合成（二期 P2：签名增 `strokes`，合成次序总则 v2 终态）。screen 为底；
-    /// 全效果缺省直返 screen（零渲染直返原 buffer，与一期逐字节一致）。单效果缺省时
-    /// 该路零渲染跳过，另一路照常。
+    /// 逐帧合成（Task 9 终态签名：签名增 `keyboardOverlay`，位于 `zoomTransform` 与 `at`
+    /// 之间、其后无参——终态签名钉定，`at` 之后不得再加参）。screen 为底；全效果缺省直返
+    /// screen（零渲染直返原 buffer，与一期逐字节一致）。单效果缺省时该路零渲染跳过，另路照常。
     ///
-    /// 次序 v2（规格 §5）：底帧 → 点击环 → **标记笔画**（两者皆内容锚定层）→ **统一施加缩放**
-    /// → PiP（视口锚定层）。笔画与环同在缩放之下——笔画随内容一起缩放（content-anchored），
-    /// Task 9 的 keyboardOverlay 才追加在 PiP 之后的视口锚定位置。
+    /// 次序终态（Task 9 钉定，修订 Task 8 注释中「键帽在 PiP 之后」的预告）：底帧 → 点击环
+    /// → **标记笔画**（两者皆内容锚定层）→ **统一施加缩放** → **键帽**（底部居中，视口锚定层）
+    /// → PiP（视口锚定层最上——PiP 撞键帽时 PiP 胜出）。笔画与环同在缩放之下——笔画随内容
+    /// 一起缩放（content-anchored）；键帽与 PiP 在缩放之上（viewport-anchored）。
     /// `zoomTransform` 为 CI 画布空间（y 向上，与 placeClickOverlay/placePip 的换算口径同源）
     /// 的仿射；`transformed(by:)` 是惰性 CI recipe，热路径零位图分配。
     @discardableResult
@@ -242,9 +259,10 @@ final class PiPCompositor {
                    clickOverlay: ClickOverlayState? = nil,
                    strokes: MarkingStrokeSnapshot? = nil,
                    zoomTransform: CGAffineTransform? = nil,
+                   keyboardOverlay: KeyboardOverlaySnapshot? = nil,
                    at pts: CMTime,
                    into context: CIContext) -> CVPixelBuffer {
-        guard pip != nil || clickOverlay != nil || strokes != nil || zoomTransform != nil else { return screenFrame } // 全缺省：零开销直返原 buffer
+        guard pip != nil || clickOverlay != nil || strokes != nil || zoomTransform != nil || keyboardOverlay != nil else { return screenFrame } // 全缺省：零开销直返原 buffer
         // 画布尺寸以 screenFrame 实测为准（修复轮 Minor #2）：与 init pixelSize 失配时按
         // 实测求交、换算与出图——不得误判越界直通，也不得输出错误尺寸。
         let bounds = CGRect(
@@ -268,7 +286,12 @@ final class PiPCompositor {
         if let zoomTransform {
             composed = (composed ?? base).transformed(by: zoomTransform)
         }
-        // PiP（视口锚定层，v2）：缩放后的画面为底。rect 空 / 不相交 / 源异常任一失败即
+        // 键帽层（P4，视口锚定层）：底部居中圆角键帽，缩放之上、PiP 之下。快照 nil/文本空/
+        // 位图失败本路直通；文本不变逐帧直取位图单槽缓存（零栅格化零排版）。
+        if let keyboardOverlay, let keycap = placeKeyboardOverlay(keyboardOverlay, in: bounds) {
+            composed = keycap.composited(over: composed ?? base)
+        }
+        // PiP（视口锚定层最上，v2）：键帽后的画面为底。rect 空 / 不相交 / 源异常任一失败即
         // 本路零渲染直通。
         if let pip, let pipFrame {
             composed = placePip(pip, pipFrame: pipFrame, in: bounds, over: composed ?? base)
@@ -300,6 +323,76 @@ final class PiPCompositor {
         let layer = CIImage(cgImage: layerCG).cropped(to: bounds)
         strokesMaskCache = (snapshot, width, height, layer) // 单槽缓存（快照变更即整体换装）
         return layer
+    }
+
+    /// 键帽摆放（P4）：圆角键帽位图贴画布**底部居中**（底边距 24px，简报钉定），出画由
+    /// `cropped(to:)` 自然裁剪。文本空 / 位图生成失败返回 nil = 本帧不合成（直通不丢帧）。
+    /// 位图单槽缓存：文本 + 样式不变逐帧直取（零栅格化零 CoreText 排版）；摆放只是平移
+    /// 仿射（CI 惰性 recipe，逐帧零成本），故缓存与画布尺寸无关。
+    private func placeKeyboardOverlay(_ overlay: KeyboardOverlaySnapshot, in bounds: CGRect) -> CIImage? {
+        guard !overlay.text.isEmpty else { return nil }
+        let keycap: CIImage
+        if let cache = keycapLayerCache, cache.snapshot == overlay {
+            keycap = cache.image
+        } else {
+            guard let cg = Self.makeKeycapCGImage(for: overlay) else { return nil }
+            keycap = CIImage(cgImage: cg)
+            keycapLayerCache = (overlay, keycap) // 单槽缓存（快照变更即整体换装）
+        }
+        let extent = keycap.extent
+        guard extent.width > 0, extent.height > 0, extent.width.isFinite, extent.height.isFinite else {
+            return nil
+        }
+        // 缓冲坐标（左上原点）→ CI 坐标（左下原点）同 placePip 口径（ciY = 画布高 − 缓冲 y）：
+        // 键帽缓冲底边 = 画布高 − 24 → CI 原点 y = 画布高 − (画布高 − 24) = 24，恰为底边距。
+        let ciOrigin = CGPoint(x: bounds.midX - extent.width / 2, y: Self.keycapBottomMargin)
+        return keycap.transformed(by: CGAffineTransform(translationX: ciOrigin.x, y: ciOrigin.y))
+            .cropped(to: bounds)
+    }
+
+    /// 键帽位图（圆角矩形底 + CoreText 文字，文字渲染沿用合成器位图生成惯例）：系统字体
+    /// 字号字面直用（SettingsStore 档位 12/14/18 即捕获像素，与 ClickOverlayState
+    /// radiusInPixels 同口径，栅格化时按 1x 捕获像素取值）；两色单选在此外观定值。
+    /// 布局：水平内边距 0.7×字号、垂直 0.45×字号、圆角 0.28×键帽高，文字基线贴下缘内边距。
+    private static func makeKeycapCGImage(for overlay: KeyboardOverlaySnapshot) -> CGImage? {
+        let fontSize = CGFloat(overlay.style.fontSize)
+        guard fontSize > 0, fontSize.isFinite else { return nil }
+        let (fill, text) = overlay.style.colorAlternate
+            ? (keycapAlternateFill, keycapAlternateText)
+            : (keycapPrimaryFill, keycapPrimaryText)
+        let font = CTFontCreateUIFontForLanguage(.system, fontSize, nil)
+        guard let font else { return nil } // 字体创建失败：无键帽直通（不丢帧）
+        let attributes: [NSAttributedString.Key: Any] = [
+            kCTFontAttributeName as NSAttributedString.Key: font,
+            kCTForegroundColorAttributeName as NSAttributedString.Key: CGColor(
+                red: text.0, green: text.1, blue: text.2, alpha: text.3),
+        ]
+        let line = CTLineCreateWithAttributedString(NSAttributedString(string: overlay.text, attributes: attributes))
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        let textWidth = CGFloat(CTLineGetTypographicBounds(line, &ascent, &descent, nil))
+        let textHeight = ascent + descent
+        guard textWidth > 0, textWidth.isFinite, textHeight > 0, textHeight.isFinite else { return nil }
+
+        let padX = fontSize * 0.7
+        let padY = fontSize * 0.45
+        let width = max(1, Int((textWidth + padX * 2).rounded(.up)))
+        let height = max(1, Int((textHeight + padY * 2).rounded(.up)))
+        let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let context else { return nil }
+        // 圆角底（位图坐标 y 向上，与 CI 画布同向，无翻转）。
+        let radius = CGFloat(height) * 0.28
+        let capRect = CGRect(x: 0, y: 0, width: width, height: height)
+        context.addPath(CGPath(roundedRect: capRect, cornerWidth: radius, cornerHeight: radius, transform: nil))
+        context.setFillColor(CGColor(red: fill.0, green: fill.1, blue: fill.2, alpha: fill.3))
+        context.fillPath()
+        // CoreText 文字：基线贴下缘内边距（位图不翻 CTM，CoreText 直绘即正立）。
+        context.textPosition = CGPoint(x: padX, y: padY)
+        CTLineDraw(line, context)
+        return context.makeImage()
     }
 
     /// PiP 摆放（原 composite 主体逐行搬移；`base` 形参名保留，v2 下传入的底图是

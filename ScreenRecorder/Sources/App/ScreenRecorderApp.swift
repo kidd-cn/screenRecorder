@@ -45,6 +45,18 @@ final class AppAssembly: ObservableObject {
     /// 笔画快照桥（P2）：MainActor 画布 → video 队列合成取数缝的锁保护过河（装配层订阅
     /// `$strokes` 灌入，coordinator 经它装配 recorder.strokeOverlayProvider）。
     private let markingStore = MarkingStrokeStore()
+    /// 键帽聚合状态机（P4，Task 8）：监听层只写事件；装配层持有（装配红线），UI 可观测。
+    private let keyboardOverlayState: KeyboardOverlayState
+    /// 键帽快照桥（P4）：MainActor 状态机 → video 队列合成取数缝的锁保护过河
+    /// （KeyboardMonitor 是唯一写入方，coordinator 经它装配 recorder.keyboardOverlayProvider）。
+    private let keyboardOverlayStore: KeyboardOverlaySnapshotStore
+    /// 键盘监听器（P4）：所有权进本容器（装配红线）；enabled 开关以设置快照在每场开录
+    /// 重对齐（startRecording），装机/摘除由录制生命周期订阅驱动（$state；recording/paused
+    /// 都保持监听——暂停不是生命周期事件，输出侧已有暂停段剔除）。授权判定是 start 内的
+    /// 只读预检（缺授权降级仅本地监听，无弹窗）——弹窗只归 PermissionOnboardingView 引导。
+    private let keyboardMonitor: KeyboardMonitor
+    /// 键盘装配订阅保活（$state 生命周期驱动）。
+    private var keyboardCancellables: Set<AnyCancellable> = []
     /// 标记覆盖层控制器（P2）：面板/事件泵/显隐，init 末段装配（闭包捕获 self）。
     private lazy var markingOverlayController = MarkingOverlayController(
         canvas: markingCanvas,
@@ -85,10 +97,27 @@ final class AppAssembly: ObservableObject {
         let fileStore = RecordingFileStore(baseDirectory: settings.outputDirectory)
         let cameraPiP = CameraPiPWindowController()
         let clickHighlightTracker = ClickHighlightTracker(enabled: settings.clickHighlightEnabled)
+        // P4 键帽链：状态机 + 快照桥 + 监听器（样式/停留时长是 live 语义——provider 逐拍
+        // 读当前设置，偏好改动即时生效；enabled 初值取设置快照，开录由 startRecording 重对齐）。
+        let keyboardOverlayState = KeyboardOverlayState()
+        let keyboardOverlayStore = KeyboardOverlaySnapshotStore()
+        let keyboardMonitor = KeyboardMonitor(
+            state: keyboardOverlayState,
+            store: keyboardOverlayStore,
+            enabled: settings.keyboardOverlayEnabled,
+            // live 读缝强捕获 settings 局部量（两段式初始化：此处 self 尚未构造完成，
+            // 不得捕获 self；settings 单例与容器同寿，闭包持之无环）。
+            styleProvider: {
+                KeyboardOverlayStyle(
+                    colorAlternate: settings.keyboardOverlayColorIsAlternate,
+                    fontSize: settings.keyboardOverlayFontSize)
+            },
+            lingerProvider: { settings.keyboardOverlayLingerSeconds })
         let coordinator = RecordingSessionCoordinator(
             cameraPiP: cameraPiP,
             clickHighlightTracker: clickHighlightTracker,
-            strokeSnapshotProvider: markingStore.currentSnapshot)
+            strokeSnapshotProvider: markingStore.currentSnapshot,
+            keyboardSnapshotProvider: keyboardOverlayStore.currentSnapshot)
         let notifier = UNRecordingNotifier()
         let controller = CaptureController(
             session: coordinator,
@@ -153,6 +182,22 @@ final class AppAssembly: ObservableObject {
         )
         self.cameraPiP = cameraPiP
         self.clickHighlightTracker = clickHighlightTracker
+        self.keyboardOverlayState = keyboardOverlayState
+        self.keyboardOverlayStore = keyboardOverlayStore
+        self.keyboardMonitor = keyboardMonitor
+        // P4 键盘监听生命周期（record-only，与 ClickHighlightTracker start/stop 对称）：
+        // recording/paused 装机、其余态摘除。@Published 在 willSet 阶段同步发射：进入
+        // .recording 的 start() 发生在 begin 完成、流未出帧之前——键帽自首帧可用；离开
+        // 录制的 stop() 清状态机（残影防御：收尾前最后一击不得淡入下一场开头）。
+        controller.$state
+            .sink { state in
+                if state == .recording || state == .paused {
+                    keyboardMonitor.start()
+                } else {
+                    keyboardMonitor.stop()
+                }
+            }
+            .store(in: &keyboardCancellables)
         // 终审 F1：装配容器向退出保护登记（弱引用——容器由 App 的 @StateObject 强持有，
         // AppDelegate 不得反向持强）。登记时序与装配单例的论证见 AppDelegate.registeredAssembly。
         AppDelegate.registeredAssembly = self
@@ -218,6 +263,10 @@ final class AppAssembly: ObservableObject {
         setMarkingEnabled(false)
         markingCanvas.clear()
         markingGeometry = nil
+        // P4 键帽 enabled 快照语义：开录时刻以设置重对齐（录制中途改设置不影响本场；
+        // 与 clickHighlightEnabled 同纪律）。装机由 $state 订阅在进入 recording 时驱动，
+        // 此处只对齐开关（监听中翻 false 立即摘除，KeyboardMonitor.setEnabled 自理）。
+        keyboardMonitor.setEnabled(settings.keyboardOverlayEnabled)
         try? fileStore.ensureDirectory()
         let config = Self.makeConfiguration(
             settings: settings,

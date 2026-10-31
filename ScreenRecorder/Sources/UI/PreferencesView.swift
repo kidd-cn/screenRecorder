@@ -159,6 +159,7 @@ private struct GeneralTab: View {
 /// 录制源页：系统声音 / 麦克风区（终审 F2：包含麦克风=开始时刻快照；录制中静音=live 下发；
 /// 音量滑杆=live 增益）、摄像头画中画（T15）、鼠标点击高亮（T16，默认关）、
 /// 点击自动缩放（P1a，默认关；档位三选）、点击音效（P1b，默认关）、
+/// 「键盘按键可视化」组（P4：开关 + 两色单选 + 字号档位 + 停留时长档位 + 两行说明）、
 /// 「窗口捕获」组（T20：当前目标 + 选择器入口 + 快捷键提示）。
 private struct RecordingSourcesTab: View {
     @ObservedObject var settings: SettingsStore
@@ -196,6 +197,38 @@ private struct RecordingSourcesTab: View {
             // P1b 点击音效：opt-in 默认关（快照语义同点击高亮/自动缩放——下一场录制生效）；
             // 音量固定内置（spec 钉不设滑杆），只进录制音轨、绝无实时外放。
             Toggle("点击音效", isOn: $settings.clickSoundEnabled)
+            // P4 键盘按键可视化：opt-in 默认关。enabled 是开录快照语义（下一场录制生效）；
+            // 颜色/字号/停留时长是 live 语义（键帽样式逐帧经 provider 读当前设置，改动对
+            // 进行中的录制即时生效，SettingsStore 载入野值钳回默认档）。
+            Section("键盘按键可视化") {
+                Toggle("启用", isOn: $settings.keyboardOverlayEnabled)
+                Picker("颜色", selection: $settings.keyboardOverlayColorIsAlternate) {
+                    Text("主色").tag(false)
+                    Text("备选色").tag(true)
+                }
+                .pickerStyle(.radioGroup)
+                .horizontalRadioGroupLayout()
+                .disabled(!settings.keyboardOverlayEnabled)
+                Picker("字号", selection: $settings.keyboardOverlayFontSize) {
+                    Text("12").tag(12)
+                    Text("14").tag(14)
+                    Text("18").tag(18)
+                }
+                .disabled(!settings.keyboardOverlayEnabled)
+                Picker("停留时长", selection: $settings.keyboardOverlayLingerSeconds) {
+                    Text("1 秒").tag(1.0)
+                    Text("2 秒").tag(2.0)
+                    Text("3 秒").tag(3.0)
+                }
+                .disabled(!settings.keyboardOverlayEnabled)
+                // 说明行（简报钉定原文两行，逐字）。
+                Text("拼音输入法组合期显示原始字母")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("检测到安全输入时暂停显示")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
             Section("窗口捕获") {
                 windowTargetRow
                 Button("选择窗口…") { onPickWindowTarget() }

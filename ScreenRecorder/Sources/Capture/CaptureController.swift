@@ -95,6 +95,10 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     /// 笔画快照桥读缝（P2，AppAssembly 注入）：MainActor 画布经 MarkingStrokeStore 过河到
     /// video 队列。nil（未装配）= 笔画路全关（合成器不因标记装配）。
     private let strokeSnapshotProvider: (() -> MarkingStrokeSnapshot?)?
+    /// 键帽快照桥读缝（P4，AppAssembly 注入）：MainActor 状态机经 KeyboardOverlaySnapshotStore
+    /// 过河到 video 队列。nil（未装配）= 键帽路全关（合成器不因键帽装配）；键帽是视口锚定
+    /// 层（画布底部居中），与点击/缩放不同，**不需要**采集几何。
+    private let keyboardSnapshotProvider: (() -> KeyboardOverlaySnapshot?)?
     /// P1a 暂停门（spec §5「暂停时不触发」钉死）：`.paused` 时丢弃**新**缩放点击。
     /// 无锁，靠状态机的**时间互斥**保证无并发：begin 的复位写在 tracker 装机之前完成
     ///（begin 本体非主 actor、跑在协作线程；而 pause/resume 由 @MainActor
@@ -108,13 +112,15 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
          stopBelow: Int64 = 500_000_000,
          cameraPiP: CameraPiPWindowController? = nil,
          clickHighlightTracker: ClickHighlightTracker? = nil,
-         strokeSnapshotProvider: (() -> MarkingStrokeSnapshot?)? = nil) {
+         strokeSnapshotProvider: (() -> MarkingStrokeSnapshot?)? = nil,
+         keyboardSnapshotProvider: (() -> KeyboardOverlaySnapshot?)? = nil) {
         self.diskProvider = diskProvider
         self.warnBelow = warnBelow
         self.stopBelow = stopBelow
         self.cameraPiP = cameraPiP
         self.clickHighlightTracker = clickHighlightTracker
         self.strokeSnapshotProvider = strokeSnapshotProvider
+        self.keyboardSnapshotProvider = keyboardSnapshotProvider
     }
 
     func begin(_ config: RecordingConfiguration) async throws {
@@ -171,6 +177,11 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // SCStreamRecorder.strokeOverlayProvider 注释）。
         if wantsStrokes {
             recorder.strokeOverlayProvider = strokeSnapshotProvider
+        }
+        // P4 键帽取数缝：桥在位即装配（逐帧无键帽由合成器直返兜住，见
+        // SCStreamRecorder.keyboardOverlayProvider 注释）。视口锚定层，无需采集几何。
+        if let keyboardSnapshotProvider {
+            recorder.keyboardOverlayProvider = keyboardSnapshotProvider
         }
         // PiP 注入缝（T15）：合成器逐帧取最新摄像头帧与浮窗位置；都取不到时合成器直返
         // 原 buffer，与直通路径等价。

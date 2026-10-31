@@ -81,6 +81,12 @@ final class SCStreamRecorder: NSObject {
     /// （生产恒装配）即视「笔画可能活跃」，合成器按需装配；逐帧零笔画由合成器
     /// 全缺省直返兜住（零渲染直通，与一期逐字节一致）。仅 video 队列调用。
     var strokeOverlayProvider: (() -> MarkingStrokeSnapshot?)?
+    /// P4 键帽可视化注入缝：当帧键帽快照取数（KeyboardOverlaySnapshotStore 锁保护读，
+    /// MainActor 状态机经桥过河，zoomStateProvider 同款线程模型）。nil（未注入）= 键帽路
+    /// 不装配；注入后返回 nil = 当帧无键帽直通（无按键 / linger 到期 / 安全输入均归一为
+    /// nil，热路径零渲染）。样式与停留时长在快照内（live 语义逐帧携带），enabled 开关由
+    /// 装配层控制监听层——监听不刷新桥即恒 nil。仅 video 队列调用。
+    var keyboardOverlayProvider: (() -> KeyboardOverlaySnapshot?)?
 
     /// `stop()` 完成后的成片 URL；nil 表示本次无产出（启动失败 / 流失败 / 零样本）。
     private(set) var finishedFileURL: URL?
@@ -150,7 +156,10 @@ final class SCStreamRecorder: NSObject {
         let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
         let zoomActive = config.autoZoomEnabled && zoomStateProvider != nil
         let strokesActive = strokeOverlayProvider != nil
-        if pipActive || clickActive || zoomActive || strokesActive {
+        // P4 键帽路同 strokes 惯例：凡装配了快照桥（生产恒装配）即视「键帽可能活跃」，
+        // 合成器按需装配；逐帧无键帽由合成器全缺省直返兜住（零渲染直通）。
+        let keyboardActive = keyboardOverlayProvider != nil
+        if pipActive || clickActive || zoomActive || strokesActive || keyboardActive {
             pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
         }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
@@ -579,6 +588,7 @@ extension SCStreamRecorder: SCStreamOutput {
                     clickOverlay: clickOverlayProvider?(),
                     strokes: strokeOverlayProvider?(),
                     zoomTransform: zoomStateProvider?(),
+                    keyboardOverlay: keyboardOverlayProvider?(),
                     at: shiftedPTS,
                     into: pipCompositor.context)
             } else {

@@ -575,12 +575,14 @@ final class PiPCompositorStrokesTests: XCTestCase {
     }
 
     /// 回归钉测（简报 Step 1 逐字）：全入参 nil（含 strokes）仍逐字节直返原 buffer。
+    /// Task 9 扩展（派单裁定允许的语义内扩展）：all-nil 直通守卫必须延伸覆盖新参数
+    /// `keyboardOverlay`——显式传 nil 钉住「键帽参数入签名后直通纪律不破」。
     func testAllNilStillReturnsSameBuffer() {
         let compositor = makeCompositor()
         let screen = makeScreen()
         let result = compositor.composite(
             screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
-            strokes: nil, zoomTransform: nil, at: .zero, into: softwareContext)
+            strokes: nil, zoomTransform: nil, keyboardOverlay: nil, at: .zero, into: softwareContext)
         XCTAssertTrue(result === screen, "全效果缺省必须直返原 buffer（=== 同实例，新参数不得破坏直通）")
     }
 
@@ -800,5 +802,132 @@ final class PiPCompositorZoomTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Int(actual.red), 220, message, file: file, line: line)
         XCTAssertTrue(abs(Int(actual.green) - 255) <= 3, "\(message)（G 应保持 255）", file: file, line: line)
         XCTAssertLessThanOrEqual(Int(actual.blue), 20, message, file: file, line: line)
+    }
+}
+
+// MARK: - Task 9 键帽合成（次序终态：底帧 → 环 → 笔画 → zoomTransform → 键帽 → PiP）
+
+final class PiPCompositorKeyboardTests: XCTestCase {
+    /// 软渲染上下文：无头环境确定性出图（生产用 compositor 自带的 GPU context）。
+    private lazy var softwareContext = CIContext(options: [.useSoftwareRenderer: true])
+
+    private let canvasSize = CGSize(width: 320, height: 240)
+    private let screenColor = BGRAColor(blue: 0, green: 255, red: 0, alpha: 255) // 纯绿
+    private let pipColor = BGRAColor(blue: 255, green: 0, red: 0, alpha: 255)    // 纯蓝
+    /// 两色底帧分界 x=140：键帽采样点在缩放前/后映射到的底帧内容分居分界两侧（用例内推导）。
+    private let splitX = 140
+
+    private func makeCompositor() -> PiPCompositor {
+        PiPCompositor(pixelSize: canvasSize)
+    }
+
+    /// 左绿右蓝两色底帧（分界 x=140）：键帽半透明底叠在内容上，读数方向随底层内容色——
+    /// 以此区分「键帽下面是什么内容」，钉缩放次序。
+    private func makeSplitScreen() -> CVPixelBuffer {
+        let buffer = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return buffer }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        for row in 0..<CVPixelBufferGetHeight(buffer) {
+            let rowBase = base.advanced(by: row * bytesPerRow)
+            for column in splitX..<CVPixelBufferGetWidth(buffer) {
+                let pixel = rowBase.advanced(by: column * 4).assumingMemoryBound(to: UInt8.self)
+                pixel[0] = pipColor.blue
+                pixel[1] = pipColor.green
+                pixel[2] = pipColor.red
+                pixel[3] = pipColor.alpha
+            }
+        }
+        return buffer
+    }
+
+    private func keycap(text: String = "A",
+                        colorAlternate: Bool = false,
+                        fontSize: Int = 14) -> KeyboardOverlaySnapshot {
+        KeyboardOverlaySnapshot(text: text,
+                                style: KeyboardOverlayStyle(colorAlternate: colorAlternate, fontSize: fontSize))
+    }
+
+    /// 键帽「半透明暗底叠在底层内容上」的带式断言：主色键帽填充（≈65% 黑）压暗底层后，
+    /// 主分量显著低于全亮底色但远高于 0——「显著低于全亮」钉键帽在场，「显著高于 0」
+    /// 钉半透明（内容透出）。精确值取决于 CI 工作色彩空间混合口径（点击环同款经验），
+    /// 钉带宽不钉点；次要通道同步压暗（不得出现全亮杂色/纯文字白）。
+    private func assertDimmed(
+        _ actual: BGRAColor,
+        dominant: Int,
+        otherA: Int,
+        otherB: Int,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertGreaterThanOrEqual(dominant, 40, "\(message)（键帽必须在场，主分量不得全透）", file: file, line: line)
+        XCTAssertLessThanOrEqual(dominant, 220, "\(message)（键帽必须压暗内容，主分量不得全亮）", file: file, line: line)
+        XCTAssertLessThanOrEqual(max(otherA, otherB), 120, "\(message)（次要通道应同步压暗）", file: file, line: line)
+    }
+
+    /// 简报 Step 1 逐字（次序终态钉测）：键帽画在 zoomTransform **之后**（视口锚定，
+    /// 不随内容迁移）、PiP **之前**（被浮窗覆盖时键帽在下）。几何推导（320×240 软渲染）：
+    /// - 键帽 "A"（主色、字号 14）：capW = ⌈textW + 2×0.7×14⌉ ≈ 29-31、capH ≈ 28-30，
+    ///   底边距 24 → 缓冲 rect ≈ x [144.5,175.5] / y [186,216]；采样点 (150, 202) 落在
+    ///   键帽左侧留白带（字形墨迹 x ≈ 155–165，距键帽边 ≥ 4px 避 AA、距墨迹 ≥ 5px）。
+    /// - zoom：normalized center (0.25, 1.0) → 窗口钳制后 c=(100,165)，仿射 p ↦ 1.6p + (0,−144)
+    ///   （CI y 向上；ZoomTransforms 真源构造）。输出点 q 显示的内容 = T⁻¹(q)。
+    /// - 无缩放帧：(150,202) 底帧 x=150 ≥ 140 → 蓝；缩放帧：T⁻¹(CI(150,38)) = (93.75, 126.25)
+    ///   → x < 140 → 绿。同一采样点两帧读数跟随底层内容变暗变蓝/变绿 = 键帽恒在原位
+    ///   （若键帽被画在缩放之下、随内容迁移，缩放帧该点将不再被键帽覆盖而读出全亮内容色）。
+    /// - PiP rect (168,182,64,48) 盖住键帽 rect 的**右半**：(170,202) 在键帽内且被 PiP
+    ///   覆盖 → 恒读 PiP 纯色（键帽在 PiP 之下）；键帽左半 (150,202) 在 PiP 之外，露出
+    ///   「键帽叠缩放内容」的次序读数。(110,202) 在键帽 rect 左界之外（x < 144.5）→
+    ///   缩放帧读全亮绿（键帽只占底部居中一条，未横向蔓延）。
+    func testKeyboardOverlayRendersBottomCenterAboveZoomUnderPip() {
+        let compositor = makeCompositor()
+        let screen = makeSplitScreen()
+        let pip = makeColorBuffer(width: 64, height: 48, color: pipColor)!
+        let zoom = ZoomTransforms.contentTransform(
+            center: CGPoint(x: 0.25, y: 1.0), level: 1.6, progress: 1,
+            in: CGRect(origin: .zero, size: canvasSize))!
+
+        // 缩放 + PiP + 键帽同帧（次序终态的三层共存）。
+        let output = compositor.composite(
+            screenFrame: screen, pip: pip,
+            pipFrame: PiPFrame(rectInCapturePixels: CGRect(x: 168, y: 182, width: 64, height: 48)),
+            clickOverlay: nil, strokes: nil,
+            zoomTransform: zoom, keyboardOverlay: keycap(), at: .zero, into: softwareContext)
+
+        XCTAssertFalse(output === screen, "有键帽必须合成输出（新 buffer，不污染采集侧缓冲）")
+        assertColor(samplePixel(output, x: 170, y: 202), equals: pipColor, "键帽内被 PiP 覆盖的右半部读 PiP 纯色——键帽在 PiP 之下")
+        let underCap = samplePixel(output, x: 150, y: 202)
+        assertDimmed(underCap, dominant: Int(underCap.green), otherA: Int(underCap.red), otherB: Int(underCap.blue),
+                     "键帽左侧留白带（150,202，PiP 之外）：缩放帧底层为绿（x<140 区内容）→ 读数应为压暗绿")
+        assertColor(samplePixel(output, x: 110, y: 202), equals: screenColor, "键帽 rect 左界之外保持全亮内容——键帽仅底部居中一条")
+
+        // 同底帧去缩放对照：同一采样点底层变蓝（恒等映射 x=150 ≥ 140）→ 读数应为压暗蓝。
+        let identity = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: nil, strokes: nil,
+            zoomTransform: nil, keyboardOverlay: keycap(), at: .zero, into: softwareContext)
+        let underCapIdentity = samplePixel(identity, x: 150, y: 202)
+        assertDimmed(underCapIdentity, dominant: Int(underCapIdentity.blue), otherA: Int(underCapIdentity.green),
+                     otherB: Int(underCapIdentity.red),
+                     "无缩放帧同点底层为蓝 → 读数应为压暗蓝（与缩放帧的压暗绿对照钉视口锚定）")
+        assertColor(samplePixel(identity, x: 10, y: 10), equals: screenColor, "远端屏幕内容不受键帽影响")
+    }
+
+    /// 激活守卫钉测：keyboardOverlay 非 nil、其余全 nil 必须合成输出——all-nil 直通守卫
+    /// 若漏收 keyboardOverlay（回归成只看其余参数），键帽单独开启时会被静默吞帧，本用例即红。
+    func testKeyboardOverlayAloneProducesOutput() {
+        let compositor = makeCompositor()
+        let screen = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil, strokes: nil,
+            zoomTransform: nil, keyboardOverlay: keycap(), at: .zero, into: softwareContext)
+
+        XCTAssertFalse(output === screen, "仅键帽开启也必须合成输出（不得落入 all-nil 直通）")
+        let underCap = samplePixel(output, x: 150, y: 202)
+        assertDimmed(underCap, dominant: Int(underCap.green), otherA: Int(underCap.red), otherB: Int(underCap.blue),
+                     "纯绿底上键帽留白带应为压暗绿")
+        assertColor(samplePixel(output, x: 10, y: 10), equals: screenColor, "键帽之外保持屏幕内容")
     }
 }
