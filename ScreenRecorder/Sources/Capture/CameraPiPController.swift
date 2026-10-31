@@ -101,6 +101,14 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private var processedFrameSequence: UInt64 = 0
     private var deliveredFrameSequence: UInt64 = 0
     private var processingGeneration: UInt64 = 0
+    /// newest-wins 过载合并（修复轮 1 Important 1）：串行 Vision 队列是序列化不是背压——
+    /// 分割吞吐低于采集率时（Intel + .balanced 可能）逐帧排队即无界增长 + PiP 越来越陈。
+    /// 门控 = 在途恒 ≤1、新帧到达只替换 pending 槽（旧合并帧随之释放）：管线驻留 ≤2 帧、
+    /// Vision 队列恒 ≤1 job、PiP 陈旧度收敛到一个处理周期。stop 冲槽复位闩（见 stop）。
+    /// 这是**过载策略**（过载时允许丢帧）；「mask nil → 原帧直通」的不可得语义不经此路。
+    private var processingInFlight = false
+    private var pendingFrameSlot: CVPixelBuffer?
+    private var pendingTicketSlot: ProcessingTicket?
 
     /// 预览层（`start()` 成功后非 nil；浮窗安装，浮窗负责 frame 与圆角裁切）。
     private(set) var previewLayer: AVCaptureVideoPreviewLayer?
@@ -203,9 +211,14 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
             latestFrame = nil
             // P5：清处理流水线序号并推进场次代号——stop 前派发的在途处理完成后以场次
             // 失配被拒，不得在清帧后复活旧帧进下一场开头（latestFrame 语义与一期一致）。
+            // 修复轮 1：同时冲掉 newest-wins 合并槽并复位在途闩——stop 后管线驻留归零
+            //（pending 已冲；在途 job 完成后被场次守卫拒绝且不复位闩），下一场干净开工。
             processedFrameSequence = 0
             deliveredFrameSequence = 0
             processingGeneration &+= 1
+            pendingFrameSlot = nil
+            pendingTicketSlot = nil
+            processingInFlight = false
         }
         previewLayer = nil // 浮窗已由装配层收起；下次录制重新安装
     }
@@ -230,37 +243,73 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
         deliverFrameForProcessing(sampleBuffer, processor: processor)
     }
 
+    /// 处理票据：序号供乱序守卫（慢帧后到不得倒退），场次代号供 stop 边界守卫。
+    /// （结构体而非带标签元组：元组标签在 withStateLock 泛型返回位上引发推断冲突。）
+    private struct ProcessingTicket {
+        let sequence: UInt64
+        let generation: UInt64
+    }
+
     /// 帧入处理流水线（video 队列串行）：retain 像素缓冲（独立于 CMSampleBuffer 生命周期，
-    /// recordFrameIfNeeded 同语义）→ 取票据（序号 + 场次代号）→ 派异步处理。不阻塞采集
-    /// 回调（分割/渲染在 Vision 专用队列与协作线程，video 队列只排队）。
+    /// recordFrameIfNeeded 同语义）→ 取票据 → 过 newest-wins 门（修复轮 1）→ 派异步处理。
+    /// 不阻塞采集回调（分割/渲染在 Vision 专用队列与协作线程，video 队列只排队）。
     private func deliverFrameForProcessing(_ sampleBuffer: CMSampleBuffer,
                                            processor: CameraBackgroundProcessor) {
         guard CMSampleBufferDataIsReady(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        let ticket = nextProcessingTicket()
+        // 取票据 + 过门（单锁段）：在途未完 → 新帧只替换 pending 槽（旧合并帧随之释放，
+        // 内存有界）；空闲 → 占闩、锁外开工（锁内不得派 Task/await）。
+        let (ticket, startNow) = frameLock.withStateLock { () -> (ticket: ProcessingTicket, startNow: Bool) in
+            processedFrameSequence &+= 1
+            let ticket = ProcessingTicket(
+                sequence: processedFrameSequence, generation: processingGeneration)
+            if processingInFlight {
+                pendingFrameSlot = pixelBuffer
+                pendingTicketSlot = ticket
+                return (ticket, false)
+            }
+            processingInFlight = true
+            return (ticket, true)
+        }
+        if startNow {
+            spawnProcessing(pixelBuffer, ticket: ticket, processor: processor)
+        }
+    }
+
+    /// 派单帧异步处理（在途任务完成接力 pending 时同样走此入口）。
+    private func spawnProcessing(_ pixelBuffer: CVPixelBuffer,
+                                 ticket: ProcessingTicket,
+                                 processor: CameraBackgroundProcessor) {
         Task { [weak self] in
             let processed = await processor.process(pixelBuffer)
-            self?.storeProcessedFrame(processed, ticket: ticket)
+            self?.finishProcessing(processed, ticket: ticket, processor: processor)
         }
     }
 
-    /// 处理票据（video 队列取号）：序号供乱序守卫，场次代号供 stop 边界守卫。
-    private func nextProcessingTicket() -> (sequence: UInt64, generation: UInt64) {
+    /// 处理完成（协作线程）：入库守卫（序号更大且同场次）+ pending 接力——有合并帧则
+    /// 在途闩保持、即刻接力处理最新帧；无帧则在途闩复位（下一帧直接开工）。
+    private func finishProcessing(_ frame: CVPixelBuffer,
+                                  ticket: ProcessingTicket,
+                                  processor: CameraBackgroundProcessor) {
+        var next: (frame: CVPixelBuffer, ticket: ProcessingTicket)?
         frameLock.withStateLock {
-            processedFrameSequence &+= 1
-            return (processedFrameSequence, processingGeneration)
+            if ticket.generation == processingGeneration,
+               ticket.sequence > deliveredFrameSequence {
+                deliveredFrameSequence = ticket.sequence
+                latestFrame = frame
+            }
+            if let pendingFrame = pendingFrameSlot {
+                next = (pendingFrame, pendingTicketSlot ?? ticket)
+                pendingFrameSlot = nil
+                pendingTicketSlot = nil
+            } else if ticket.generation == processingGeneration {
+                // 仅同场次复位在途闩：stop 已冲闩复位，迟到完成的旧场次不得替新场次复位
+                //（否则新场次在途期间闩被误开，门控短暂漏帧入队——有界但不必要）。
+                processingInFlight = false
+            }
         }
-    }
-
-    /// 处理完成的帧入库（协作线程）：序号更大且同场次才覆盖——乱序完成的慢帧不得把
-    /// latestFrame 拨回旧帧；stop 后的迟到完成以场次失配被拒。
-    private func storeProcessedFrame(_ frame: CVPixelBuffer,
-                                     ticket: (sequence: UInt64, generation: UInt64)) {
-        frameLock.withStateLock {
-            guard ticket.generation == processingGeneration,
-                  ticket.sequence > deliveredFrameSequence else { return }
-            deliveredFrameSequence = ticket.sequence
-            latestFrame = frame
+        if let next {
+            spawnProcessing(next.frame, ticket: next.ticket, processor: processor)
         }
     }
 

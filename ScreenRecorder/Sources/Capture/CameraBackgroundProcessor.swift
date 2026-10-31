@@ -22,6 +22,8 @@ protocol PersonSegmenting {
 /// 质量档（规格 §7 留实现者，此处定夺并记录）：`.balanced`——`.accurate` 在 640×480
 /// 源上的发丝级边缘增益对 ~160pt 的 PiP 展示尺寸不可辨而耗时显著更高；`.fast` 边缘破损
 /// 明显。balanced 在 VGA 尺寸毫秒级（真机清单保留 30/60fps 实测项），逐帧预算内。
+/// （背压归消费侧 `CameraPiPController` 的 newest-wins 门控——修复轮 1：串行队列是
+/// 序列化不是背压，逐帧排队不设限即无界积压。）
 final class VisionPersonSegmenter: PersonSegmenting {
     /// 进程级单例（模型加载一次，多场录制复用；无逐场冷启动成本）。
     static let shared = VisionPersonSegmenter()
@@ -80,9 +82,9 @@ private struct VisionMaskJob: @unchecked Sendable {
 /// 同款）。
 ///
 /// 线程模型：`process` 为 async——分割 await 专用 Vision 队列，渲染在协作线程；连续帧的
-/// 分割/渲染可并发，池字段以 NSLock 串行化（CIContext 本身线程安全，Apple 文档口径）。
-/// 帧次序由消费侧（`CameraPiPController`）的序号守卫保证——本类无帧间状态（内置背景
-/// 单槽缓存除外，键含尺寸，跨帧值等价直取）。
+/// 分割/渲染可并发，池与内置背景缓存字段以 NSLock 串行化（修复轮 1 Minor 2；CIContext
+/// 本身线程安全，Apple 文档口径）。帧次序由消费侧（`CameraPiPController`）的序号守卫
+/// 保证——本类无其余帧间状态。
 final class CameraBackgroundProcessor {
     /// 背景模式（开录快照语义；构造后不变——录制中换模式自下一场录制生效）。
     let mode: CameraBackgroundMode
@@ -94,8 +96,9 @@ final class CameraBackgroundProcessor {
     private var bufferPool: CVPixelBufferPool?
     private var poolSize: CGSize?
     private let stateLock = NSLock()
-    /// 内置背景单槽缓存：键 =（样式, 宽, 高）——录制中恒定，逐帧零生成直取（平移/缩放
-    /// 不缓存：渐变按帧尺寸生成即到位，无逐帧摆放成本）。
+    /// 内置背景单槽缓存（stateLock 保护，修复轮 1 Minor 2——与池字段同锁纪律；分割/
+    /// 渲染可跨线程并发，裸读写是正式数据竞争）：键 =（样式, 宽, 高）——录制中恒定，
+    /// 逐帧零生成直取（平移/缩放不缓存：渐变按帧尺寸生成即到位，无逐帧摆放成本）。
     private var builtinCache: (background: BuiltinBackground, width: Int, height: Int, image: CIImage)?
 
     /// 模糊半径（捕获像素，P5 观感定值）：640×480 源上 ~16px 高斯模糊在 PiP 展示尺寸
@@ -176,13 +179,20 @@ final class CameraBackgroundProcessor {
 
     // MARK: 内置背景（程序生成，零素材文件）
 
-    /// 内置背景按帧尺寸生成；单槽缓存（样式+尺寸命中即直取，录制中恒定）。
+    /// 内置背景按帧尺寸生成；单槽缓存（样式+尺寸命中即直取，录制中恒定）。缓存读写经
+    /// stateLock（修复轮 1 Minor 2），生成在锁外（纯静态函数 + 局部量）。
     /// 渐变生成失败（滤镜缺位，实践中不可达）回退纯色灰蓝——背景路永不因生成失败丢帧。
     private func builtinBackground(_ builtin: BuiltinBackground, bounds: CGRect) -> CIImage? {
-        if let cache = builtinCache,
-           cache.background == builtin,
-           cache.width == Int(bounds.width), cache.height == Int(bounds.height) {
+        let width = Int(bounds.width)
+        let height = Int(bounds.height)
+        let cachedImage: CIImage? = stateLock.withStateLock { () -> CIImage? in
+            guard let cache = builtinCache,
+                  cache.background == builtin,
+                  cache.width == width, cache.height == height else { return nil }
             return cache.image
+        }
+        if let cached = cachedImage {
+            return cached
         }
         let image: CIImage
         switch builtin {
@@ -197,7 +207,7 @@ final class CameraBackgroundProcessor {
         case .solidSlate:
             image = Self.solid(bounds: bounds, color: Self.slateColor)
         }
-        builtinCache = (builtin, Int(bounds.width), Int(bounds.height), image)
+        stateLock.withStateLock { builtinCache = (builtin, width, height, image) }
         return image
     }
 
