@@ -157,6 +157,63 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.autoZoomLevel, 1.6)
     }
 
+    // MARK: P4 键盘按键可视化样式（Task 8 简报钉测）
+
+    /// 简报钉测 testStyleParamsRoundTrip：开关默认关（opt-in）、两色单选默认主色、
+    /// 字号默认 14（didSet 越界钳回 {12,14,18}→14）、停留默认 2s（越界钳回
+    /// {1,2,3}→2），合法档原样通过，四项跨实例往返。
+    func testStyleParamsRoundTrip() {
+        let store = SettingsStore(userDefaults: defaults)
+
+        XCTAssertFalse(store.keyboardOverlayEnabled, "P4 opt-in 默认关")
+        XCTAssertFalse(store.keyboardOverlayColorIsAlternate, "两色单选默认主色")
+        XCTAssertEqual(store.keyboardOverlayFontSize, 14)
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2)
+
+        store.keyboardOverlayFontSize = 99
+        XCTAssertEqual(store.keyboardOverlayFontSize, 14, "越界字号钳回默认 14")
+        store.keyboardOverlayFontSize = 13
+        XCTAssertEqual(store.keyboardOverlayFontSize, 14)
+        store.keyboardOverlayFontSize = 12
+        XCTAssertEqual(store.keyboardOverlayFontSize, 12, "合法档位原样通过")
+        store.keyboardOverlayFontSize = 18
+        XCTAssertEqual(store.keyboardOverlayFontSize, 18)
+
+        store.keyboardOverlayLingerSeconds = 5
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2, "越界停留钳回默认 2")
+        store.keyboardOverlayLingerSeconds = 0
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2)
+        store.keyboardOverlayLingerSeconds = 1
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 1, "合法档位原样通过")
+        store.keyboardOverlayLingerSeconds = 3
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 3)
+
+        // 合法组合跨实例往返
+        store.keyboardOverlayEnabled = true
+        store.keyboardOverlayColorIsAlternate = true
+        store.keyboardOverlayFontSize = 18
+        store.keyboardOverlayLingerSeconds = 3
+
+        let reloaded = SettingsStore(userDefaults: defaults)
+
+        XCTAssertTrue(reloaded.keyboardOverlayEnabled)
+        XCTAssertTrue(reloaded.keyboardOverlayColorIsAlternate)
+        XCTAssertEqual(reloaded.keyboardOverlayFontSize, 18)
+        XCTAssertEqual(reloaded.keyboardOverlayLingerSeconds, 3)
+    }
+
+    /// defaults 外写野值（字号 99 / 停留 4.5）加载时钳回默认档——沿用
+    /// fps/countdownSeconds 载入钳制模式（init 内赋值不触发 didSet，落库野值不回写）。
+    func testOutOfRangePersistedKeyboardStyleClampsToDefaults() {
+        defaults.set(99, forKey: "keyboardOverlayFontSize")
+        defaults.set(4.5, forKey: "keyboardOverlayLingerSeconds")
+
+        let store = SettingsStore(userDefaults: defaults)
+
+        XCTAssertEqual(store.keyboardOverlayFontSize, 14)
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2)
+    }
+
     private var defaultOutputDirectory: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ScreenRecorder", isDirectory: true)

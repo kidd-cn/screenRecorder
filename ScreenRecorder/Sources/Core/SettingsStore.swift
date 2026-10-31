@@ -90,6 +90,49 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(clickSoundEnabled, forKey: Self.clickSoundEnabledKey) }
     }
 
+    /// 键盘按键可视化总开关（P4，opt-in 默认关；Task 9 裁定：组合态/样式走 live
+    /// provider 逐帧供帧，开录快照语义仅适用于 enabled 初值）。
+    @Published var keyboardOverlayEnabled: Bool {
+        didSet { defaults.set(keyboardOverlayEnabled, forKey: Self.keyboardOverlayEnabledKey) }
+    }
+
+    /// 键帽颜色两色单选（P4）：false = 主色（默认），true = 备选色；取色渲染在
+    /// 合成器（Task 9），此处只存布尔档位。
+    @Published var keyboardOverlayColorIsAlternate: Bool {
+        didSet {
+            defaults.set(keyboardOverlayColorIsAlternate,
+                         forKey: Self.keyboardOverlayColorIsAlternateKey)
+        }
+    }
+
+    /// 键帽字号档位（P4，合法 12/14/18 默认 14）：越界 didSet 钳回 14——沿用
+    /// autoZoomLevel 的「不等才收敛赋值一次、重入轮落库」写法（@Published 的 didSet
+    /// 内再赋值、含同值赋值都会重入 didSet，见 autoZoomLevel 注释定论）。
+    @Published var keyboardOverlayFontSize: Int {
+        didSet {
+            let normalized = Self.normalizedKeyboardOverlayFontSize(keyboardOverlayFontSize)
+            guard normalized != keyboardOverlayFontSize else {
+                defaults.set(keyboardOverlayFontSize, forKey: Self.keyboardOverlayFontSizeKey)
+                return
+            }
+            keyboardOverlayFontSize = normalized
+        }
+    }
+
+    /// 键帽停留时长档位（P4，合法 1/2/3 秒默认 2）：越界 didSet 钳回 2，收敛写法
+    /// 同字号档位。
+    @Published var keyboardOverlayLingerSeconds: Double {
+        didSet {
+            let normalized = Self.normalizedKeyboardOverlayLingerSeconds(keyboardOverlayLingerSeconds)
+            guard normalized != keyboardOverlayLingerSeconds else {
+                defaults.set(keyboardOverlayLingerSeconds,
+                             forKey: Self.keyboardOverlayLingerSecondsKey)
+                return
+            }
+            keyboardOverlayLingerSeconds = normalized
+        }
+    }
+
     /// 上次使用的采集模式（T17 裁定：⇧⌘R「开始/停止」以最后使用的模式开录，每次开始录制时
     /// 由装配层持久化到此处）。默认全屏（主显示器）。`CaptureMode` Codable 编码整只落库，
     /// 解码失败（如枚举演化）回退默认；显示器拓扑变化由下一次开始重新持久化自然覆盖。
@@ -145,6 +188,12 @@ final class SettingsStore: ObservableObject {
         self.autoZoomLevel = Self.normalizedAutoZoomLevel(userDefaults.object(forKey: Self.autoZoomLevelKey) as? Double)
         // P1b：点击音效（opt-in 默认关；快照语义同上）。
         self.clickSoundEnabled = userDefaults.object(forKey: Self.clickSoundEnabledKey) as? Bool ?? false
+        // P4：键盘按键可视化（opt-in 默认关）；字号/停留载入野值钳回默认档
+        // （init 内赋值不触发 didSet，落库野值原样保留、不回写，与 fps/countdown 同纪律）。
+        self.keyboardOverlayEnabled = userDefaults.object(forKey: Self.keyboardOverlayEnabledKey) as? Bool ?? false
+        self.keyboardOverlayColorIsAlternate = userDefaults.object(forKey: Self.keyboardOverlayColorIsAlternateKey) as? Bool ?? false
+        self.keyboardOverlayFontSize = Self.normalizedKeyboardOverlayFontSize(userDefaults.object(forKey: Self.keyboardOverlayFontSizeKey) as? Int)
+        self.keyboardOverlayLingerSeconds = Self.normalizedKeyboardOverlayLingerSeconds(userDefaults.object(forKey: Self.keyboardOverlayLingerSecondsKey) as? Double)
         // T17：上次使用的采集模式（⇧⌘R 开录用）；缺省/解码失败回退全屏（主显示器）。
         if let data = userDefaults.data(forKey: Self.lastCaptureModeKey),
            let mode = try? JSONDecoder().decode(CaptureMode.self, from: data) {
@@ -174,6 +223,10 @@ final class SettingsStore: ObservableObject {
     private static let autoZoomEnabledKey = "autoZoomEnabled"
     private static let autoZoomLevelKey = "autoZoomLevel"
     private static let clickSoundEnabledKey = "clickSoundEnabled"
+    private static let keyboardOverlayEnabledKey = "keyboardOverlayEnabled"
+    private static let keyboardOverlayColorIsAlternateKey = "keyboardOverlayColorIsAlternate"
+    private static let keyboardOverlayFontSizeKey = "keyboardOverlayFontSize"
+    private static let keyboardOverlayLingerSecondsKey = "keyboardOverlayLingerSeconds"
     private static let lastCaptureModeKey = "lastCaptureMode"
     private static let windowCaptureTargetKey = "windowCaptureTarget"
 
@@ -192,6 +245,18 @@ final class SettingsStore: ObservableObject {
     /// 合法缩放档位 1.35/1.6/1.9；越界/缺失回退 1.6（P1a）。
     private static func normalizedAutoZoomLevel(_ raw: Double?) -> Double {
         guard let raw, raw == 1.35 || raw == 1.6 || raw == 1.9 else { return 1.6 }
+        return raw
+    }
+
+    /// 合法键帽字号档位 12/14/18；越界/缺失回退 14（P4）。
+    private static func normalizedKeyboardOverlayFontSize(_ raw: Int?) -> Int {
+        guard let raw, raw == 12 || raw == 14 || raw == 18 else { return 14 }
+        return raw
+    }
+
+    /// 合法键帽停留时长档位 1/2/3 秒；越界/缺失回退 2（P4）。
+    private static func normalizedKeyboardOverlayLingerSeconds(_ raw: Double?) -> Double {
+        guard let raw, raw == 1 || raw == 2 || raw == 3 else { return 2 }
         return raw
     }
 }
