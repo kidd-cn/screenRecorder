@@ -124,6 +124,17 @@ final class SCStreamRecorder: NSObject {
         captureSystemAudio || captureMicrophone || clickSoundEnabled
     }
 
+    /// 窗口区域 rect 的开录钳制（P3b 修复轮 1 抽取的纯逻辑，无头钉测缝）：窗口相对 rect
+    /// 与窗口 frame（原点 .zero、尺寸 `windowSize`）求交，返回 nil = 完全裁空（无内容
+    /// 可录，调用方走 begin 失败路径）。语义即「开录钳制固定」：选区路径产出的 rect 恒在
+    /// 窗口内（恒等还原）；⇧⌘R 复播遇窗口已缩小的陈旧 rect 裁回当前范围；窗口缩到 rect
+    /// 之外（含零尺寸窗口）→ nil。`resolveTarget` 的 windowRegion 分支与钉测共用（单一真源）。
+    static func clampedWindowRect(windowSize: CGSize, rect: CGRect) -> CGRect? {
+        let clipped = CGRect(origin: .zero, size: windowSize).intersection(rect)
+        guard clipped.width >= 1, clipped.height >= 1 else { return nil }
+        return clipped
+    }
+
     /// 按模式构造 `SCContentFilter` 与 `SCStream` 并开始采集。
     /// writer 会话在本方法内创建（输出文件排他占位，冲突即刻抛错）；
     /// 输入装配推迟到首帧（需要首帧格式描述做 sourceFormatHint）。
@@ -432,12 +443,12 @@ final class SCStreamRecorder: NSObject {
             guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
                 throw SCStreamRecorderError.windowNotFound(windowID)
             }
-            // 开录钳制固定（P3b 裁定）：rect 与窗口 frame 求交一次定格。选区路径产出的 rect
-            // 恒在窗口内；⇧⌘R 复播遇到已缩小的窗口时裁回当前范围。此后不再重钳——录制中
-            // 窗口缩小沿用一期窗口模式语义（无 live 重配置）。完全裁空 = 无内容可录，同窗口
-            // 已关走 begin 失败路径。
-            let clampedRect = CGRect(origin: .zero, size: window.frame.size).intersection(rect)
-            guard clampedRect.width >= 1, clampedRect.height >= 1 else {
+            // 开录钳制固定（P3b 裁定）：rect 与窗口 frame 求交一次定格（纯函数
+            // `clampedWindowRect`，单一真源）。选区路径产出的 rect 恒在窗口内；⇧⌘R 复播
+            // 遇到已缩小的窗口时裁回当前范围。此后不再重钳——录制中窗口缩小沿用一期窗口
+            // 模式语义（无 live 重配置）。完全裁空（nil）= 无内容可录，同窗口已关走 begin
+            // 失败路径。
+            guard let clampedRect = Self.clampedWindowRect(windowSize: window.frame.size, rect: rect) else {
                 throw SCStreamRecorderError.windowRegionClippedEmpty(windowID)
             }
             return ResolvedTarget(

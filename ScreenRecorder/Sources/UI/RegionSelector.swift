@@ -287,7 +287,8 @@ final class RegionSelectionSession {
 /// - 取消语义同款：ESC / 亚点拖动（`isMeaningfulSelection` 一期最小尺寸语义）/ 遮罩窗被
 ///   外部关闭都收敛到唯一 `finish(nil)`。
 /// 结构为与 `RegionSelectionSession` 平行的实现（phase 闩 / 自持 / monitor 三件套逐行同款）：
-/// 二者收尾换算的目标系不同，泛化合并需改动一期已验收会话的 private 状态，风险大于收益。
+/// 二者收尾换算的目标系不同，泛化合并需改动一期已验收会话的 private 状态，风险大于收益
+///（审阅修复轮 1 Minor 3 停放：一期冻结解除后合并骨架，终审携带）。
 /// internal（非 private）供无头测试驱动拖拽生命周期。
 @MainActor
 final class WindowRegionSelectionSession {

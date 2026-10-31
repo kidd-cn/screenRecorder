@@ -455,11 +455,16 @@ final class AppAssembly: ObservableObject {
     private var windowPickerWindowController: NSWindowController?
     /// 本次打开的选择器「选定后是否立即开录」：⇧⌘W 路径 true（选定即持久化并开始，简报
     /// 行为规格 1/2）；偏好设置「选择窗口…」路径 false（只持久化）。onSelect 闭包捕获容器
-    /// 弱引用，在选定时刻读取本标记（同一次打开内确定）。
+    /// 弱引用，在选定时刻读取本标记（同一次打开内确定）。**旗标对纪律（P3b 修复轮 1）**：
+    /// 本标记与 `pendingWindowPickerAnchorsRegion` 构成互斥旗标对，每个入口点必须整体换装
+    ///（先清对另一枚，再置自己那一枚）——选择器的取消路径是直接关窗（无回调），旗标残留
+    /// 不可避免；下一次打开自愈的前提是入口点不遗漏整装。选定回调与 `dismissWindowPicker`
+    /// 成对清除是第二道防线。
     private var pendingWindowPickerStartsRecording = false
     /// 本次打开的选择器是否为「窗口区域」入口（P3b）：选定后不直接开录，改为窗口内拖框
     ///（窗口相对 rect）再按 `.windowRegion` 开录。与 startsRecording 互斥（区域路径不写
     /// `windowCaptureTarget`——它的持久化是 `startRecording` 里的 `lastCaptureMode`）。
+    /// 旗标对纪律见上（入口点整体换装，取消路径残留自愈）。
     private var pendingWindowPickerAnchorsRegion = false
 
     /// 打开窗口选择器（⇧⌘W 无目标/失效兜底，或偏好设置「选择窗口…」入口）。`showsStaleNotice`
@@ -467,6 +472,9 @@ final class AppAssembly: ObservableObject {
     /// 通知——与选择器同窗呈现，用户正位于操作现场，比系统通知更直接）。取消路径 = 直接
     /// 关窗，不经选定回调，既有目标不动（简报行为规格 3）。
     func openWindowPicker(startsRecordingOnSelection: Bool, showsStaleNotice: Bool = false) {
+        // 旗标对整体换装（修复轮 1）：取消关窗残留的区域锚定旗标在此自愈，防后续选定
+        // 被劫持进窗口区域流程（同 startWindowRegionRecording / openAppPicker）。
+        pendingWindowPickerAnchorsRegion = false
         pendingWindowPickerStartsRecording = startsRecordingOnSelection
         presentPicker(
             scope: .windows,
@@ -476,6 +484,8 @@ final class AppAssembly: ObservableObject {
     /// 菜单「开始录制 → App…」入口（P3a）：App 范围的选择器，选定 bundleID 即开始录制
     ///（「选定即开始」语义与「窗口…」一致；复用同一窗口与 idle 预检/成对收起纪律）。
     func openAppPicker() {
+        // 旗标对整体换装（修复轮 1，同 openWindowPicker）。
+        pendingWindowPickerAnchorsRegion = false
         pendingWindowPickerStartsRecording = true
         presentPicker(scope: .apps, bannerText: nil)
     }
@@ -484,6 +494,9 @@ final class AppAssembly: ObservableObject {
     /// 窗口内拖框，按所选窗口 + 窗口相对 rect 开录。idle 预检/成对收起纪律与「窗口…」一致
     ///（菜单项已按状态置灰，选定回调另有同款守卫）。
     func startWindowRegionRecording() {
+        // 旗标对整体换装（修复轮 1，同 openWindowPicker）：清掉可能残留的直录旗标——
+        // 否则区域取消后改走「窗口…」选定会先命中区域分支（残留劫持，审阅 Important 1）。
+        pendingWindowPickerStartsRecording = false
         pendingWindowPickerAnchorsRegion = true
         presentPicker(scope: .windows, bannerText: nil)
     }

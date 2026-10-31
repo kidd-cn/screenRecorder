@@ -94,3 +94,56 @@ final class RecordingConfigurationSnapshotTests: XCTestCase {
         }
     }
 }
+
+// MARK: - 窗口区域开录钳制（P3b 修复轮 1：安全关键路径纯函数化钉测）
+
+/// `SCStreamRecorder.clampedWindowRect` 三采样（审阅修复轮 1 Minor 2）：开录钳制 + 空交集
+/// 保护原内联在触 SCShareableContent 的 async 方法里钉不了，抽取纯函数后在此无头钉死。
+/// 夹具窗口 800×500（窗口相对系原点 = 窗口左上）。
+final class WindowRegionClampTests: XCTestCase {
+    private let windowSize = CGSize(width: 800, height: 500)
+
+    /// 采样 1：窗口内 rect（选区路径的常态产物）恒等还原——钳制不得侵蚀合法选区。
+    func testClampedWindowRectKeepsInsideRectUntouched() {
+        let rect = CGRect(x: 100, y: 50, width: 200, height: 150)
+        XCTAssertEqual(
+            SCStreamRecorder.clampedWindowRect(windowSize: windowSize, rect: rect),
+            rect, "窗口内 rect 恒等还原")
+        // 恰贴窗口右/下边的临界 rect 同样不动（交集=自身）。
+        let flush = CGRect(x: 600, y: 400, width: 200, height: 100)
+        XCTAssertEqual(
+            SCStreamRecorder.clampedWindowRect(windowSize: windowSize, rect: flush),
+            flush, "贴边 rect 恰与窗口 frame 求交为自身，不动")
+    }
+
+    /// 采样 2：⇧⌘R 复播遇窗口缩小（陈旧 rect 越过当前右边/下边）→ 裁回窗口范围。
+    func testClampedWindowRectClipsRectExceedingShrunkenWindow() {
+        XCTAssertEqual(
+            SCStreamRecorder.clampedWindowRect(windowSize: windowSize,
+                                               rect: CGRect(x: 600, y: 400, width: 400, height: 300)),
+            CGRect(x: 600, y: 400, width: 200, height: 100),
+            "越界部分裁到窗口右边/下边（开录钳制固定语义）")
+        XCTAssertEqual(
+            SCStreamRecorder.clampedWindowRect(windowSize: windowSize,
+                                               rect: CGRect(x: -50, y: -50, width: 300, height: 300)),
+            CGRect(x: 0, y: 0, width: 250, height: 250),
+            "负坐标越界同样裁到窗口左上边")
+    }
+
+    /// 采样 3：完全裁空 → nil（无内容可录，resolveTarget 据此走 windowRegionClippedEmpty
+    /// begin 失败路径）；零尺寸窗口同判（交集恒空）。
+    func testClampedWindowRectReturnsNilWhenFullyOutsideOrWindowEmpty() {
+        XCTAssertNil(
+            SCStreamRecorder.clampedWindowRect(windowSize: windowSize,
+                                               rect: CGRect(x: 900, y: 600, width: 100, height: 100)),
+            "rect 完全落在窗口之外 → nil")
+        XCTAssertNil(
+            SCStreamRecorder.clampedWindowRect(windowSize: windowSize,
+                                               rect: CGRect(x: 600, y: 500, width: 200, height: 100)),
+            "rect 紧贴窗口下边起（y=500，窗口相对系底边之外）→ 高度交集为零 → nil")
+        XCTAssertNil(
+            SCStreamRecorder.clampedWindowRect(windowSize: .zero,
+                                               rect: CGRect(x: 0, y: 0, width: 100, height: 100)),
+            "零尺寸窗口 → nil（防御采样）")
+    }
+}
