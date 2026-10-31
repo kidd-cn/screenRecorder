@@ -235,8 +235,9 @@ final class MarkingOverlayController: ObservableObject {
     // MARK: 被录显示器 bounds（显示时刻现场解析，无屏幕 API 的纯逻辑由测试另钉）
 
     /// 捕获模式 → 被录显示器的 Cocoa 全局 frame：display/region = 其所在显示器；
-    /// window = 窗口当前落点的显示器（窗口可跨屏移动，显示时刻现场解析）。取不到回 nil
-    /// （面板保持原 frame——headless 测试的注入面板不受影响）。
+    /// window = 窗口当前落点的显示器（窗口可跨屏移动，显示时刻现场解析）；app（P3a）=
+    /// 窗口集 union 包围盒中心落点的显示器（工具条单点摆放，多屏窗口集取主画布近似）。
+    /// 取不到回 nil（面板保持原 frame——headless 测试的注入面板不受影响）。
     static func recordedDisplayFrame(for mode: CaptureMode) -> NSRect? {
         let displayID: CGDirectDisplayID?
         switch mode {
@@ -246,6 +247,8 @@ final class MarkingOverlayController: ObservableObject {
             displayID = id
         case .window(let windowID):
             displayID = Self.displayID(containingWindow: windowID)
+        case .app(let bundleID):
+            displayID = Self.displayID(containingAppBundle: bundleID)
         }
         guard let displayID else { return nil }
         return NSScreen.screens.first { screen in
@@ -263,7 +266,34 @@ final class MarkingOverlayController: ObservableObject {
         guard let window = list.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == windowID }),
               let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
               let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { return nil }
-        let center = CGPoint(x: bounds.midX, y: bounds.midY) // CG 全局（左上原点、y 向下）
+        return displayID(containingCGPoint: CGPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    /// App（P3a）union 包围盒中心落点的显示器 id：bundle 的 on-screen 普通层窗口 CG
+    /// bounds 取 union 后同窗口逻辑求含点。归属解析同
+    /// `SourceLossMonitor.onScreenAppWindowCount`（窗口清单无 bundle id 键，经所有者
+    /// PID → NSRunningApplication 解析）；无窗口/清单不可读取返回 nil。
+    private static func displayID(containingAppBundle bundleID: String) -> CGDirectDisplayID? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+        var canvas = CGRect.null
+        for info in list {
+            guard (info[kCGWindowLayer as String] as? Int ?? 0) == 0 else { continue }
+            guard let pid = info[kCGWindowOwnerPID as String] as? Int,
+                  NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier == bundleID else { continue }
+            guard let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
+            canvas = canvas.union(bounds)
+        }
+        guard !canvas.isNull else { return nil }
+        return displayID(containingCGPoint: CGPoint(x: canvas.midX, y: canvas.midY))
+    }
+
+    /// CG 全局点（左上原点、y 向下）落点的显示器 id；取不到回主屏，再取不到 nil。
+    private static func displayID(containingCGPoint center: CGPoint) -> CGDirectDisplayID? {
+        func screenNumber(_ screen: NSScreen) -> CGDirectDisplayID? {
+            (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        }
         // NSScreen.frame 为 Cocoa 全局（主屏左下原点）；CG 全局 y 翻转后求含点。
         let flipHeight = ClickHighlightTracker.primaryScreenHeight()
         let hit = NSScreen.screens.first { screen in

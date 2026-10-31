@@ -38,6 +38,8 @@ final class SCStreamRecorder: NSObject {
     enum SCStreamRecorderError: LocalizedError {
         case displayNotFound(CGDirectDisplayID)
         case windowNotFound(CGWindowID)
+        /// P3a：App 模式 start 时枚举不到该 bundle 的任何可录窗口（应用已退出/窗口全关）。
+        case appNotFound(bundleID: String)
 
         var errorDescription: String? {
             switch self {
@@ -45,6 +47,8 @@ final class SCStreamRecorder: NSObject {
                 return "SCShareableContent 中找不到显示器 id=\(id)"
             case .windowNotFound(let id):
                 return "SCShareableContent 中找不到窗口 id=\(id)（窗口可能已关闭）"
+            case .appNotFound(let bundleID):
+                return "找不到应用（bundle id=\(bundleID)）的可录制窗口（应用可能已退出或窗口已全部关闭）"
             }
         }
     }
@@ -347,7 +351,8 @@ final class SCStreamRecorder: NSObject {
 
     private struct ResolvedTarget {
         let filter: SCContentFilter
-        /// 输出像素尺寸：display=显示器物理像素；window=窗口 frame（points）；region=rect 尺寸。
+        /// 输出像素尺寸：display=显示器物理像素；window=窗口 frame（points）；
+        /// app=窗口集 union 包围盒（points）；region=rect 尺寸。
         let pixelSize: CGSize
         /// 区域模式（macOS 12.3+ sourceRect）的采样子集；nil = 全量采样。
         let sourceRect: CGRect?
@@ -372,6 +377,38 @@ final class SCStreamRecorder: NSObject {
                 pixelSize: window.frame.size,
                 sourceRect: nil
             )
+        case .app(let bundleID):
+            // P3a：现场枚举该 bundle 的全部可录窗口（与选择器同一可见口径——收集规则
+            // 单一真源 `WindowPicker.appWindows`，经同一 SCWindow→快照映射）→ 多窗口
+            // filter 合成单一采集源。零窗口 = 陈旧目标同款：抛错走 begin 失败路径
+            //（「未能开始录制」），不空开录。
+            //
+            // API 偏差台账：brief 写 `SCContentFilter(desktopIndependentWindows:)`——该
+            // 复数初始化器在本机 SDK（含最新头文件）不存在，SCContentFilter 仅有单窗口
+            // `initWithDesktopIndependentWindow:`。改用同族多窗口构造
+            // `initWithDisplay:includingWindows:`（macOS 12.3+：「captures a group of
+            // SCWindows」，桌面与 Dock 排除）：固定窗口集合同时落实画布纪律——录制期
+            // 新开窗口不入画（集合在 start 时定格）、部分关闭继续（SCK 对已关窗口空画）。
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let selected = WindowPicker.appWindows(
+                ofBundleID: bundleID,
+                from: WindowPicker.shareableSnapshots(from: content.windows))
+            guard !selected.isEmpty else {
+                throw SCStreamRecorderError.appNotFound(bundleID: bundleID)
+            }
+            let ids = Set(selected.map(\.windowID))
+            let windows = content.windows.filter { ids.contains($0.windowID) }
+            // 画布 = 窗口集的 union 包围盒（SCWindow.frame 与窗口模式同 CG 全局口径）。
+            let canvas = selected.reduce(CGRect.null) { $0.union($1.frame) }
+            // 多窗口 filter 以显示器为锚（窗口集跨屏时取 union 包围盒中心所在显示器，
+            // 取不到回主屏；跨屏窗口集仅保证锚屏窗口入画——SCK 多窗口捕获的已知口径）。
+            let anchor = Self.displayID(containingPoint: CGPoint(x: canvas.midX, y: canvas.midY)) ?? CGMainDisplayID()
+            let display = try await findDisplay(anchor)
+            return ResolvedTarget(
+                filter: SCContentFilter(display: display, including: windows),
+                pixelSize: canvas.size,
+                sourceRect: nil
+            )
         case .region(let rect, let displayID):
             let display = try await findDisplay(displayID)
             return ResolvedTarget(
@@ -388,6 +425,15 @@ final class SCStreamRecorder: NSObject {
             throw SCStreamRecorderError.displayNotFound(displayID)
         }
         return display
+    }
+
+    /// CG 全局点落点的显示器 id（P3a 多窗口 filter 锚点用；取不到返回 nil，调用方回主屏）。
+    private static func displayID(containingPoint point: CGPoint) -> CGDirectDisplayID? {
+        var count: UInt32 = 0
+        guard CGGetDisplaysWithPoint(point, 0, nil, &count) == .success, count > 0 else { return nil }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetDisplaysWithPoint(point, count, &ids, &count) == .success, count > 0 else { return nil }
+        return ids.first
     }
 
     /// 显示器物理像素尺寸（Retina 下 = 点数 × 缩放系数），取自当前显示模式。

@@ -2,8 +2,8 @@ import AppKit
 import CoreGraphics
 import SwiftUI
 
-/// 菜单栏菜单最终形态（T19）：开始录制子菜单（全屏=显示器列表 / 窗口… / 区域…）、暂停/恢复、
-/// 停止、摄像头画中画开关、文件列表…、偏好设置…、关于、退出。
+/// 菜单栏菜单最终形态（T19）：开始录制子菜单（全屏=显示器列表 / 窗口… / App…（P3a）/ 区域…）、
+/// 暂停/恢复、停止、摄像头画中画开关、文件列表…、偏好设置…、关于、退出。
 /// 全部动作走 AppAssembly 闭包缝（T17 装配纪律：配置装配与窗口所有权归装配层）；
 /// 菜单项可用性由 `CaptureController.state` 状态机驱动（裁定 2）：开始子菜单仅 `.idle` 可用，
 /// 暂停/恢复与停止仅在 `.recording`/`.paused` 可用（控制器侧另有同款自守卫，双保险）。
@@ -16,6 +16,8 @@ struct MenuBarView: View {
     let onStartDisplay: (CGDirectDisplayID) -> Void
     /// 打开窗口选择器、选定即开始录制（复用 ⇧⌘W 的选择器路径，T20）。
     let onStartWindowPicker: () -> Void
+    /// 打开 App 选择器（P3a，App 范围）、选定 bundleID 即开始录制。
+    let onStartAppPicker: () -> Void
     /// 区域录制：RegionSelector 拖拽选区后开录（选区交互逻辑归 RegionSelector，不在此复制）。
     let onStartRegion: () -> Void
     /// 打开文件列表窗口（T18，窗口与控制器归 AppAssembly，见 T17 装配红线）。
@@ -34,6 +36,9 @@ struct MenuBarView: View {
             fullScreenSubmenu
             Button("窗口…") {
                 onStartWindowPicker()
+            }
+            Button("App…") {
+                onStartAppPicker()
             }
             Button("区域…") {
                 onStartRegion()

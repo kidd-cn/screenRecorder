@@ -111,4 +111,44 @@ final class SourceLossMonitorTests: XCTestCase {
             SourceLossError(removedDisplayID: nil).errorDescription,
             "被采集的显示器已断开连接")
     }
+
+    // MARK: - P3a：App 模式（全部窗口关闭才触发——部分关闭继续，全关自动保存）
+
+    func testAppExitWithAllWindowsClosedTriggersSourceLoss() {
+        let counter = CallbackCounter()
+        let monitor = SourceLossMonitor(onSourceLost: { counter.record() })
+
+        monitor.start(displayID: nil, appBundleID: "com.example.app")
+        XCTAssertTrue(monitor.isActive)
+        XCTAssertEqual(monitor.monitoredAppBundleID, "com.example.app")
+
+        monitor.simulateAppWindowCount(2)
+        XCTAssertEqual(counter.value, 0, "部分关闭（仍有窗口）继续录制，不触发")
+        monitor.simulateAppWindowCount(1)
+        XCTAssertEqual(counter.value, 0, "最后一个窗口关闭之前不触发")
+        monitor.simulateAppWindowCount(0)
+        XCTAssertEqual(counter.value, 1, "全部窗口关闭：onSourceLost 恰好一次（自动保存路径）")
+        monitor.simulateAppWindowCount(0)
+        XCTAssertEqual(counter.value, 1, "fire-once 闩位对 App 判定同样生效")
+    }
+
+    func testAppModeIgnoresDisplayRemovalAndUnreadableCount() {
+        let counter = CallbackCounter()
+        let monitor = SourceLossMonitor(onSourceLost: { counter.record() })
+
+        monitor.start(displayID: 7, appBundleID: "com.example.app")
+        monitor.simulateDisplayRemoved(7)
+        XCTAssertEqual(counter.value, 0, "App 模式：显示器移除不参与判定（app 窗口可跨屏存活）")
+        monitor.simulateAppWindowCount(nil)
+        XCTAssertEqual(counter.value, 0, "窗口清单读取失败（nil = 未知）不判定，绝不误杀录制")
+        XCTAssertTrue(monitor.isActive, "未触发时监视器保持在位")
+        monitor.simulateAppWindowCount(0)
+        XCTAssertEqual(counter.value, 1, "随后读数归零照常触发")
+    }
+
+    func testAppSourceLostErrorCarriesBundleContext() {
+        XCTAssertEqual(
+            AppSourceLostError(bundleID: "com.example.app").errorDescription,
+            "被采集的应用（bundle id=com.example.app）的窗口已全部关闭")
+    }
 }

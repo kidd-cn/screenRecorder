@@ -375,7 +375,8 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 /// 9. 源丢失监视器与路由观察器（T18）：同边界 8 的装配缝形状（AppAssembly 持有注入，
 ///    nil = 未装配 no-op），`enterRecordingPhase` 启动、两条 finalize 出口摘除。源丢失
 ///    监视按捕获模式取 displayID（display/region 匹配该显示器；window = 采集全台语义
-///    nil，任一移除触发——裁定 2），命中经装配层接 `handleSessionFailure` 自动保存；
+///    nil，任一移除触发——裁定 2；app（P3a）= 轮询该 bundle 窗口数，全部关闭才触发），
+///    命中经装配层接 `handleSessionFailure` 自动保存；
 ///    路由观察命中经装配层接 `RecordingSessionCoordinator.rebuildAudioRoute`（混音器
 ///    自愈，无 UI）。无锁屏出口（裁定 3：锁屏不构成中断）。
 @MainActor
@@ -426,6 +427,8 @@ final class CaptureController: ObservableObject {
     private var pendingFailure: Error?
     /// 当前会话被采集的显示器（T18 源丢失匹配语义；nil = 采集全台语义——任一显示器移除触发）。
     private var sourceDisplayID: CGDirectDisplayID?
+    /// 当前会话被采集 App 的 bundle id（P3a；nil = 非 App 模式）。
+    private var sourceBundleID: String?
 
     init(session: CaptureSessionManaging,
          store: RecordingFileStore,
@@ -460,8 +463,9 @@ final class CaptureController: ObservableObject {
         // P1b：点击音效骑同一点击源——只开音效时 tracker 仍需监听（音效无渲染缝，
         // 经协调器暂停门直接调度混音器）。
         clickHighlightTracker?.setEnabled(config.clickHighlightEnabled || config.autoZoomEnabled || config.clickSoundEnabled)
-        // T18：源丢失匹配目标随捕获模式确定（裁定 2）。
+        // T18：源丢失匹配目标随捕获模式确定（裁定 2；P3a 起 App 模式另记 bundle id）。
         sourceDisplayID = Self.capturedDisplayID(of: config.mode)
+        sourceBundleID = Self.capturedAppBundleID(of: config.mode)
         hasBegun = false
         pendingDiscard = false
         pendingFailure = nil
@@ -518,18 +522,26 @@ final class CaptureController: ObservableObject {
         state = .recording
         startElapsedTimer()
         clickHighlightTracker?.start() // T16：点击监听随录制启动（disabled 未装机为 no-op）
-        sourceLossMonitor?.start(displayID: sourceDisplayID) // T18：源丢失监视随录制启动
+        sourceLossMonitor?.start(displayID: sourceDisplayID, appBundleID: sourceBundleID) // T18：源丢失监视随录制启动（P3a：App 模式轮询窗口数）
         microphoneRouteWatcher?.start() // T18：路由变化观察随录制启动（混音器自愈，无 UI）
     }
 
     /// 源丢失匹配语义（裁定 2）：display/region 模式监视其所在显示器；window 模式无定
-    /// 显示器（窗口可移动/跨屏）→ nil = 采集全台语义，任一显示器移除即源丢失。
+    /// 显示器（窗口可移动/跨屏）→ nil = 采集全台语义，任一显示器移除即源丢失；app 模式
+    ///（P3a）无定显示器（窗口可跨屏）→ nil，源丢失改由 bundle 窗口计数轮询判定。
     private static func capturedDisplayID(of mode: CaptureMode) -> CGDirectDisplayID? {
         switch mode {
         case .display(let displayID): return displayID
         case .region(_, let displayID): return displayID
         case .window: return nil
+        case .app: return nil
         }
+    }
+
+    /// App 模式的 bundle id（P3a）；其余模式 nil（源丢失按显示器/全台语义判定）。
+    private static func capturedAppBundleID(of mode: CaptureMode) -> String? {
+        if case .app(let bundleID) = mode { return bundleID }
+        return nil
     }
 
     // MARK: 浮条动作
@@ -613,6 +625,7 @@ final class CaptureController: ObservableObject {
         sourceLossMonitor?.stop() // T18：源丢失监视随收尾摘除（幂等）
         microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
         sourceDisplayID = nil
+        sourceBundleID = nil
         let url = await session.finish()
         resetElapsed()
         state = .idle
@@ -636,6 +649,7 @@ final class CaptureController: ObservableObject {
         sourceLossMonitor?.stop() // T18：源丢失监视随收尾摘除（幂等）
         microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
         sourceDisplayID = nil
+        sourceBundleID = nil
         let url = await session.finish()
         resetElapsed()
         state = .idle

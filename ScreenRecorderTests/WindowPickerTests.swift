@@ -197,3 +197,45 @@ final class WindowPickerAvailableWindowsTests: XCTestCase {
         XCTAssertNil(candidates[1].thumbnail, "映射缺失的缩略图保持 nil（视图出占位图）")
     }
 }
+
+// MARK: - App 范围（P3a：enumeratedApps 注入缝 + App 模式 filter 构造入参收集）
+
+/// App 范围枚举（P3a）：注入缝沿用 `enumeratedWindows` 的缝形状（preflight/loadWindows
+/// 可注入），分组/排序全在纯函数上，无头可测。
+@MainActor
+final class WindowPickerEnumeratedAppsTests: XCTestCase {
+    /// 注入缝 fixture（简报钉死：3 App 5 窗口）→ 按 bundle 分组计数正确、排除自身
+    ///（本 App bundle 的窗口不进候选）。
+    func testEnumeratedAppsGroupsWindowsByBundleID() async throws {
+        let windows = [
+            makeWindow(id: 1, title: "文档", appName: "Alpha", bundleID: "com.alpha.app"),
+            makeWindow(id: 2, title: "表格", appName: "Alpha", bundleID: "com.alpha.app"),
+            makeWindow(id: 3, title: "终端", appName: "Beta", bundleID: "com.beta.app"),
+            makeWindow(id: 4, title: "编辑器", appName: "Beta", bundleID: "com.beta.app"),
+            makeWindow(id: 5, title: "浮条", appName: "ScreenRecorder", bundleID: "com.screenrecorder.app"),
+        ]
+        let apps = try await WindowPicker.enumeratedApps(
+            preflight: { true },
+            loadWindows: { windows })
+        XCTAssertEqual(apps, [
+            AppCandidate(bundleID: "com.alpha.app", appName: "Alpha", windowCount: 2),
+            AppCandidate(bundleID: "com.beta.app", appName: "Beta", windowCount: 2),
+        ], "3 App 5 窗口：按 bundle 分组计数正确，自身 App 不进候选")
+    }
+
+    /// App 模式 filter 构造（裁定：SCContentFilter 需 SCK 授权对象，无头不可构造——钉
+    /// 构造入参收集函数）：收集该 bundle 的全部普通层非零面积窗口（即
+    /// `SCContentFilter(desktopIndependentWindows:)` 的入参），别家/非零层/零面积不入画。
+    func testAppModeFilterConstruction() {
+        let windows = [
+            makeWindow(id: 10, title: "主窗", appName: "Alpha", bundleID: "com.alpha.app"),
+            makeWindow(id: 11, title: "副窗", appName: "Alpha", bundleID: "com.alpha.app"),
+            makeWindow(id: 12, title: "别家窗口", appName: "Beta", bundleID: "com.beta.app"),
+            makeWindow(id: 13, title: "系统面板", appName: "Alpha", bundleID: "com.alpha.app", layer: 25),
+            makeWindow(id: 14, title: "零面积", appName: "Alpha", bundleID: "com.alpha.app", frame: .zero),
+        ]
+        let collected = WindowPicker.appWindows(ofBundleID: "com.alpha.app", from: windows)
+        XCTAssertEqual(collected.map(\.windowID), [10, 11],
+                       "filter 入参 = 该 App 的全部可录窗口（与选择器同一可见口径、确定性排序）")
+    }
+}

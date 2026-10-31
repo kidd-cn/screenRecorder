@@ -84,6 +84,19 @@ struct PiPCaptureGeometry {
                 captureOriginInCGPoints: window.frame.origin,
                 scale: 1,
                 capturePixelSize: window.frame.size)
+        case .app(let bundleID):
+            // P3a：画布 = 该 App 全部可录窗口的 union 包围盒（与 SCStreamRecorder 的 filter
+            // 构造同一收集函数与同一 SCWindow→快照映射）；枚举失败/零窗口返回 nil = 本场纯屏幕。
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return nil }
+            let selected = WindowPicker.appWindows(
+                ofBundleID: bundleID,
+                from: WindowPicker.shareableSnapshots(from: content.windows))
+            guard !selected.isEmpty else { return nil }
+            let canvas = selected.reduce(CGRect.null) { $0.union($1.frame) }
+            return PiPCaptureGeometry(
+                captureOriginInCGPoints: canvas.origin,
+                scale: 1,
+                capturePixelSize: canvas.size)
         }
     }
 }

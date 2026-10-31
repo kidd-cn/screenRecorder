@@ -104,8 +104,16 @@ final class AppAssembly: ObservableObject {
         // 源丢失监视器（T18）：命中 → 失败通道自动保存（onSourceLost 主线程保证，闭包内跳
         // 主 actor；「录制已自动保存」通知由 handleSessionFailure 的收尾路径发出）。
         // brief 回调签名无 payload（`onSourceLost: () -> Void`），断连 displayID 不透传。
+        // P3a：按当前模式归类文案——App 模式为「窗口全部关闭」，其余为显示器断连
+        //（startRecording 先持久化 lastCaptureMode，录制期间读它即当次模式）。
         let sourceLossMonitor = SourceLossMonitor { [weak controller] in
-            Task { @MainActor in controller?.handleSessionFailure(SourceLossError(removedDisplayID: nil)) }
+            Task { @MainActor in
+                if case .app(let bundleID) = settings.lastCaptureMode {
+                    controller?.handleSessionFailure(AppSourceLostError(bundleID: bundleID))
+                } else {
+                    controller?.handleSessionFailure(SourceLossError(removedDisplayID: nil))
+                }
+            }
         }
         controller.sourceLossMonitor = sourceLossMonitor
         // 麦克风路由观察器（T18）：命中 → coordinator 转发当前混音器自愈重建（主队列保证，
@@ -455,6 +463,23 @@ final class AppAssembly: ObservableObject {
     /// 通知——与选择器同窗呈现，用户正位于操作现场，比系统通知更直接）。取消路径 = 直接
     /// 关窗，不经选定回调，既有目标不动（简报行为规格 3）。
     func openWindowPicker(startsRecordingOnSelection: Bool, showsStaleNotice: Bool = false) {
+        pendingWindowPickerStartsRecording = startsRecordingOnSelection
+        presentPicker(
+            scope: .windows,
+            bannerText: showsStaleNotice ? "上次选择的窗口不可用，请重新选择" : nil)
+    }
+
+    /// 菜单「开始录制 → App…」入口（P3a）：App 范围的选择器，选定 bundleID 即开始录制
+    ///（「选定即开始」语义与「窗口…」一致；复用同一窗口与 idle 预检/成对收起纪律）。
+    func openAppPicker() {
+        pendingWindowPickerStartsRecording = true
+        presentPicker(scope: .apps, bannerText: nil)
+    }
+
+    /// 选择器呈现的共同出口（P3a 从 openWindowPicker 抽取）：窗口归装配容器（装配红线），
+    /// 懒建单实例复用，每次打开重建内容视图（复用窗口不重触发 `.task`，同 T18 文件列表的
+    /// 教训；`scope` 决定初始范围，重建同时换窗口标题）。
+    private func presentPicker(scope: WindowPickerView.Scope, bannerText: String?) {
         if windowPickerWindowController == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
@@ -462,19 +487,37 @@ final class AppAssembly: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "选择窗口"
             window.isReleasedWhenClosed = false
             window.center()
             windowPickerWindowController = NSWindowController(window: window)
         }
-        pendingWindowPickerStartsRecording = startsRecordingOnSelection
+        windowPickerWindowController?.window?.title = scope == .apps ? "选择 App" : "选择窗口"
         windowPickerWindowController?.window?.contentView = NSHostingView(rootView: WindowPickerHostView(
-            bannerText: showsStaleNotice ? "上次选择的窗口不可用，请重新选择" : nil,
-            onSelect: { [weak self] windowID in self?.windowPickerSelected(windowID) }
+            scope: scope,
+            bannerText: bannerText,
+            onSelect: { [weak self] windowID in self?.windowPickerSelected(windowID) },
+            onAppSelect: { [weak self] bundleID in self?.appPickerSelected(bundleID) }
         ))
         NSApp.activate(ignoringOtherApps: true)
         windowPickerWindowController?.showWindow(nil)
         windowPickerWindowController?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// App 选定回调（P3a，`WindowPickerView` App 行双击触发）：idle 预检（同窗口选定纪律，
+    /// 非 idle 拒绝并成对收起）→ 开录 `.app(bundleID)`。持久化走 `startRecording` 的统一
+    /// 入口——`lastCaptureMode` 随之记为 App 模式，⇧⌘R 上次使用模式自动包含。
+    private func appPickerSelected(_ bundleID: String) {
+        guard controller.state == .idle else {
+            NSLog("WindowPicker: 忽略选定 App \(bundleID)（当前状态非 idle：\(controller.state)）")
+            dismissWindowPicker()
+            return
+        }
+        let startsRecording = pendingWindowPickerStartsRecording
+        dismissWindowPicker()
+        NSLog("WindowPicker: 已选定 App 捕获目标（\(bundleID)）")
+        if startsRecording {
+            startRecording(mode: .app(bundleID: bundleID))
+        }
     }
 
     /// 选定回调（主 actor，`WindowPickerView` 双击触发）：关窗 → 单窗所有者快照组装稳定
@@ -547,11 +590,14 @@ final class AppAssembly: ObservableObject {
     }
 }
 
-/// 窗口选择器宿主（T20）：T14 `WindowPickerView` + 可选的失效提示横幅。不改 T14 组件
-/// （`onSelect(CGWindowID)` 原样透传）；横幅仅由装配层按打开场景注入（⇧⌘W 失效重选）。
+/// 窗口选择器宿主（T20）：T14 `WindowPickerView` + 可选的失效提示横幅。不改选择器的
+/// 选择回调语义（`onSelect`/`onAppSelect` 原样透传，P3a 增 App 范围与初始范围注入）；
+/// 横幅仅由装配层按打开场景注入（⇧⌘W 失效重选）。
 private struct WindowPickerHostView: View {
+    let scope: WindowPickerView.Scope
     let bannerText: String?
     let onSelect: (CGWindowID) -> Void
+    let onAppSelect: (String) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -563,7 +609,10 @@ private struct WindowPickerHostView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 4)
             }
-            WindowPickerView(onSelect: onSelect)
+            WindowPickerView(
+                onSelect: onSelect,
+                onAppSelect: onAppSelect,
+                initialScope: scope)
         }
     }
 }
@@ -748,6 +797,7 @@ struct ScreenRecorderApp: App {
                 settings: assembly.settings,
                 onStartDisplay: { assembly.startDisplayRecording(on: $0) },
                 onStartWindowPicker: { assembly.openWindowPicker(startsRecordingOnSelection: true) },
+                onStartAppPicker: { assembly.openAppPicker() },
                 onStartRegion: { assembly.startRegionRecording() },
                 onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenPreferences: { assembly.openPreferences() }
