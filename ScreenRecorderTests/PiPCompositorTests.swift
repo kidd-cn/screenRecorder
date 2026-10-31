@@ -534,6 +534,142 @@ final class PiPCompositorClickOverlayTests: XCTestCase {
     }
 }
 
+// MARK: - P2 边录边标记合成（v2 次序：底帧 → 点击环 → 笔画 → 施加 zoomTransform → PiP）
+
+final class PiPCompositorStrokesTests: XCTestCase {
+    /// 软渲染上下文：无头环境确定性出图（生产用 compositor 自带的 GPU context）。
+    private lazy var softwareContext = CIContext(options: [.useSoftwareRenderer: true])
+
+    private let canvasSize = CGSize(width: 320, height: 240)
+    private let screenColor = BGRAColor(blue: 0, green: 255, red: 0, alpha: 255) // 纯绿底
+    /// 笔画红（MarkingColor.red 的 BGRA 读数）：R≈255 / G≈59 / B≈48。
+    private let strokeColor = MarkingColor.red
+
+    private func makeCompositor() -> PiPCompositor {
+        PiPCompositor(pixelSize: canvasSize)
+    }
+
+    private func makeScreen() -> CVPixelBuffer {
+        makeColorBuffer(width: 320, height: 240, color: screenColor)!
+    }
+
+    /// 横线笔画夹具：底帧归一化 (0.1, 0.25) → (0.9, 0.25)（缓冲区 y = 0.25×240 = 60）。
+    private func horizontalStroke(width: Double = 0.008, color: MarkingColor = .red) -> MarkingStrokeSnapshot {
+        MarkingStrokeSnapshot(strokes: [MarkingStroke(
+            points: [CGPoint(x: 0.1, y: 0.25), CGPoint(x: 0.9, y: 0.25)],
+            color: color,
+            width: width)])
+    }
+
+    /// 笔画红像素带式断言：R 明显抬起、G/B 显著低于纯绿底。全覆盖混色读数 R≈255/G≈59/B≈48；
+    /// 带界取全/半覆盖之间（R ≥ 150 且 G/B ≤ 140），AA 半覆盖（R≈128）不误判。
+    private func assertReddish(
+        _ actual: BGRAColor,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertGreaterThanOrEqual(Int(actual.red), 150, message, file: file, line: line)
+        XCTAssertLessThanOrEqual(Int(actual.green), 140, message, file: file, line: line)
+        XCTAssertLessThanOrEqual(Int(actual.blue), 140, message, file: file, line: line)
+    }
+
+    /// 回归钉测（简报 Step 1 逐字）：全入参 nil（含 strokes）仍逐字节直返原 buffer。
+    func testAllNilStillReturnsSameBuffer() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let result = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
+            strokes: nil, zoomTransform: nil, at: .zero, into: softwareContext)
+        XCTAssertTrue(result === screen, "全效果缺省必须直返原 buffer（=== 同实例，新参数不得破坏直通）")
+    }
+
+    /// 空笔画快照与 nil 同义：零笔画不建层、直返原 buffer（标记开关开着但还没画的常态帧）。
+    func testEmptyStrokeSnapshotReturnsSameBuffer() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let result = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
+            strokes: MarkingStrokeSnapshot(strokes: []), zoomTransform: nil, at: .zero,
+            into: softwareContext)
+        XCTAssertTrue(result === screen, "空笔画快照必须与 nil 同路直通（零渲染）")
+    }
+
+    /// 笔画基础渲染 + Y 轴钉死：归一化 y=0.25 的横线落在缓冲区 y=60（顶原点 y 向下），
+    /// 若上下颠倒本用例即红（线会出现在 y=180）。线宽 0.008 按短边 240 换算 ≈ 1.92px。
+    func testStrokeOnlyRendersAtNormalizedPosition() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil, clickOverlay: nil,
+            strokes: horizontalStroke(), zoomTransform: nil, at: .zero, into: softwareContext)
+
+        XCTAssertFalse(output === screen, "有笔画必须合成输出（新 buffer，不污染采集侧缓冲）")
+        assertReddish(samplePixel(output, x: 160, y: 60), "归一化 y=0.25 横线应落在缓冲区 y=60")
+        assertReddish(samplePixel(output, x: 60, y: 60), "横线 x=0.25 处同样着色")
+        assertColor(samplePixel(output, x: 160, y: 56), equals: screenColor, "线外上方保持屏幕内容")
+        assertColor(samplePixel(output, x: 160, y: 64), equals: screenColor, "线外下方保持屏幕内容")
+        assertColor(samplePixel(output, x: 160, y: 180), equals: screenColor, "y=180（翻转假设位置）必须无笔画——Y 轴颠倒即红")
+    }
+
+    /// 简报 Step 1 逐字：环 + 笔画 + 缩放同帧——笔画画在环**之上**、整体随 zoomTransform
+    /// 迁移（内容锚定：笔画先入合成、再被统一缩放）。
+    /// 几何：缩放仿射 p ↦ 1.6p + (−96,−72)（CI y 向上空间，与 testRingRendersUnderZoom 同推导）。
+    /// 环心缓冲 (200,60) = CI (200,180)，缩放后落 CI (224,216) = 缓冲 (224,24)。
+    /// 笔画线（缓冲 y=60 = CI 180）恰穿过环右弧（CI (224,180)）：
+    /// - 缩放后右弧交点 CI (224,180) ↦ 缓冲 (262,24)：环弧位但被笔画覆盖 → 笔画红（环在上即黄，钉次序）；
+    /// - 环下弧 CI (200,156) ↦ 缓冲 (224,62)：无笔画处 → 环黄（环随缩放在场）；
+    /// - 笔画点 CI (100,180) ↦ 缓冲 (64,24)：笔画红（随缩放迁移——内容空间渲染）；
+    /// - 原笔画位缓冲 (160,60)：缩放后透出绿底（一切已随内容迁移，钉「在缩放之下」）。
+    func testStrokesRenderAboveRingsAndUnderZoom() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let zoom = ZoomTransforms.contentTransform(
+            center: CGPoint(x: 0.5, y: 0.5), level: 1.6, progress: 1,
+            in: CGRect(origin: .zero, size: canvasSize))!
+
+        let output = compositor.composite(
+            screenFrame: screen, pip: nil, pipFrame: nil,
+            clickOverlay: ClickOverlayState(point: CGPoint(x: 200, y: 60), appearedAt: Date()),
+            strokes: horizontalStroke(),
+            zoomTransform: zoom, at: .zero, into: softwareContext)
+
+        XCTAssertFalse(output === screen, "有缩放必须合成输出（新 buffer，不污染采集侧缓冲）")
+        assertReddish(samplePixel(output, x: 262, y: 24), "环右弧与笔画交点应为笔画红——笔画在环之上")
+        assertReddish(samplePixel(output, x: 64, y: 24), "笔画应随缩放迁移到内容空间新位")
+        assertYellowish(samplePixel(output, x: 224, y: 62), "环下弧（无笔画处）应为黄——环随缩放在场")
+        assertColor(samplePixel(output, x: 160, y: 60), equals: screenColor, "原笔画位透出屏幕内容——笔画已随缩放整体迁移")
+    }
+
+    /// 双层并存：笔画与 PiP 同帧各就各位（笔画在缩放层之下，PiP 在最上——v2 次序尾部）。
+    func testStrokesComposeAlongsidePip() {
+        let compositor = makeCompositor()
+        let screen = makeScreen()
+        let pip = makeColorBuffer(width: 64, height: 48, color: BGRAColor(blue: 255, green: 0, red: 0, alpha: 255))!
+        let output = compositor.composite(
+            screenFrame: screen, pip: pip,
+            pipFrame: PiPFrame(rectInCapturePixels: CGRect(x: 200, y: 16, width: 96, height: 72)),
+            clickOverlay: nil,
+            strokes: horizontalStroke(),
+            zoomTransform: nil, at: .zero, into: softwareContext)
+
+        assertColor(samplePixel(output, x: 248, y: 52), equals: BGRAColor(blue: 255, green: 0, red: 0, alpha: 255), "PiP 内容就位（最上层）")
+        assertReddish(samplePixel(output, x: 100, y: 60), "笔画在 PiP 之外的底帧区照常渲染")
+    }
+
+    /// 描边像素带式断言（与缩放测试组同口径）：浓黄 R ≥ 220 + G 保持 255 + B 近零。
+    private func assertYellowish(
+        _ actual: BGRAColor,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertGreaterThanOrEqual(Int(actual.red), 220, message, file: file, line: line)
+        XCTAssertTrue(abs(Int(actual.green) - 255) <= 3, "\(message)（G 应保持 255）", file: file, line: line)
+        XCTAssertLessThanOrEqual(Int(actual.blue), 20, message, file: file, line: line)
+    }
+}
+
 // MARK: - P1a 缩放接入合成热路径（v2 次序：底帧 → 点击环 → 施加 zoomTransform → PiP）
 
 final class PiPCompositorZoomTests: XCTestCase {

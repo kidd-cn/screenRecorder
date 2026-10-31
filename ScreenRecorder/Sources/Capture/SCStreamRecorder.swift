@@ -66,6 +66,12 @@ final class SCStreamRecorder: NSObject {
     /// 一致）。nil（未注入或 autoZoomEnabled=false）= 缩放步恒等跳过。
     /// 仅 video 队列调用（AutoZoomState 锁保护锚点快照读，时间线推导与 MainActor 版共用）。
     var zoomStateProvider: (() -> CGAffineTransform?)?
+    /// P2 边录边标记注入缝：当帧笔画快照取数（MarkingStrokeStore 锁保护读，MainActor 画布
+    /// 经桥过河）。nil（未注入）= 笔画路不装配；注入后返回 nil / 空快照 = 当帧无笔画直通。
+    /// 标记开关是录制中的会话态（可中途开/关），begin 时刻无法预知——凡装配了快照桥
+    /// （生产恒装配）即视「笔画可能活跃」，合成器按需装配；逐帧零笔画由合成器
+    /// 全缺省直返兜住（零渲染直通，与一期逐字节一致）。仅 video 队列调用。
+    var strokeOverlayProvider: (() -> MarkingStrokeSnapshot?)?
 
     /// `stop()` 完成后的成片 URL；nil 表示本次无产出（启动失败 / 流失败 / 零样本）。
     private(set) var finishedFileURL: URL?
@@ -116,13 +122,15 @@ final class SCStreamRecorder: NSObject {
         let target = try await resolveTarget()
         let session = try AssetWriterSession(config: config, pixelSize: target.pixelSize)
         // T15/T16：合成器按需装配——PiP 开启（摄像头 + 位置注入缝在位）、点击高亮开启
-        //（取数注入缝在位）或自动缩放开启（P1a，取数缝在位）时建（CIContext/
+        //（取数注入缝在位）、自动缩放开启（P1a，取数缝在位）或笔画快照桥在位（P2：标记
+        // 开关是录制中会话态，可中途开——桥在位即按「笔画可能活跃」装配）时建（CIContext/
         // CVPixelBufferPool 均惰性持有，未走到合成不产生缓冲分配）。全关时保持 nil =
         // 直通路径零开销。
         let pipActive = config.includeCamera && pipPixelBufferProvider != nil && pipFrameProvider != nil
         let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
         let zoomActive = config.autoZoomEnabled && zoomStateProvider != nil
-        if pipActive || clickActive || zoomActive {
+        let strokesActive = strokeOverlayProvider != nil
+        if pipActive || clickActive || zoomActive || strokesActive {
             pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
         }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
@@ -483,6 +491,7 @@ extension SCStreamRecorder: SCStreamOutput {
                     pip: pipPixelBufferProvider?(),
                     pipFrame: pipFrameProvider?(),
                     clickOverlay: clickOverlayProvider?(),
+                    strokes: strokeOverlayProvider?(),
                     zoomTransform: zoomStateProvider?(),
                     at: shiftedPTS,
                     into: pipCompositor.context)

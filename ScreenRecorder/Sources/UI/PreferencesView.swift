@@ -21,6 +21,11 @@ extension KeyboardShortcuts.Name {
     static let startWindowRecording = Self(
         "startWindowRecording",
         default: .init(.w, modifiers: [.shift, .command]))
+    /// 边录边标记工具开关（默认 ⇧⌘M，Task 5）：录制/暂停中 → 切换标记覆盖层与工具条；
+    /// 其余状态 no-op（覆盖层只在录制期存在）。
+    static let toggleMarkingTools = Self(
+        "toggleMarkingTools",
+        default: .init(.m, modifiers: [.shift, .command]))
 }
 
 // MARK: - HEVC 硬件编码能力（裁定 5）

@@ -13,6 +13,10 @@ struct FloatingControlBar: View {
     @ObservedObject var discardConfirmation: DiscardConfirmation
     /// 交互热区登记簿（拖拽分流裁定 1）：按钮 frame 上报，宿主视图 mouseDown 据此分流。
     let regionRegistry: InteractiveRegionRegistry
+    /// P2 边录边标记：画笔按钮的开关态与切换出口。由 `FloatingControlBarPanel.attachMarkingToggle`
+    /// 在装配层接线（rootView 整只换装驱动换装），缺省关闭态/空出口（面板尺寸探测同构）。
+    var isMarkingEnabled: Bool = false
+    var onToggleMarking: () -> Void = {}
     @State private var autoDisarmTask: Task<Void, Never>?
     @State private var breathing = false
 
@@ -27,6 +31,16 @@ struct FloatingControlBar: View {
                 .font(.system(size: 13, weight: .medium, design: .monospaced))
                 .frame(minWidth: 46, alignment: .center)
                 .help("已录制时长（不含暂停）")
+            // P2 边录边标记开关：切换覆盖层与工具条（显隐条件在装配层，spec §5 P2）。
+            Button {
+                onToggleMarking()
+            } label: {
+                Image(systemName: isMarkingEnabled ? "paintbrush.pointed.fill" : "paintbrush.pointed")
+                    .frame(width: 18, height: 18)
+            }
+            .help(isMarkingEnabled ? "关闭边录边标记" : "边录边标记")
+            .accessibilityLabel(isMarkingEnabled ? "关闭边录边标记" : "边录边标记")
+            .reportingInteractiveRegion(to: regionRegistry)
             Button {
                 if controller.state == .paused {
                     controller.resume()
@@ -287,11 +301,16 @@ final class FloatingBarHostingView: NSHostingView<FloatingControlBar> {
 final class FloatingControlBarPanel {
     private let panel: NSPanel
     private let controller: CaptureController
+    /// 宿主视图（P2 标记开关接线换装用）：rootView 整只替换驱动 SwiftUI 重新求值。
+    private let hostingView: FloatingBarHostingView
     /// 丢弃两击确认真源（视图与面板共享订阅：视图换装、本层跟随尺寸）。
     private let discardConfirmation = DiscardConfirmation()
     private let regionRegistry = InteractiveRegionRegistry()
     private var stateObservation: AnyCancellable?
     private var armedObservation: AnyCancellable?
+    /// P2 标记开关接线（attachMarkingToggle 注入；nil = 未接线，按钮呈现关闭态/空出口）。
+    private var markingEnabledProvider: (() -> Bool)?
+    private var onToggleMarkingAction: (() -> Void)?
     private var isShowing = false
     /// 裁定 3（缺陷①）：位置会话内保留——首次显示定位，此后显示不重置。
     private var hasShownThisSession = false
@@ -305,6 +324,7 @@ final class FloatingControlBarPanel {
             controller: controller,
             discardConfirmation: discardConfirmation,
             regionRegistry: regionRegistry))
+        self.hostingView = hostingView
         hostingView.regionRegistry = regionRegistry
         let contentSize = hostingView.fittingSize
         panel = NSPanel(
@@ -335,6 +355,26 @@ final class FloatingControlBarPanel {
         armedObservation = discardConfirmation.$phase.sink { [weak self] _ in
             Task { @MainActor in self?.updatePanelSize() }
         }
+    }
+
+    // MARK: 边录边标记开关接线（P2，AppAssembly 在装配完成后调用）
+
+    /// 注入画笔按钮的开关态读缝与切换出口，并立即换装（rootView 整只替换——SwiftUI
+    /// 重新求值；按钮 frame 不随态变化，尺寸探测无需重跑，但保持与既有探测口径一致）。
+    /// 开关真源在 AppAssembly（@Published markingEnabled，会话态不持久化）。
+    func attachMarkingToggle(provider: @escaping () -> Bool, toggle: @escaping () -> Void) {
+        markingEnabledProvider = provider
+        onToggleMarkingAction = toggle
+        refreshRootView()
+    }
+
+    private func refreshRootView() {
+        hostingView.rootView = FloatingControlBar(
+            controller: controller,
+            discardConfirmation: discardConfirmation,
+            regionRegistry: regionRegistry,
+            isMarkingEnabled: markingEnabledProvider?() ?? false,
+            onToggleMarking: { [weak self] in self?.onToggleMarkingAction?() })
     }
 
     private func apply(_ state: CaptureState) {

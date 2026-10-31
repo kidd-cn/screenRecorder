@@ -63,6 +63,27 @@ final class ClickHighlightTracker: NSObject {
     /// 锁内回调 tracker）。
     private var onClickHandler: ((CGPoint, Date) -> Void)?
 
+    /// 本地事件抑制缝（P2 边录边标记，spec §5「绘图拖拽不得触发点击高亮/缩放/音效」钉死）：
+    /// 返回 true 的本地鼠标按下**不记录**为点击——记录是环渲染 / 缩放喂入 / 音效调度三条链
+    /// 的共同上游，掐住记录即全链静默。背景（Task 5 调查结论）：标记覆盖层/工具条是本 App
+    /// 自己的窗口，其按下事件不达全局 monitor（全局监听收不到被本 App 处理的事件）；但
+    /// **本地 monitor 收得到**本 App 窗口的 mouseDown——须按事件目标窗口显式过滤（装配层
+    /// 注入按 `NSWindow.identifier` 判定的闭包，见 ScreenRecorderApp）。本地 monitor 主线程
+    /// 调用，读写与 `onClick` 同一锁纪律（锁内读、锁外调）。
+    var isLocalClickSuppressed: ((NSEvent) -> Bool)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return suppressionCheck
+        }
+        set {
+            lock.lock()
+            suppressionCheck = newValue
+            lock.unlock()
+        }
+    }
+    private var suppressionCheck: ((NSEvent) -> Bool)?
+
     /// 点击转发缝（P1a 简报 Produces 逐字）。缺省 nil = 无消费方，记录路径行为不变。
     var onClick: ((CGPoint, Date) -> Void)? {
         get {
@@ -112,11 +133,22 @@ final class ClickHighlightTracker: NSObject {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: Self.monitoredEvents) { [weak self] _ in
             self?.recordLiveClick()
         }
-        // 本应用激活期间（点浮条/菜单等）：本地 monitor 同样只记录不拦截。
+        // 本应用激活期间（点浮条/菜单等）：本地 monitor 同样只记录不拦截；标记工具窗口
+        // 的按下经抑制缝过滤（P2，见 isLocalClickSuppressed 类注释）。
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: Self.monitoredEvents) { [weak self] event in
-            self?.recordLiveClick()
+            self?.handleLocalMouseDown(event)
             return event
         }
+    }
+
+    /// 本地鼠标按下事件入口（internal 缝：monitor 与无头钉测共用）：抑制缝命中（标记工具
+    /// 窗口的按下）不记录，其余照常。锁内读缝、锁外调用（与 onClick 同纪律）。
+    func handleLocalMouseDown(_ event: NSEvent) {
+        lock.lock()
+        let check = suppressionCheck
+        lock.unlock()
+        if check?(event) == true { return }
+        recordLiveClick()
     }
 
     /// 摘除事件监听（幂等；未 start 为 no-op）。录制收尾生命周期钩子调用。

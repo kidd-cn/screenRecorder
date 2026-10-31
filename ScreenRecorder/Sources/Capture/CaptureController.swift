@@ -92,6 +92,9 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     /// 开关重对齐与 start/stop 由 CaptureController 生命周期钩子驱动，本层只负责把
     /// 屏坐标 → 捕获像素的取数闭包装进 recorder（begin 时按当次几何一次性组装）。
     private let clickHighlightTracker: ClickHighlightTracker?
+    /// 笔画快照桥读缝（P2，AppAssembly 注入）：MainActor 画布经 MarkingStrokeStore 过河到
+    /// video 队列。nil（未装配）= 笔画路全关（合成器不因标记装配）。
+    private let strokeSnapshotProvider: (() -> MarkingStrokeSnapshot?)?
     /// P1a 暂停门（spec §5「暂停时不触发」钉死）：`.paused` 时丢弃**新**缩放点击。
     /// 无锁，靠状态机的**时间互斥**保证无并发：begin 的复位写在 tracker 装机之前完成
     ///（begin 本体非主 actor、跑在协作线程；而 pause/resume 由 @MainActor
@@ -104,12 +107,14 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
          warnBelow: Int64 = 2_000_000_000,
          stopBelow: Int64 = 500_000_000,
          cameraPiP: CameraPiPWindowController? = nil,
-         clickHighlightTracker: ClickHighlightTracker? = nil) {
+         clickHighlightTracker: ClickHighlightTracker? = nil,
+         strokeSnapshotProvider: (() -> MarkingStrokeSnapshot?)? = nil) {
         self.diskProvider = diskProvider
         self.warnBelow = warnBelow
         self.stopBelow = stopBelow
         self.cameraPiP = cameraPiP
         self.clickHighlightTracker = clickHighlightTracker
+        self.strokeSnapshotProvider = strokeSnapshotProvider
     }
 
     func begin(_ config: RecordingConfiguration) async throws {
@@ -149,7 +154,10 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         let wantsZoom = config.autoZoomEnabled && clickHighlightTracker != nil
         // P1b：点击音效骑同一点击源（tracker onClick 单槽）；音效无坐标载荷，与几何无关。
         let wantsClickSound = config.clickSoundEnabled && clickHighlightTracker != nil
-        let geometry: PiPCaptureGeometry? = if wantsPiP || wantsClick || wantsZoom {
+        // P2：标记笔画快照桥在位即参与几何解析——覆盖层的屏→底帧换算复用同一次 resolve
+        //（标记开关是录制中会话态，begin 无法预知是否中途开；桥在位 = 具备标记能力）。
+        let wantsStrokes = strokeSnapshotProvider != nil
+        let geometry: PiPCaptureGeometry? = if wantsPiP || wantsClick || wantsZoom || wantsStrokes {
             await PiPCaptureGeometry.resolve(for: config.mode)
         } else {
             nil
@@ -159,6 +167,11 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         }
 
         let recorder = SCStreamRecorder(config: config)
+        // P2 笔画取数缝：桥在位即装配（逐帧零笔画由合成器直返兜住，见
+        // SCStreamRecorder.strokeOverlayProvider 注释）。
+        if wantsStrokes {
+            recorder.strokeOverlayProvider = strokeSnapshotProvider
+        }
         // PiP 注入缝（T15）：合成器逐帧取最新摄像头帧与浮窗位置；都取不到时合成器直返
         // 原 buffer，与直通路径等价。
         recorder.pipPixelBufferProvider = cameraPiP?.latestPixelBuffer

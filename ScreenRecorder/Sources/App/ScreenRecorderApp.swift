@@ -36,6 +36,37 @@ final class AppAssembly: ObservableObject {
     /// 麦克风路由观察器（T18）：所有权进本容器（装配红线），命中经 coordinator 转发混音器
     /// 自愈重建（裁定 5，无 UI）；start/stop 由录制生命周期钩子驱动。
     private let microphoneRouteWatcher: MicrophoneRouteWatcher
+    /// 边录边标记开关（P2 计划代定）：**会话态，不持久化**——不进 defaults，每场录制开始
+    /// 复位为关（避免「上次开着这次忘了」把标记误烧入成片）；画布同步清空，笔画不跨场存活。
+    @Published var markingEnabled = false
+    /// 标记画布（P2，Task 4）：每场录制 clear()（fresh-per-begin 语义——画布除笔画栈无
+    /// 他态，clear 后与新实例等价），装配层持有，覆盖层与工具条共用。
+    private let markingCanvas = MarkingCanvas()
+    /// 笔画快照桥（P2）：MainActor 画布 → video 队列合成取数缝的锁保护过河（装配层订阅
+    /// `$strokes` 灌入，coordinator 经它装配 recorder.strokeOverlayProvider）。
+    private let markingStore = MarkingStrokeStore()
+    /// 标记覆盖层控制器（P2）：面板/事件泵/显隐，init 末段装配（闭包捕获 self）。
+    private lazy var markingOverlayController = MarkingOverlayController(
+        canvas: markingCanvas,
+        modeProvider: { [weak self] in self?.settings.lastCaptureMode },
+        stateProvider: { [weak self] in self?.controller.state ?? .idle },
+        markingEnabledProvider: { [weak self] in self?.markingEnabled ?? false },
+        geometryProvider: { [weak self] in self?.markingGeometry })
+    /// 标记工具条面板（P2）：浮条宿主同款 nonactivating 面板，init 末段装配。
+    private lazy var markingToolbarPanel = MarkingToolbarPanel(
+        controller: markingOverlayController,
+        barFrameProvider: { [weak self] in
+            guard let self, controller.state == .recording || controller.state == .paused else { return nil }
+            return floatingBarPanel.screenFrame
+        },
+        onClose: { [weak self] in self?.setMarkingEnabled(false) })
+    /// 覆盖层坐标换算用的当次采集几何（P2）：标记开启时刻现场解析（模式随场变、窗口可
+    /// 跨屏移动，现场解析最准）；解析未落地前覆盖层已可见，换算 nil 丢弃极早期点。
+    private var markingGeometry: PiPCaptureGeometry?
+    /// 几何解析去重闸：一次开启期至多解析一次（disable 复位，re-enable 再解析）。
+    private var needsMarkingGeometryResolve = false
+    /// 标记装配订阅保活（$strokes 灌桥 / state×开关显隐重估）。
+    private var markingCancellables: Set<AnyCancellable> = []
     /// 偏好设置窗口控制器（T17）：窗口与控制器归装配容器（装配红线），懒建单例复用。
     private var preferencesWindowController: NSWindowController?
     /// 文件列表窗口控制器（T18）：窗口与控制器归装配容器（装配红线），懒建单例复用；
@@ -56,7 +87,8 @@ final class AppAssembly: ObservableObject {
         let clickHighlightTracker = ClickHighlightTracker(enabled: settings.clickHighlightEnabled)
         let coordinator = RecordingSessionCoordinator(
             cameraPiP: cameraPiP,
-            clickHighlightTracker: clickHighlightTracker)
+            clickHighlightTracker: clickHighlightTracker,
+            strokeSnapshotProvider: markingStore.currentSnapshot)
         let notifier = UNRecordingNotifier()
         let controller = CaptureController(
             session: coordinator,
@@ -130,6 +162,7 @@ final class AppAssembly: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] volume in coordinator?.setMicVolume(Float(volume)) }
             .store(in: &liveMicCancellables)
+        mountMarkingIfNeeded()
         mountGlobalShortcutsIfNeeded()
     }
 
@@ -171,6 +204,12 @@ final class AppAssembly: ObservableObject {
     /// 不影响进行中的录制）。控制器自守卫（非 `.idle` 一律 no-op），此处不重复判态。
     private func startRecording(mode: CaptureMode) {
         settings.lastCaptureMode = mode
+        // 标记会话态复位（计划钉定「每次录制重新开关」——非持久化、跨录制不保留）：
+        // 关闭开关（显隐订阅随之收起覆盖层/工具条）+ 画布清空（新录制从空白开始，
+        // 笔画不跨录制留存）+ 几何缓存失效（下次开启时现场重解析）。
+        setMarkingEnabled(false)
+        markingCanvas.clear()
+        markingGeometry = nil
         try? fileStore.ensureDirectory()
         let config = Self.makeConfiguration(
             settings: settings,
@@ -298,9 +337,9 @@ final class AppAssembly: ObservableObject {
         recordingListWindowController?.window?.makeKeyAndOrderFront(nil)
     }
 
-    /// 全局快捷键订阅（⇧⌘R / ⇧⌘P / ⇧⌘W）：App 启动（装配）时挂载恰好一次。动作经主 actor
+    /// 全局快捷键订阅（⇧⌘R / ⇧⌘P / ⇧⌘W / ⇧⌘M）：App 启动（装配）时挂载恰好一次。动作经主 actor
     /// 跳转进入装配层开关方法；包内 `onKeyUp` 把动作追加进静态注册表（无需持有返回值），
-    /// 故以 `globalShortcutsMounted` 进程级闸防重挂双触发（裁定 4）。
+    /// 故以 `globalShortcutsMounted` 进程级闸防重挂双触发（裁定 4，T17 一次挂载门沿用）。
     private func mountGlobalShortcutsIfNeeded() {
         guard !Self.globalShortcutsMounted else { return }
         Self.globalShortcutsMounted = true
@@ -312,6 +351,86 @@ final class AppAssembly: ObservableObject {
         }
         KeyboardShortcuts.onKeyUp(for: .startWindowRecording) { [weak self] in
             Task { @MainActor in self?.startWindowRecordingShortcut() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .toggleMarkingTools) { [weak self] in
+            Task { @MainActor in self?.toggleMarkingTools() }
+        }
+    }
+
+    // MARK: 边录边标记装配与开关（P2）
+
+    /// 标记链路装配（init 末段调用一次；lazy 面板在首次访问时构造）：画布→快照桥灌入、
+    /// 显隐重估订阅（state × 开关任一变化）、浮条画笔按钮接线、点击系抑制缝。
+    private func mountMarkingIfNeeded() {
+        // 画布笔画 → 快照桥：装配层唯一的灌入点（video 队列经锁保护读，零分配过河）。
+        markingCanvas.$strokes
+            .sink { [weak self] strokes in
+                self?.markingStore.update(MarkingStrokeSnapshot(strokes: strokes))
+            }
+            .store(in: &markingCancellables)
+        // 显隐重估（显隐条件：markingEnabled && recording/paused，见 MarkingOverlayController）：
+        // 覆盖层拉取式重估 + 工具条显隐 + 开启时刻的几何现场解析。
+        Publishers.CombineLatest(controller.$state, $markingEnabled)
+            .dropFirst()
+            .sink { [weak self] state, enabled in
+                self?.refreshMarkingSurfaces(state: state, enabled: enabled)
+            }
+            .store(in: &markingCancellables)
+        // 浮条画笔按钮（录制/暂停态工具条与浮条并存——按钮在浮条上）。
+        floatingBarPanel.attachMarkingToggle(
+            provider: { [weak self] in self?.markingEnabled ?? false },
+            toggle: { [weak self] in self?.toggleMarkingTools() })
+        // 点击系抑制（spec §5 P2：绘图拖拽不得触发点击高亮/缩放/音效）。调查结论（钉进
+        // 代码注释与验收清单）：标记面板是本 App 自己的窗口，其按下事件不达 tracker 的
+        // **全局** monitor（计划钉定假设成立）；但**本地** monitor 收得到本 App 窗口的
+        // mouseDown——按窗口 identifier 显式过滤（覆盖层与工具条一并抑制）。
+        clickHighlightTracker.isLocalClickSuppressed = { event in
+            let identifier = event.window?.identifier
+            return identifier == MarkingOverlayController.overlayWindowIdentifier
+                || identifier == MarkingToolbarPanel.panelWindowIdentifier
+        }
+    }
+
+    /// 标记显隐面重估（state / markingEnabled 任一变化时；含几何解析去重闸）。
+    private func refreshMarkingSurfaces(state: CaptureState, enabled: Bool) {
+        markingOverlayController.refreshVisibility()
+        markingToolbarPanel.setVisible(enabled && (state == .recording || state == .paused))
+        // 开启时刻现场解析采集几何（覆盖层换算用）；disable 复位闸，re-enable 再解析。
+        if enabled {
+            if state == .recording || state == .paused,
+               !needsMarkingGeometryResolve, markingGeometry == nil {
+                needsMarkingGeometryResolve = true
+                resolveMarkingGeometry()
+            }
+        } else {
+            needsMarkingGeometryResolve = false
+        }
+    }
+
+    /// 现场解析标记几何（主 actor Task 内 await；失败留在 nil = 换算丢弃全部点，
+    /// 与点击系「几何失败降级纯屏幕」同一降级精神）。
+    private func resolveMarkingGeometry() {
+        let mode = settings.lastCaptureMode
+        Task { [weak self] in
+            let geometry = await PiPCaptureGeometry.resolve(for: mode)
+            self?.markingGeometry = geometry
+        }
+    }
+
+    /// 标记开关唯一写入口（画笔按钮 / ⇧⌘M / 工具条关闭共用）；显隐重估在订阅里统一走。
+    func setMarkingEnabled(_ enabled: Bool) {
+        guard markingEnabled != enabled else { return }
+        markingEnabled = enabled
+    }
+
+    /// ⇧⌘M 开关（Task 5）：录制/暂停中切换标记工具；其余状态 no-op（覆盖层只在录制期
+    /// 存在——同 ⇧⌘W 的自守卫纪律）。
+    func toggleMarkingTools() {
+        switch controller.state {
+        case .recording, .paused:
+            setMarkingEnabled(!markingEnabled)
+        case .idle, .countdown, .finishing:
+            NSLog("MarkingShortcut: 忽略 ⇧⌘M（当前状态非录制/暂停：\(controller.state)）")
         }
     }
 

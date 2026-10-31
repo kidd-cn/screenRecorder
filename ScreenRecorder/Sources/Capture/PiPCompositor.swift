@@ -98,7 +98,8 @@ struct PiPCaptureGeometry {
 /// - 画布尺寸以逐帧实测的 `screenFrame` 尺寸为准（修复轮 Minor #2：`init(pixelSize:)` 的
 ///   尺寸只是提示，消除「缓冲实际尺寸 == init 假设」前提）；
 /// - 无 PiP（pip / pipFrame 为 nil）或完全不相交时 PiP 路**零渲染**；无点击态或圈不可得时
-///   点击路**零渲染**；缩放仿射 nil 时缩放步恒等跳过；三路皆空时**直返原 buffer**；
+///   点击路**零渲染**；笔画快照空/nil 时笔画路**零渲染**（未在画的常态帧掩图缓存直取，
+///   零栅格化）；缩放仿射 nil 时缩放步恒等跳过；多路皆空时**直返原 buffer**；
 /// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append）；只在 PiP 或点击高亮开启时被调用
 ///   （调用方门控：`SCStreamRecorder` 按注入缝在位与否装配合成器）。
 /// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与两处 mask 缓存无需加锁。
@@ -137,18 +138,72 @@ final class PiPCompositor {
         let radius: CGFloat
     }
 
+    /// 笔画彩色位图单槽缓存：键为快照值 + 画布尺寸——快照相等（未在画）时逐帧零分配直取；
+    /// 续写/撤销/清空使快照不等即重栅格化（正在画的拖拽帧才付位图成本）。
+    private var strokesMaskCache: (snapshot: MarkingStrokeSnapshot,
+                                   canvasWidth: Int,
+                                   canvasHeight: Int,
+                                   image: CIImage)?
+
+    /// 笔画彩色位图（premultiplied RGBA：笔画带各自色值、其余透明，边沿 AA）。
+    /// 坐标：笔画点为底帧归一化（左上原点、y 向下 0…1），CGContext 原点左下、y 向上——
+    /// 与 CI 画布同一翻转（`ciY = 画布高 − 缓冲 y`，placeClickOverlay 同口径）。
+    /// 单点笔画（点击未拖）画圆头点。
+    private static func makeStrokesCGImage(_ snapshot: MarkingStrokeSnapshot,
+                                           canvasWidth: Int,
+                                           canvasHeight: Int) -> CGImage? {
+        let context = CGContext(
+            data: nil, width: canvasWidth, height: canvasHeight, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard let context else { return nil }
+        let canvasW = CGFloat(canvasWidth)
+        let canvasH = CGFloat(canvasHeight)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        for stroke in snapshot.strokes {
+            let lineWidth = CGFloat(stroke.width) * min(canvasW, canvasH)
+            guard lineWidth > 0, lineWidth.isFinite else { continue }
+            context.setStrokeColor(red: CGFloat(stroke.color.red), green: CGFloat(stroke.color.green),
+                                   blue: CGFloat(stroke.color.blue), alpha: 1)
+            context.setFillColor(red: CGFloat(stroke.color.red), green: CGFloat(stroke.color.green),
+                                 blue: CGFloat(stroke.color.blue), alpha: 1)
+            context.setLineWidth(lineWidth)
+            // 归一化（y 向下）→ 位图坐标（y 向上）：x×宽、y = 高 − y×高。
+            let mapped = stroke.points.map { point in
+                CGPoint(x: point.x * canvasW, y: canvasH - point.y * canvasH)
+            }
+            guard let first = mapped.first else { continue }
+            if mapped.count == 1 {
+                // 单点笔画：圆头半径的实心点（描边零长线段不出墨）。
+                let radius = lineWidth / 2
+                context.fillEllipse(in: CGRect(x: first.x - radius, y: first.y - radius,
+                                               width: lineWidth, height: lineWidth))
+                continue
+            }
+            context.beginPath()
+            context.move(to: first)
+            for point in mapped.dropFirst() {
+                context.addLine(to: point)
+            }
+            context.strokePath()
+        }
+        return context.makeImage()
+    }
+
     /// - Parameter pixelSize: 期望输出尺寸（提示值，简报签名逐字）；实际画布以逐帧实测的
     ///   screenFrame 尺寸为准，缓冲池延迟到首帧按实测尺寸建立。
     init(pixelSize: CGSize) {
         self.pixelSize = pixelSize
     }
 
-    /// 逐帧合成（二期 P1a：签名增 `zoomTransform`，合成次序总则 v2）。screen 为底；
-    /// 三效果全缺省直返 screen（零渲染直返原 buffer，与一期逐字节一致）。单效果缺省时
+    /// 逐帧合成（二期 P2：签名增 `strokes`，合成次序总则 v2 终态）。screen 为底；
+    /// 全效果缺省直返 screen（零渲染直返原 buffer，与一期逐字节一致）。单效果缺省时
     /// 该路零渲染跳过，另一路照常。
     ///
-    /// 次序 v2（规格 §5）：底帧 → 点击环（内容锚定层）→ **统一施加缩放** → PiP（视口锚定层）。
-    /// 一期「环在 PiP 上」的次序自本签名起终结——环画在缩放之下，随缩放一起变换。
+    /// 次序 v2（规格 §5）：底帧 → 点击环 → **标记笔画**（两者皆内容锚定层）→ **统一施加缩放**
+    /// → PiP（视口锚定层）。笔画与环同在缩放之下——笔画随内容一起缩放（content-anchored），
+    /// Task 9 的 keyboardOverlay 才追加在 PiP 之后的视口锚定位置。
     /// `zoomTransform` 为 CI 画布空间（y 向上，与 placeClickOverlay/placePip 的换算口径同源）
     /// 的仿射；`transformed(by:)` 是惰性 CI recipe，热路径零位图分配。
     @discardableResult
@@ -156,10 +211,11 @@ final class PiPCompositor {
                    pip: CVPixelBuffer?,
                    pipFrame: PiPFrame?,
                    clickOverlay: ClickOverlayState? = nil,
+                   strokes: MarkingStrokeSnapshot? = nil,
                    zoomTransform: CGAffineTransform? = nil,
                    at pts: CMTime,
                    into context: CIContext) -> CVPixelBuffer {
-        guard pip != nil || clickOverlay != nil || zoomTransform != nil else { return screenFrame } // 全缺省：零开销直返原 buffer
+        guard pip != nil || clickOverlay != nil || strokes != nil || zoomTransform != nil else { return screenFrame } // 全缺省：零开销直返原 buffer
         // 画布尺寸以 screenFrame 实测为准（修复轮 Minor #2）：与 init pixelSize 失配时按
         // 实测求交、换算与出图——不得误判越界直通，也不得输出错误尺寸。
         let bounds = CGRect(
@@ -174,7 +230,12 @@ final class PiPCompositor {
         if let clickOverlay, let overlayImage = placeClickOverlay(clickOverlay, in: bounds) {
             composed = overlayImage.composited(over: composed ?? base)
         }
-        // 统一缩放（v2）：对已含环的画面施加 zoomTransform（nil = 恒等跳过）。
+        // 标记笔画（内容锚定层，P2）：画在环之上、缩放之下。快照空/掩图失败本路直通不丢帧；
+        // 掩图单槽缓存使「未在画」的常态帧零栅格化（与点击环的掩图缓存同一热路径纪律）。
+        if let strokes, let strokesImage = placeStrokes(strokes, in: bounds) {
+            composed = strokesImage.composited(over: composed ?? base)
+        }
+        // 统一缩放（v2）：对已含环与笔画的画面施加 zoomTransform（nil = 恒等跳过）。
         if let zoomTransform {
             composed = (composed ?? base).transformed(by: zoomTransform)
         }
@@ -187,6 +248,29 @@ final class PiPCompositor {
         guard let composed, let output = dequeueOutputBuffer(size: bounds.size) else { return screenFrame }
         context.render(composed, to: output)
         return output
+    }
+
+    /// 标记笔画层（P2）：全部笔画栅格化为一张**彩色** RGBA 位图——每笔画自带
+    /// `MarkingColor`（黑/红），掩图方案（灰度形状 + 单色 CIBlendWithMask）装不下
+    /// 逐笔画颜色，直接把色值烘进位图再 sourceOver 合成（一次栅格化、零滤镜链）。
+    /// 缓存：快照值 + 画布尺寸作单槽键——`MarkingStrokeSnapshot` 为 Equatable 值类型，
+    /// 未在画时逐帧相等直取缓存（零分配）。
+    /// 线宽按底帧**短边**归一换算像素（`width × min(w, h)`，简报钉定），圆头圆角连接。
+    private func placeStrokes(_ snapshot: MarkingStrokeSnapshot, in bounds: CGRect) -> CIImage? {
+        guard !snapshot.strokes.isEmpty else { return nil }
+        let width = Int(bounds.width)
+        let height = Int(bounds.height)
+        guard width > 0, height > 0 else { return nil }
+        if let cache = strokesMaskCache,
+           cache.snapshot == snapshot, cache.canvasWidth == width, cache.canvasHeight == height {
+            return cache.image
+        }
+        guard let layerCG = Self.makeStrokesCGImage(snapshot, canvasWidth: width, canvasHeight: height) else {
+            return nil
+        }
+        let layer = CIImage(cgImage: layerCG).cropped(to: bounds)
+        strokesMaskCache = (snapshot, width, height, layer) // 单槽缓存（快照变更即整体换装）
+        return layer
     }
 
     /// PiP 摆放（原 composite 主体逐行搬移；`base` 形参名保留，v2 下传入的底图是

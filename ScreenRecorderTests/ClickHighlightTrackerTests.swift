@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import Foundation
 import XCTest
@@ -196,5 +197,54 @@ final class ClickHighlightOnClickTests: XCTestCase {
         tracker.onClick = nil
         tracker.recordClick(point: .zero, at: Date()) // 清空后再记录：nil 安全
         XCTAssertNil(tracker.onClick)
+    }
+}
+
+// MARK: - 本地事件抑制缝（P2 边录边标记，spec §5「绘图拖拽不触发点击系效果」）
+
+final class ClickHighlightSuppressionTests: XCTestCase {
+    /// 合成 leftMouseDown（CGEvent 路线，与 ESC 测试同款——无头进程无真实窗口可点）。
+    private func makeMouseDown() -> NSEvent {
+        let cgEvent = CGEvent(
+            mouseEventSource: nil,
+            mouseType: .leftMouseDown,
+            mouseCursorPosition: CGPoint(x: 100, y: 100),
+            mouseButton: .left)!
+        return NSEvent(cgEvent: cgEvent)!
+    }
+
+    /// 抑制缝钉测（无头走 `handleLocalMouseDown` 入口，不装真实 monitor）：
+    /// 缺省 nil = 不过滤照常记录；缝返回 true = 不记录（无环/无缩放喂入/无音效——
+    /// 记录是三条链的共同上游，掐住记录即全链静默）；缝返回 false / 复位 nil 恢复记录。
+    ///
+    /// 背景断言（Task 5 调查结论，验收清单）：标记覆盖层是本 App 自己的窗口，其按下事件
+    /// **不会**到达 tracker 的全局 monitor（NSEvent 全局监听收不到被本 App 处理的事件，
+    /// 计划所钉假设成立）；但本地 monitor（addLocalMonitorForEvents）**收得到**本 App
+    /// 窗口的 mouseDown——计划假设「天然不达」对本地监听不成立，故需此缝按事件目标窗口
+    /// 显式过滤（覆盖层/工具条面板的按下不得画环、不得触发缩放与音效）。
+    func testLocalMouseDownSuppressionSeamSkipsClickRecording() {
+        let tracker = ClickHighlightTracker(enabled: true)
+        let event = makeMouseDown()
+
+        // 缺省 nil：本地按下照常记录（本 App 窗口的普通点击——点浮条等——仍画环）。
+        tracker.handleLocalMouseDown(event)
+        XCTAssertNotNil(tracker.currentState { $0 }, "未装配抑制缝时本地按下照常记录")
+
+        // 缝返回 true（标记工具窗口命中）：不记录——衰减窗口内无叠加态。
+        tracker.isLocalClickSuppressed = { _ in true }
+        tracker.stop() // 清残影（stopInternal 清 lastClick，与生产收尾同路径）
+        tracker.handleLocalMouseDown(event)
+        XCTAssertNil(tracker.currentState { $0 }, "被抑制的本地按下不得记录为点击（不画环/不喂缩放/不调度音效）")
+
+        // 缝返回 false：恢复记录。
+        tracker.isLocalClickSuppressed = { _ in false }
+        tracker.handleLocalMouseDown(event)
+        XCTAssertNotNil(tracker.currentState { $0 }, "缝放行时照常记录")
+
+        // 复位 nil：同缺省，照常记录。
+        tracker.isLocalClickSuppressed = nil
+        tracker.stop()
+        tracker.handleLocalMouseDown(event)
+        XCTAssertNotNil(tracker.currentState { $0 }, "缝复位 nil 后照常记录")
     }
 }
