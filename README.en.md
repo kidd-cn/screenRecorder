@@ -6,7 +6,7 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 
 ## Features
 
-- **Three capture modes**: fullscreen (per-display) / window / region rubber-band
+- **Five capture modes**: fullscreen (per-display) / window / region rubber-band / whole-app (all windows of one application on a fixed canvas) / window region (draw a crop inside a chosen window)
 - **Audio mixing**: independent system-audio and microphone toggles; live mic volume slider and in-recording mute
 - **Camera PiP**: draggable rounded picture-in-picture; mirrored preview, non-mirrored output (FaceTime-style); auto-degrade and recovery on device unplug/replug
 - **Click highlighting**: fading yellow ring, toggleable
