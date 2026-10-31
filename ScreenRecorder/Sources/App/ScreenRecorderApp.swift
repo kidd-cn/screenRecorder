@@ -293,6 +293,13 @@ final class AppAssembly: ObservableObject {
         startRecording(mode: .audioOnly)
     }
 
+    /// 菜单「开始录制 → 仅摄像头」入口（P7b）：录制源是前置摄像头 AVCaptureSession，
+    /// 落盘 mp4 视频文件（PiP 叠加/缩放/点击高亮/音效/系统声经 makeConfiguration 强制关；
+    /// 输出扩展名沿用既有分流——audioOnly 之外的分支缺省 mp4，无需改动）。
+    func startCameraOnlyRecording() {
+        startRecording(mode: .cameraOnly)
+    }
+
     /// 唯一的开始装配点：持久化「上次使用的模式」（裁定 2：每次开始都记）→ 建输出目录 →
     /// 从 SettingsStore 快照装配 config → 进入控制器状态机（快照语义：录制中途改设置
     /// 不影响进行中的录制）。控制器自守卫（非 `.idle` 一律 no-op），此处不重复判态。
@@ -331,23 +338,31 @@ final class AppAssembly: ObservableObject {
     /// P7a 仅声音装配裁定：系统声恒开（该模式的定义性音源——用户关掉系统声的偏好只对
     /// 视频模式生效，否则一场仅声音录制零音源、必走 nothingWritten 无成片）；摄像头画中画
     /// 恒关（无视频轨可叠，开着只会凭空弹摄像头浮窗）。
+    /// P7b 仅摄像头装配裁定（规格钉定「效果不可用」）：PiP 叠加/缩放/点击高亮/点击音效
+    /// 恒关（画面无屏幕内容可叠可缩可高亮；音效骑点击高亮同一点击源的效果族，随门一并关）
+    /// ——规格允许「置灰或忽略」，本处取「忽略」语义（入口保持可翻，开录快照强制关）；
+    /// 系统声恒关（系统声唯一采集通道是 SCStream，cameraOnly 不建流——强制 true 只会空转
+    /// 一个无源混音器）；麦克风照常（用户偏好，经 recorder 内部 AVAudioEngine mixer 可混）。
+    /// 录制源摄像头不经 includeCamera——那是画中画叠加开关。
     static func makeConfiguration(settings: SettingsStore, mode: CaptureMode, outputURL: URL) -> RecordingConfiguration {
         let audioOnly: Bool = if case .audioOnly = mode { true } else { false }
+        let cameraOnly: Bool = if case .cameraOnly = mode { true } else { false }
+        let systemAudio = cameraOnly ? false : (audioOnly || settings.captureSystemAudio)
         return RecordingConfiguration(
             mode: mode,
-            captureSystemAudio: audioOnly || settings.captureSystemAudio,
+            captureSystemAudio: systemAudio,
             captureMicrophone: settings.captureMicrophone,
             micVolume: settings.micVolume,
             micMuted: settings.micMuted,
-            includeCamera: !audioOnly && settings.pipEnabled,
+            includeCamera: !(audioOnly || cameraOnly) && settings.pipEnabled,
             cameraBackground: settings.cameraBackground, // P5：开录快照（下一场录制生效）
             fps: settings.fps,
             codec: settings.videoCodec,
             outputURL: outputURL,
-            clickHighlightEnabled: settings.clickHighlightEnabled,
-            autoZoomEnabled: settings.autoZoomEnabled,
+            clickHighlightEnabled: !cameraOnly && settings.clickHighlightEnabled,
+            autoZoomEnabled: !cameraOnly && settings.autoZoomEnabled,
             autoZoomLevel: settings.autoZoomLevel,
-            clickSoundEnabled: settings.clickSoundEnabled
+            clickSoundEnabled: !cameraOnly && settings.clickSoundEnabled
         )
     }
 
@@ -623,15 +638,21 @@ final class AppAssembly: ObservableObject {
     /// 标记显隐面重估（state / markingEnabled 任一变化时；含几何解析去重闸）。全部显隐/
     /// 换装判定只消费 CombineLatest 的**发射值**——sink 在 @Published willSet 阶段同步
     /// 执行，此刻属性与 provider 回拉都是旧值（T5 修复轮2 Critical 1），一处都不回拉。
+    /// P7b（T13 停放 Minor 一并收口）：无视频画布模式（audioOnly/cameraOnly，共享判定
+    /// `CaptureMode.hasVideoCanvas`）标记面整体不唤出——工具条不显示、画笔按钮保持关闭态、
+    /// 几何不解析（覆盖层激活门在 MarkingOverlayController.refreshVisibility 走同一谓词）。
+    /// `lastCaptureMode` 在 startRecording 起录时刻定格为当次模式、会话期内稳定（与
+    /// MarkingOverlayController 同论证），非发射值时序敏感读，与直传纪律不冲突。
     private func refreshMarkingSurfaces(state: CaptureState, enabled: Bool) {
+        let modeHasCanvas = settings.lastCaptureMode.hasVideoCanvas
         markingOverlayController.refreshVisibility(enabled: enabled, state: state)
-        markingToolbarPanel.setVisible(enabled && (state == .recording || state == .paused))
+        markingToolbarPanel.setVisible(enabled && modeHasCanvas && (state == .recording || state == .paused))
         // 画笔按钮换装（发射值直传，修复轮2 Important 2：不并刷则图标/help/a11y 冻结在
         // attach 时刻的初态）。
-        floatingBarPanel.refreshMarkingToggle(enabled: enabled)
+        floatingBarPanel.refreshMarkingToggle(enabled: enabled && modeHasCanvas)
         // 开启时刻现场解析采集几何（覆盖层换算用）；disable 复位闸，re-enable 再解析。
         if enabled {
-            if state == .recording || state == .paused,
+            if state == .recording || state == .paused, modeHasCanvas,
                !needsMarkingGeometryResolve, markingGeometry == nil {
                 needsMarkingGeometryResolve = true
                 resolveMarkingGeometry()
@@ -658,10 +679,16 @@ final class AppAssembly: ObservableObject {
     }
 
     /// ⇧⌘M 开关（Task 5）：录制/暂停中切换标记工具；其余状态 no-op（覆盖层只在录制期
-    /// 存在——同 ⇧⌘W 的自守卫纪律）。
+    /// 存在——同 ⇧⌘W 的自守卫纪律）。P7b（T13 停放 Minor 同门收口）：无视频画布模式
+    ///（audioOnly/cameraOnly，共享判定 hasVideoCanvas）标记入口忽略——覆盖层/工具条/
+    /// 画笔按钮已在 refreshMarkingSurfaces 整面不唤出，此处兜快捷键/画笔按钮直呼。
     func toggleMarkingTools() {
         switch controller.state {
         case .recording, .paused:
+            guard settings.lastCaptureMode.hasVideoCanvas else {
+                NSLog("MarkingShortcut: 忽略 ⇧⌘M（当前模式无视频画布：\(settings.lastCaptureMode)）")
+                return
+            }
             setMarkingEnabled(!markingEnabled)
         case .idle, .countdown, .finishing:
             NSLog("MarkingShortcut: 忽略 ⇧⌘M（当前状态非录制/暂停：\(controller.state)）")
@@ -1113,6 +1140,7 @@ struct ScreenRecorderApp: App {
                 onStartRegion: { assembly.startRegionRecording() },
                 onStartWindowRegion: { assembly.startWindowRegionRecording() },
                 onStartAudioOnly: { assembly.startAudioOnlyRecording() },
+                onStartCameraOnly: { assembly.startCameraOnlyRecording() },
                 onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenScheduledPanel: { assembly.openScheduledRecordingPanel() },
                 onCancelScheduled: { assembly.scheduler.cancel() },

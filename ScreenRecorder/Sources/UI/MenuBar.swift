@@ -3,7 +3,7 @@ import CoreGraphics
 import SwiftUI
 
 /// 菜单栏菜单最终形态（T19）：开始录制子菜单（全屏=显示器列表 / 窗口… / App…（P3a）/ 区域… /
-/// 窗口区域…（P3b）/ 仅声音（P7a））、
+/// 窗口区域…（P3b）/ 仅声音（P7a）/ 仅摄像头（P7b））、
 /// 暂停/恢复、停止、摄像头画中画开关、文件列表…、偏好设置…、关于、退出。
 /// 全部动作走 AppAssembly 闭包缝（T17 装配纪律：配置装配与窗口所有权归装配层）；
 /// 菜单项可用性由 `CaptureController.state` 状态机驱动（裁定 2）：开始子菜单仅 `.idle` 可用，
@@ -29,6 +29,9 @@ struct MenuBarView: View {
     let onStartWindowRegion: () -> Void
     /// 仅声音录制（P7a）：不采集视频，落盘纯音轨 .m4a（编排归 AppAssembly，同其他入口）。
     let onStartAudioOnly: () -> Void
+    /// 仅摄像头录制（P7b）：录制源是前置摄像头，落盘 mp4 视频文件（编排归 AppAssembly，
+    /// 同其他入口）。
+    let onStartCameraOnly: () -> Void
     /// 打开文件列表窗口（T18，窗口与控制器归 AppAssembly，见 T17 装配红线）。
     let onOpenRecordingList: () -> Void
     /// 打开定时录制面板（P6b，窗口归 AppAssembly，见 openScheduledRecordingPanel）。
@@ -64,6 +67,10 @@ struct MenuBarView: View {
                 onStartAudioOnly()
             }
             .accessibilityLabel("仅声音录制：只录系统声音与麦克风，输出 m4a 音频文件")
+            Button("仅摄像头") {
+                onStartCameraOnly()
+            }
+            .accessibilityLabel("仅摄像头录制：只录前置摄像头画面与麦克风，输出 mp4 视频文件")
         }
         .disabled(controller.state != .idle)
         Button(pauseResumeTitle, systemImage: pauseResumeIcon) {

@@ -30,6 +30,30 @@ enum CaptureMode: Equatable, Codable {
     /// `.m4a`（无视频 input 的 AVAssetWriter 会话）。无关联值：`lastCaptureMode`
     /// （⇧⌘R 上次使用模式）与 Codable 落库同其余模式。
     case audioOnly
+    /// 仅摄像头录制（P7b）：录制源是前置摄像头 `AVCaptureSession`（videoDataOutput →
+    /// AVAssetWriter，非 SCStream）+ 麦克风经 AVAudioEngine mixer 可混，落盘 `.mp4` 视
+    /// 频。规格钉定：PiP 叠加/缩放/标记/点击高亮等屏幕合成效果族在本模式不可用
+    ///（`makeConfiguration` 强制全关——无屏幕画布可叠可缩可标注；录制源摄像头不经
+    /// `includeCamera`，那是画中画叠加开关）。无关联值：`lastCaptureMode` 与 Codable
+    /// 落库同其余模式。
+    case cameraOnly
+}
+
+/// `CaptureMode` 的画布语义扩展：本模式是否存在「被录制的屏幕视频画布」（单一真源）。
+/// audioOnly（P7a）无视频源、cameraOnly（P7b）有视频但源是摄像头**非屏幕**——二者共享
+/// 「无视频画布」侧，供标记入口共享判定（MarkingOverlayController / 工具条 / 画笔按钮 /
+/// AppAssembly.refreshMarkingSurfaces）与源丢失监视武装门（CaptureController）等消费点
+/// 使用，避免各处手写 `mode != .audioOnly && mode != .cameraOnly` 漂移。
+extension CaptureMode {
+    /// display/window/region/app/windowRegion = 屏幕视频画布在；audioOnly/cameraOnly = 无。
+    var hasVideoCanvas: Bool {
+        switch self {
+        case .display, .window, .region, .app, .windowRegion:
+            return true
+        case .audioOnly, .cameraOnly:
+            return false
+        }
+    }
 }
 
 /// 摄像头画中画的背景模式（P5）：原画面 / 人像模糊 / 内置程序生成背景。开录快照语义

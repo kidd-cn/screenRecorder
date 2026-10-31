@@ -502,6 +502,11 @@ final class SCStreamRecorder: NSObject {
             // 装配：SCStream filter 锚主屏仅为 SCK API 形参要求，不装 `.screen` 输出即
             // 无视频帧、writer 无视频 input（成片纯音轨 .m4a）。
             return nil
+        case .cameraOnly:
+            // P7b：仅摄像头由协调器装配 CameraOnlyRecorder（AVCaptureSession 源，非
+            // SCStream），本类永不承载 cameraOnly 会话——nil 档为穷尽性表态（语义与
+            // audioOnly 同形：无 SCStream 视频目标）。
+            return nil
         }
     }
 
@@ -533,6 +538,12 @@ final class SCStreamRecorder: NSObject {
 
 /// SCStreamRecorder 即生产 sink：转发当前混音器效果缓冲调度（协议缝见 CaptureController）。
 extension SCStreamRecorder: ClickSoundScheduling {}
+
+// MARK: - 录制会话互换缝（P7b）
+
+/// P7b 协调器互换装配：生命周期（start/pause/resume/stop）、成片/失败诊断与混音 live 链
+/// 成员全部在位（含 ClickSoundScheduling），空扩展即合规。
+extension SCStreamRecorder: CaptureRecorderControlling {}
 
 // MARK: - 采样回调
 

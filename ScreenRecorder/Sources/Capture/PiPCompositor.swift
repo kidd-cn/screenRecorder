@@ -118,6 +118,12 @@ struct PiPCaptureGeometry {
             // 不装配（composite 直通语义的上游；audioOnly 会话本无视频帧，composite 永不
             // 触及，此 nil 是穷尽性表态 + 视效链路的双保险）。
             return nil
+        case .cameraOnly:
+            // P7b：仅摄像头无屏幕画布（有视频但源是摄像头）——nil = 无采集几何，语义与
+            // audioOnly 同形：cameraOnly 会话的 PiP/高亮/缩放/标记链在 makeConfiguration
+            // 已强制全关且协调器装配 CameraOnlyRecorder（无屏幕合成链），resolve 不应被
+            // 触达；此 nil 是穷尽性表态 + 视效链路的双保险。
+            return nil
         }
     }
 }

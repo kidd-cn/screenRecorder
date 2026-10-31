@@ -39,6 +39,35 @@ protocol ClickSoundScheduling: AnyObject {
     func scheduleClickEffect()
 }
 
+/// 录制会话互换缝（P7b）：协调器装配的录制器生命周期与 live 链统一面。生产实现
+/// `SCStreamRecorder`（SCStream 屏幕采集）与 `CameraOnlyRecorder`（P7b AVCaptureSession
+/// 前置摄像头采集）——成员集取两实现的既有交集（pause/resume/stop 生命周期、成片与
+/// 失败诊断、暂停丢弃计数、混音 live 链转发），装配层与协调器据此互换，不感知具体实现。
+/// 合成注入缝（pip*/click*/zoom*/stroke*/keyboard* provider）**不入**本协议：cameraOnly
+/// 经 makeConfiguration 强制全关、CameraOnlyRecorder 无合成链，协调器只在视频模式分支
+/// 以具体类型 `SCStreamRecorder` 装配它们。
+protocol CaptureRecorderControlling: AnyObject {
+    /// 会话失败通道（主队列保证；上层负责 stop 安全收尾）。
+    var onStreamFailure: ((Error) -> Void)? { get set }
+    /// stop() 完成后的成片 URL；nil = 无成片。
+    var finishedFileURL: URL? { get }
+    /// 首个失败原因（诊断用）。
+    var lastError: Error? { get }
+    /// 暂停丢弃诊断读数（stop 后快照存活，T10/T11 消费）。
+    var pausedDroppedVideoFrameCount: Int { get }
+    var pausedDroppedAudioPacketCount: Int { get }
+    func start() async throws
+    func pause()
+    func resume()
+    func stop() async
+    /// 混音 live 链（终审 F2 / T18）。
+    func setMicMuted(_ muted: Bool)
+    func setMicVolume(_ volume: Float)
+    func rebuildAudioAfterConfigurationChange()
+    /// 点击音效调度（P1b，随 ClickSoundScheduling 同成员进互换缝）。
+    func scheduleClickEffect()
+}
+
 /// 会话级领域错误：begin 前置磁盘检查与磁盘停阈值中断（区别于采集管线原始错误，
 /// 后者原样透传给 `CaptureController.handleSessionFailure` 做文案归类）。
 enum CaptureSessionError: Equatable, LocalizedError {
@@ -83,7 +112,10 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     private let diskProvider: DiskFreeSpaceProviding
     private let warnBelow: Int64
     private let stopBelow: Int64
-    private var recorder: SCStreamRecorder?
+    /// 当前录制会话（P7b 起为互换缝 `CaptureRecorderControlling`：视频模式装配
+    /// `SCStreamRecorder`、cameraOnly 装配 `CameraOnlyRecorder`；合成注入缝只在视频
+    /// 模式分支以具体类型装配，不经本 existential）。
+    private var recorder: CaptureRecorderControlling?
     private var monitor: DiskSpaceMonitor?
     /// PiP 装配单元（T15，AppAssembly 注入；nil = 无 PiP 能力，录制照常纯屏幕）。
     /// 运行时生命周期挂在 begin/finish（既有 stop 路径），失败内部降级不阻断录制。
@@ -145,6 +177,29 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         self.monitor = monitor
 
         keeper.activate(reason: "屏幕录制进行中")
+
+        // P7b：仅摄像头模式分流——录制源是前置摄像头 AVCaptureSession（非 SCStream），
+        // PiP 叠加/点击高亮/缩放/标记/键帽等屏幕合成效果链整体不装配（makeConfiguration
+        // 已强制全关，成片即摄像头画面 + 可选混音音轨）；磁盘检查/监控与电源断言与本分流
+        // 共用（前置装配段）。mic 经 recorder 内部 AVAudioEngine mixer 照常可混，live 链
+        // 与生命周期经 CaptureRecorderControlling 互换缝与视频模式同形。
+        if case .cameraOnly = config.mode {
+            let recorder = CameraOnlyRecorder(config: config)
+            recorder.onStreamFailure = { [weak self] error in self?.onInterruption?(error) }
+            self.recorder = recorder
+            do {
+                try await recorder.start()
+            } catch {
+                // 回滚：摘除失败 recorder + 停监控 + 释放断言（无 PiP 可收——本分支未触碰
+                // cameraPiP）；占位/claim 清理由 recorder 内部完成
+                self.recorder = nil
+                monitor.stopMonitoring()
+                self.monitor = nil
+                keeper.deactivate()
+                throw error
+            }
+            return
+        }
 
         // T15：PiP 随录制启动（includeCamera 时）——摄像头 + 浮窗先热，首帧起 PiP 就位。
         // 几何解析失败 / 授权拒绝 / 无摄像头在内部降级为纯屏幕（T8 混音降级精神），不阻断。
@@ -451,10 +506,11 @@ final class CaptureController: ObservableObject {
     private var sourceDisplayID: CGDirectDisplayID?
     /// 当前会话被采集 App 的 bundle id（P3a；nil = 非 App 模式）。
     private var sourceBundleID: String?
-    /// 当前会话是否采集视频（P7a）：audioOnly = false——纯声音录制不以显示器为源，源丢失
-    /// 监视整体不武装（显示器断连不构成仅声音会话的中断；若照搬窗口模式的 nil 全台语义，
-    /// 拔掉任一显示器都会误杀一场纯声音录制）。
-    private var sourceCapturesVideo = true
+    /// 当前会话源是否为屏幕（P7a 起）：audioOnly（P7a）无视频源、cameraOnly（P7b）源是
+    /// 摄像头——有视频但**非屏幕**，二者共享「无屏幕源」侧（共享判定真源
+    /// `CaptureMode.hasVideoCanvas`），源丢失监视整体不武装（显示器断连不构成这些会话的
+    /// 中断；若照搬窗口模式的 nil 全台语义，拔掉任一显示器都会误杀一场纯声音/纯摄像头录制）。
+    private var sourceIsScreen = true
 
     init(session: CaptureSessionManaging,
          store: RecordingFileStore,
@@ -492,11 +548,12 @@ final class CaptureController: ObservableObject {
         // 经协调器暂停门直接调度混音器）。
         clickHighlightTracker?.setEnabled(config.clickHighlightEnabled || config.autoZoomEnabled || config.clickSoundEnabled)
         // T18：源丢失匹配目标随捕获模式确定（裁定 2；P3a 起 App 模式另记 bundle id）。
-        // P7a：audioOnly 会话整体不武装源丢失监视（nil 在 audioOnly 是「无源可失」，
-        // 不是窗口模式的「采集全台」——分流见 sourceCapturesVideo）。
+        // P7a/P7b：无屏幕源（audioOnly/cameraOnly，共享判定 hasVideoCanvas）会话整体不
+        // 武装源丢失监视（nil 在这些模式是「无源可失」，不是窗口模式的「采集全台」——
+        // 分流见 sourceIsScreen）。
         sourceDisplayID = Self.capturedDisplayID(of: config.mode)
         sourceBundleID = Self.capturedAppBundleID(of: config.mode)
-        sourceCapturesVideo = config.mode != .audioOnly
+        sourceIsScreen = config.mode.hasVideoCanvas
         hasBegun = false
         pendingDiscard = false
         pendingFailure = nil
@@ -553,9 +610,10 @@ final class CaptureController: ObservableObject {
         state = .recording
         startElapsedTimer()
         clickHighlightTracker?.start() // T16：点击监听随录制启动（disabled 未装机为 no-op）
-        // T18：源丢失监视随录制启动（P3a：App 模式轮询窗口数）；P7a：audioOnly 不武装
-        //（sourceCapturesVideo false——显示器断连不构成纯声音会话的中断）。
-        if sourceCapturesVideo {
+        // T18：源丢失监视随录制启动（P3a：App 模式轮询窗口数）；P7a/P7b：无屏幕源
+        //（audioOnly/cameraOnly，sourceIsScreen false）不武装——显示器断连不构成这些
+        // 会话的中断（cameraOnly 的采集源是摄像头，非屏幕）。
+        if sourceIsScreen {
             sourceLossMonitor?.start(displayID: sourceDisplayID, appBundleID: sourceBundleID)
         }
         microphoneRouteWatcher?.start() // T18：路由变化观察随录制启动（混音器自愈，无 UI）
@@ -566,8 +624,9 @@ final class CaptureController: ObservableObject {
     ///（P3a）无定显示器（窗口可跨屏）→ nil，源丢失改由 bundle 窗口计数轮询判定；
     /// windowRegion（P3b）锚定单窗口，沿用窗口模式同款语义（nil，不做 App 式窗口计数
     /// ——窗口关闭跟随一期窗口模式的既有路径，显示器移除按全台语义自动保存）；
-    /// audioOnly（P7a）→ nil = 无源可失语义（纯声音会话的监视由 `sourceCapturesVideo`
-    /// 整体不武装，见 start——nil 在此与窗口模式的「采集全台」语义分流）。
+    /// audioOnly（P7a）/ cameraOnly（P7b）→ nil = 无源可失语义（这些会话的监视由
+    /// `sourceIsScreen` 整体不武装，见 start——nil 在此与窗口模式的「采集全台」语义
+    /// 分流；cameraOnly 的源是摄像头，非屏幕）。
     private static func capturedDisplayID(of mode: CaptureMode) -> CGDirectDisplayID? {
         switch mode {
         case .display(let displayID): return displayID
@@ -575,6 +634,7 @@ final class CaptureController: ObservableObject {
         case .window, .windowRegion: return nil
         case .app: return nil
         case .audioOnly: return nil
+        case .cameraOnly: return nil
         }
     }
 
@@ -666,7 +726,7 @@ final class CaptureController: ObservableObject {
         microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
         sourceDisplayID = nil
         sourceBundleID = nil
-        sourceCapturesVideo = false
+        sourceIsScreen = false
         let url = await session.finish()
         resetElapsed()
         state = .idle
@@ -691,7 +751,7 @@ final class CaptureController: ObservableObject {
         microphoneRouteWatcher?.stop() // T18：路由观察随收尾摘除（幂等）
         sourceDisplayID = nil
         sourceBundleID = nil
-        sourceCapturesVideo = false
+        sourceIsScreen = false
         let url = await session.finish()
         resetElapsed()
         state = .idle
