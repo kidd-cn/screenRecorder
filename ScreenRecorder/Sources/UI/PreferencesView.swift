@@ -64,7 +64,7 @@ enum HEVCEncoderCapability {
 // MARK: - 偏好设置界面
 
 /// 偏好设置（T17）：TabView 三页——通用（输出目录/倒计时/帧率/编码）、录制源（系统声音/
-/// 麦克风/画中画/点击高亮）、快捷键（两个 RecorderCocoa 系录制控件）。
+/// 麦克风/画中画/点击高亮）、快捷键（四个 RecorderCocoa 系录制控件，P2 增 ⇧⌘M）。
 /// 输出目录变更经 `onOutputDirectoryChange` 回到装配层（换 fileStore + 控制器 store），
 /// 视图不做装配副作用。
 struct PreferencesView: View {
@@ -228,14 +228,16 @@ private struct RecordingSourcesTab: View {
     }
 }
 
-/// 快捷键页：三个录制控件（`KeyboardShortcuts.Recorder` 内含 `RecorderCocoa`），
-/// 取值/落库由包自理（UserDefaults）。
+/// 快捷键页：四个录制控件（`KeyboardShortcuts.Recorder` 内含 `RecorderCocoa`），
+/// 取值/落库由包自理（UserDefaults）。⇧⌘M（Task 5）：边录边标记工具开关，spec §5 P2
+/// 「默认 ⇧⌘M 且可改」的用户面落点——与其他三键同款 Recorder 行。
 private struct ShortcutsTab: View {
     var body: some View {
         Form {
             KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
             KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
             KeyboardShortcuts.Recorder("录制所选窗口：", name: .startWindowRecording)
+            KeyboardShortcuts.Recorder("边录边标记：", name: .toggleMarkingTools)
             Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
