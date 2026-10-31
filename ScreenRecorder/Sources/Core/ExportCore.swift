@@ -7,7 +7,7 @@ import UniformTypeIdentifiers
 
 /// GIF 导出参数（P8）。档位外钳制到默认档：frameRate ∉ {5, 10, 15} → 10；
 /// maxWidth ∉ {480, 720, nil(不缩放)} → 720（与 frameRate 同规则——集合外一律归默认档）。
-/// 钳制在 init 收口：持有本值的 UI/导出各环节只见合法档位。
+/// 钳制仅发生在构造时（`var` 无 didSet——构造后直赋属性不设防；brief 钉 `var`，API 不变）。
 struct GIFExportOptions: Equatable {
     var frameRate: Int
     var maxWidth: Int?
@@ -31,7 +31,7 @@ struct GIFExportOptions: Equatable {
 
 /// 压缩预设（P8）：编码器 + 最大高度档。缺省「源分辨率 HEVC 高效重编码」（brief 钉定）。
 /// maxHeight ∉ {nil(源), 1080, 720} 就近归档（< 900 → 720，否则 → 1080；nil 保留）——
-/// 下限档位就近语义，UI Picker 只出合法档，此处为防御性钳制。
+/// 钳制仅发生在构造时（`var` 无 didSet，构造后直赋属性不设防）；UI Picker 只出合法档。
 struct CompressionPreset: Equatable {
     var codec: VideoCodec
     var maxHeight: Int?
@@ -73,6 +73,8 @@ enum ExportError: LocalizedError {
     case emptySource
     /// 压缩预设与源不兼容（AVAssetExportSession 拒绝装配）。
     case incompatiblePreset(String)
+    /// GIF 编码失败（ImageIO destination 装配/收尾失败——`gifData` 以空 Data 表现）。
+    case gifEncodingFailed
 
     var errorDescription: String? {
         switch self {
@@ -80,6 +82,8 @@ enum ExportError: LocalizedError {
             return "导出失败：源文件没有可用的视频内容"
         case .incompatiblePreset(let presetName):
             return "导出失败：压缩预设与源不兼容（\(presetName)）"
+        case .gifEncodingFailed:
+            return "导出失败：GIF 编码失败，请重试"
         }
     }
 }
@@ -132,7 +136,8 @@ enum ExportCore {
         return data as Data
     }
 
-    /// 采样计划（返回源帧索引序列）。窗口语义：
+    /// 采样计划（返回源帧索引序列）。前置条件：frames 按 pts 升序（真实抽帧序列天然
+    /// 满足——下方指针单调推进依赖此序）。窗口语义：
     /// - 窗 = `[首帧 pts, 尾帧 pts + 源帧步长)`，源帧步长 = 相邻 pts 最小正差（单帧回退
     ///   `1/目标帧率`）——窗端含首不含尾，30fps 整 1s 源在窗内容纳整数个目标帧周期；
     /// - 样本时刻 = 首 pts + `n/目标帧率`（CMTime 整数有理数，零浮点噪声），n = 0..<N，
@@ -216,6 +221,10 @@ enum ExportCore {
         }
 
         let data = gifData(fromFrames: frames, options: options)
+        // gifData 的 ImageIO 装配/收尾失败以空 Data 表现（纯函数签名不抛）——空 GIF
+        // 拒绝落盘（R1）：不得以成功 URL + 进度 1.0 静默交付 0 字节文件。触发路径
+        // （ImageIO 失败）无头不可确定性构造——守卫在位，归真机验收观察。
+        guard !data.isEmpty else { throw ExportError.gifEncodingFailed }
         let outputURL = gifDestinationURL(for: url)
         try data.write(to: outputURL, options: [.atomic])
         progress(1.0)
@@ -231,9 +240,29 @@ enum ExportCore {
         return (0..<count).map { CMTime(value: CMTimeValue($0), timescale: CMTimeScale(frameRate)) }
     }
 
+    /// 进度去重包装：仅转发严格递增的值（0…1 单调不减、无重复推）。
+    /// `compress` 的轮询器与显式推并发——轮询器可能在 export 返回前读到 1.0（与显式
+    /// 终值双推）、或在首拍读到 0.0（与显式首拍重合）；去重后终值 1.0 恰推一次
+    /// （轮询器抢先则显式推等值被吞）。NSLock：轮询器（协作池）与 async 主体并发调用。
+    static func deduplicatedProgress(_ progress: @escaping (Double) -> Void) -> (Double) -> Void {
+        let lock = NSLock()
+        var lastPushed = -1.0
+        return { newValue in
+            lock.lock()
+            guard newValue > lastPushed else {
+                lock.unlock()
+                return
+            }
+            lastPushed = newValue
+            lock.unlock()
+            progress(newValue)
+        }
+    }
+
     /// 录像文件 → 压缩 MP4。装配按 `compressionPlan`：最高质量预设 + 需要时
     /// `AVMutableVideoComposition.renderSize` 等比缩放（propertiesOf 旋转向自动处理）。
-    /// 进度以 100ms 轮询 `session.progress` 推送（终值恰一次 1.0）。
+    /// 进度以 100ms 轮询 `session.progress` 推送，经 `deduplicatedProgress` 去重
+    ///（0…1 单调不减、终值恰一次 1.0）。
     static func compress(
         from url: URL, preset: CompressionPreset, progress: @escaping (Double) -> Void
     ) async throws -> URL {
@@ -252,16 +281,17 @@ enum ExportCore {
         }
 
         let outputURL = compressedDestinationURL(for: url)
-        progress(0)
+        let push = deduplicatedProgress(progress)
+        push(0)
         let poller = Task(priority: .userInitiated) {
             while !Task.isCancelled {
-                progress(Double(session.progress))
+                push(Double(session.progress))
                 try? await Task.sleep(nanoseconds: 100_000_000)
             }
         }
         defer { poller.cancel() }
         try await session.export(to: outputURL, as: .mp4)
-        progress(1.0)
+        push(1.0)
         return outputURL
     }
 

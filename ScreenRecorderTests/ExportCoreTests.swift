@@ -234,4 +234,19 @@ final class ExportCoreTests: XCTestCase {
             CompressionPlan(presetName: AVAssetExportPresetHighestQuality, renderSize: CGSize(width: 1280, height: 720)),
             "H.264 同一缩放路径")
     }
+
+    // MARK: - 进度去重（R1：compress 轮询器与显式推并发——终值双推/首拍重合收敛）
+
+    func testProgressDedupDeliversStrictlyIncreasing() {
+        var delivered: [Double] = []
+        let push = ExportCore.deduplicatedProgress { delivered.append($0) }
+        push(0)
+        push(0)
+        push(0.4)
+        push(1.0)
+        push(1.0)
+
+        XCTAssertEqual(delivered, [0, 0.4, 1.0],
+                       "仅严格递增转发——首拍零重复、终值恰一次（轮询器抢先推 1.0 时显式终值等值被吞）")
+    }
 }
