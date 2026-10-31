@@ -52,6 +52,22 @@ final class MarkingCanvasTests: XCTestCase {
             CGPoint(x: 0.5, y: 0.5),
             CGPoint(x: 0.7, y: 0.5),
         ], "回到界内后笔画应续写（丢弃点只是不追加）")
+
+        // 边界恰在 1.0：0…1 为闭区间，边界点保留（复审轮 1 钉定）
+        canvas.extendStroke(to: CGPoint(x: 1.0, y: 1.0))
+        XCTAssertEqual(canvas.strokes[0].points.last, CGPoint(x: 1.0, y: 1.0),
+                       "边界点 1.0 属闭区间 0…1，应保留")
+        XCTAssertEqual(canvas.strokes.count, 1, "边界点不分裂笔画")
+
+        // 非有限点（NaN/∞）：contains 比较为 false，同落丢弃分支（复审轮 1 钉定）
+        canvas.extendStroke(to: CGPoint(x: CGFloat.nan, y: .infinity))
+        XCTAssertEqual(canvas.strokes[0].points.count, 3, "非有限点应丢弃，不追加")
+
+        // begin 路径同款防御：非有限起点不成笔
+        let nonFiniteCanvas = MarkingCanvas()
+        nonFiniteCanvas.beginStroke(color: .black, width: 0.004,
+                                    at: CGPoint(x: CGFloat.nan, y: .infinity))
+        XCTAssertTrue(nonFiniteCanvas.strokes.isEmpty, "非有限起点的 begin 不成笔")
     }
 
     func testUndoRemovesLastStrokeOnly() {
@@ -70,6 +86,15 @@ final class MarkingCanvasTests: XCTestCase {
         XCTAssertTrue(canvas.strokes.isEmpty)
         canvas.undoLast() // 空栈撤销：安全 no-op
         XCTAssertTrue(canvas.strokes.isEmpty)
+
+        // 撤销进行中的笔画 = 终止：续写下标失效，后续 extend 不得复活已撤销的
+        // 笔画（复审轮 1 钉定，Task 5 消费语义）
+        canvas.beginStroke(color: .red, width: 0.008, at: CGPoint(x: 0.3, y: 0.3))
+        canvas.extendStroke(to: CGPoint(x: 0.4, y: 0.4))
+        XCTAssertEqual(canvas.strokes.count, 1)
+        canvas.undoLast()
+        canvas.extendStroke(to: CGPoint(x: 0.5, y: 0.5))
+        XCTAssertTrue(canvas.strokes.isEmpty, "撤销进行中的笔画后，extend 不得复活它")
     }
 
     func testClearEmptiesAll() {

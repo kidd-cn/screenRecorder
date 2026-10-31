@@ -41,6 +41,8 @@ struct MarkingStrokeSnapshot: Equatable {
 ///   后续 extend 亦无笔画可续，直至下一次 begin（出界拖拽起点不烧入画面）；
 /// - `extendStroke` 在 begin 之前 / end 之后是安全 no-op（不断言不崩溃）；点越出
 ///   0…1 时仅丢弃该点——笔画断续继续，回到界内即续写，不分裂笔画；
+/// - `beginStroke` 在已有进行中笔画时静默另起新笔并接管续写下标（旧笔就地收尾，
+///   语义等同隐式 end + begin）；
 /// - `undoLast` 撤销最后一笔；若撤的正是进行中的那一笔，视同终止（后续 extend 不再
 ///   续写已撤销的笔画）。空栈撤销安全 no-op。
 @MainActor
@@ -87,7 +89,9 @@ final class MarkingCanvas: ObservableObject {
 
     /// 当前笔画快照（值拷贝）：合成器每帧入参的安全前提——取出后画布再怎么改
     /// （续写/撤销/清空）都不影响已取快照。`[MarkingStroke]` 值语义 + 写时复制保证：
-    /// 此处 O(1) 浅拷，画布后续原地写自动触发拷贝分离。
+    /// 此处 O(1) 浅拷，画布后续原地写自动触发拷贝分离。快照被持有期间（合成器逐帧
+    /// 持快照即此工况），进行中笔画的续写会连内层 points 数组一并拷贝分离
+    /// （O(k)，k 为该笔点数）——真实笔画长度下开销可忽略。
     var snapshot: MarkingStrokeSnapshot {
         MarkingStrokeSnapshot(strokes: strokes)
     }
