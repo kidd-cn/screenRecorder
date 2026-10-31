@@ -40,6 +40,9 @@ final class SCStreamRecorder: NSObject {
         case windowNotFound(CGWindowID)
         /// P3a：App 模式 start 时枚举不到该 bundle 的任何可录窗口（应用已退出/窗口全关）。
         case appNotFound(bundleID: String)
+        /// P3b：窗口区域 rect 开录钳制后与窗口当前范围完全无交集（⇧⌘R 复播遇窗口已缩小
+        /// 到陈旧 rect 之外），无内容可录，走 begin 失败路径。
+        case windowRegionClippedEmpty(CGWindowID)
 
         var errorDescription: String? {
             switch self {
@@ -49,6 +52,8 @@ final class SCStreamRecorder: NSObject {
                 return "SCShareableContent 中找不到窗口 id=\(id)（窗口可能已关闭）"
             case .appNotFound(let bundleID):
                 return "找不到应用（bundle id=\(bundleID)）的可录制窗口（应用可能已退出或窗口已全部关闭）"
+            case .windowRegionClippedEmpty(let id):
+                return "窗口（id=\(id)）已缩小到上次所选区域之外，无内容可录，请重新选择窗口区域"
             }
         }
     }
@@ -352,9 +357,11 @@ final class SCStreamRecorder: NSObject {
     private struct ResolvedTarget {
         let filter: SCContentFilter
         /// 输出像素尺寸：display=显示器物理像素；window=窗口 frame（points）；
-        /// app=窗口集 union 包围盒（points）；region=rect 尺寸。
+        /// app=窗口集 union 包围盒（points）；region/windowRegion=钳制后 rect 尺寸。
         let pixelSize: CGSize
         /// 区域模式（macOS 12.3+ sourceRect）的采样子集；nil = 全量采样。
+        /// windowRegion（P3b）亦走此缝：rect 为窗口相对系（desktopIndependentWindow
+        /// filter 的裁剪口径）。
         let sourceRect: CGRect?
     }
 
@@ -415,6 +422,28 @@ final class SCStreamRecorder: NSObject {
                 filter: SCContentFilter(display: display, excludingWindows: []),
                 pixelSize: rect.size,
                 sourceRect: rect
+            )
+        case .windowRegion(let windowID, let rect):
+            // P3b：窗口锚定区域 = 单窗口 filter（一期窗口模式同款装配）+ sourceRect 裁剪
+            //（region 模式的采样子集语义移植到窗口系）。rect 为窗口相对系（原点 = 窗口
+            // frame 左上、points、y 向下）——desktopIndependentWindow filter 的 sourceRect
+            // 口径，不经显示器全局系；输出像素尺寸按 points 1x 计（同 region/window，T7 台账）。
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
+                throw SCStreamRecorderError.windowNotFound(windowID)
+            }
+            // 开录钳制固定（P3b 裁定）：rect 与窗口 frame 求交一次定格。选区路径产出的 rect
+            // 恒在窗口内；⇧⌘R 复播遇到已缩小的窗口时裁回当前范围。此后不再重钳——录制中
+            // 窗口缩小沿用一期窗口模式语义（无 live 重配置）。完全裁空 = 无内容可录，同窗口
+            // 已关走 begin 失败路径。
+            let clampedRect = CGRect(origin: .zero, size: window.frame.size).intersection(rect)
+            guard clampedRect.width >= 1, clampedRect.height >= 1 else {
+                throw SCStreamRecorderError.windowRegionClippedEmpty(windowID)
+            }
+            return ResolvedTarget(
+                filter: SCContentFilter(desktopIndependentWindow: window),
+                pixelSize: clampedRect.size,
+                sourceRect: clampedRect
             )
         }
     }

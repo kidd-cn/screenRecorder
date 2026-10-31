@@ -2,7 +2,8 @@ import AppKit
 import CoreGraphics
 import SwiftUI
 
-/// 菜单栏菜单最终形态（T19）：开始录制子菜单（全屏=显示器列表 / 窗口… / App…（P3a）/ 区域…）、
+/// 菜单栏菜单最终形态（T19）：开始录制子菜单（全屏=显示器列表 / 窗口… / App…（P3a）/ 区域… /
+/// 窗口区域…（P3b））、
 /// 暂停/恢复、停止、摄像头画中画开关、文件列表…、偏好设置…、关于、退出。
 /// 全部动作走 AppAssembly 闭包缝（T17 装配纪律：配置装配与窗口所有权归装配层）；
 /// 菜单项可用性由 `CaptureController.state` 状态机驱动（裁定 2）：开始子菜单仅 `.idle` 可用，
@@ -20,6 +21,9 @@ struct MenuBarView: View {
     let onStartAppPicker: () -> Void
     /// 区域录制：RegionSelector 拖拽选区后开录（选区交互逻辑归 RegionSelector，不在此复制）。
     let onStartRegion: () -> Void
+    /// 窗口区域录制（P3b）：窗口选择器（窗口范围）→ 窗口内拖框 → 按所选窗口 + 窗口相对
+    /// rect 开录（编排归 AppAssembly，同其他入口）。
+    let onStartWindowRegion: () -> Void
     /// 打开文件列表窗口（T18，窗口与控制器归 AppAssembly，见 T17 装配红线）。
     let onOpenRecordingList: () -> Void
     /// 打开偏好设置窗口（窗口与控制器归 AppAssembly，见 T17 装配红线）。
@@ -43,6 +47,10 @@ struct MenuBarView: View {
             Button("区域…") {
                 onStartRegion()
             }
+            Button("窗口区域…") {
+                onStartWindowRegion()
+            }
+            .accessibilityLabel("窗口区域录制：选择一个窗口后，在其内部拖框选定录制范围")
         }
         .disabled(controller.state != .idle)
         Button(pauseResumeTitle, systemImage: pauseResumeIcon) {

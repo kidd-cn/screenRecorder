@@ -5,7 +5,8 @@ import Foundation
 /// 同型别名而非重定义：既有定义保持唯一，`RecordingConfiguration` 的 API 面按 brief 写作 `codec: VideoCodec`。
 typealias VideoCodec = SettingsStore.VideoCodec
 
-/// 捕获目标模式：整块显示器 / 单个独立窗口 / 显示器上的一块区域 / 一个应用的全部窗口。
+/// 捕获目标模式：整块显示器 / 单个独立窗口 / 显示器上的一块区域 / 一个应用的全部窗口 /
+/// 窗口内的一块区域（P3b）。
 /// region 的 rect 为显示器逻辑坐标系（points），与 `SCStreamConfiguration.sourceRect` 同一口径。
 /// Codable（关联值均可编码）：`SettingsStore.lastCaptureMode`（T17，⇧⌘R 上次使用模式）
 /// 以 JSON 整只落库 UserDefaults。
@@ -18,6 +19,12 @@ enum CaptureMode: Equatable, Codable {
     /// `SCContentFilter(display:including:)`（零窗口 → 走 begin 失败路径）；
     /// 录制期新开窗口不入画、部分关闭继续录、全部关闭走源丢失自动保存（规格画布纪律）。
     case app(bundleID: String)
+    /// 窗口区域录制（P3b）：一个窗口内用户拖出的子矩形。rect 为**窗口相对系**——原点 =
+    /// 窗口 frame 左上、points、y 向下，即 `SCContentFilter(desktopIndependentWindow:)` +
+    /// `SCStreamConfiguration.sourceRect` 的裁剪口径（不经显示器全局系，无多屏偏移/Y 翻转
+    /// 坑）。开录时 rect 与窗口 frame 求交钳制一次固定（SCStreamRecorder.resolveTarget）；
+    /// 录制中窗口缩小沿用一期窗口模式语义（无 live 重配置，不重钳制）。
+    case windowRegion(window: CGWindowID, rect: CGRect)
 }
 
 /// 一次录制会话的完整参数快照：启动录制时由上层从 `SettingsStore` + `RecordingFileStore` 装配，

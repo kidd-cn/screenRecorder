@@ -236,7 +236,9 @@ final class MarkingOverlayController: ObservableObject {
 
     /// 捕获模式 → 被录显示器的 Cocoa 全局 frame：display/region = 其所在显示器；
     /// window = 窗口当前落点的显示器（窗口可跨屏移动，显示时刻现场解析）；app（P3a）=
-    /// 窗口集 union 包围盒中心落点的显示器（工具条单点摆放，多屏窗口集取主画布近似）。
+    /// 窗口集 union 包围盒中心落点的显示器（工具条单点摆放，多屏窗口集取主画布近似）；
+    /// windowRegion（P3b）= 锚定窗口当前落点的显示器（同窗口逻辑——工具条摆放在窗口所在
+    /// 屏，窗口相对 rect 不参与显示器裁决）。
     /// 取不到回 nil（面板保持原 frame——headless 测试的注入面板不受影响）。
     static func recordedDisplayFrame(for mode: CaptureMode) -> NSRect? {
         let displayID: CGDirectDisplayID?
@@ -246,6 +248,8 @@ final class MarkingOverlayController: ObservableObject {
         case .region(_, let id):
             displayID = id
         case .window(let windowID):
+            displayID = Self.displayID(containingWindow: windowID)
+        case .windowRegion(let windowID, _):
             displayID = Self.displayID(containingWindow: windowID)
         case .app(let bundleID):
             displayID = Self.displayID(containingAppBundle: bundleID)

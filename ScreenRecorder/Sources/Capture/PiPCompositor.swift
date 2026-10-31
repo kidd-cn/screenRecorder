@@ -31,7 +31,8 @@ struct PiPFrame {
 /// 空间与 CG 全局同向（缓冲第 0 行 = 采集区顶边），故此处不再翻 Y。
 struct PiPCaptureGeometry {
     /// 采集区左上角在 CG 全局系（points）的位置：显示器模式 = `CGDisplayBounds.origin`；
-    /// region 模式 = region rect 原点；window 模式 = 录制窗口 frame 原点（SCWindow.frame 同 CG 全局）。
+    /// region 模式 = region rect 原点；window 模式 = 录制窗口 frame 原点（SCWindow.frame 同 CG 全局）；
+    /// windowRegion（P3b）= 窗口 frame 原点 + 窗口相对 rect 原点偏移。
     let captureOriginInCGPoints: CGPoint
     /// 捕获像素 / 屏幕点：显示器模式 = 物理像素宽 / 点宽（Retina 2x）；region/window = 1。
     let scale: CGFloat
@@ -97,6 +98,20 @@ struct PiPCaptureGeometry {
                 captureOriginInCGPoints: canvas.origin,
                 scale: 1,
                 capturePixelSize: canvas.size)
+        case .windowRegion(let windowID, let rect):
+            // P3b：画布 = 窗口内采样子集的绝对位置 = 窗口 frame 原点 + 窗口相对 rect 原点
+            //（SCWindow.frame 与窗口模式同 CG 全局口径，平移即得采样区左上角；Y 向已在
+            // 同一全局系内，不再翻转）。rect 在开录时已钳制于窗口（SCStreamRecorder），此处
+            // 沿用同值不再重钳——录制中窗口缩小与一期 window/region 模式同为「几何按现场
+            // 解析、流不重配置」语义。枚举失败/窗口已关返回 nil = 本场纯屏幕。
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+                  let window = content.windows.first(where: { $0.windowID == windowID }) else { return nil }
+            return PiPCaptureGeometry(
+                captureOriginInCGPoints: CGPoint(
+                    x: window.frame.origin.x + rect.minX,
+                    y: window.frame.origin.y + rect.minY),
+                scale: 1,
+                capturePixelSize: rect.size)
         }
     }
 }

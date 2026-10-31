@@ -34,6 +34,17 @@ enum RegionSelectorMath {
         rect.offsetBy(dx: windowOrigin.x, dy: windowOrigin.y)
     }
 
+    /// CG 全局 rect（主屏左上原点）→ Cocoa 全局 rect（主屏左下原点）：x 与尺寸不动，y 按
+    ///「到主屏下边距离」翻转（`ClickHighlightTracker.cgGlobalPoint` 的 rect 版逆变换）。
+    /// P3b 装配层用：SCWindow.frame（CG 全局口径）→ 窗口区域遮罩 NSWindow 的 frame（Cocoa 全局）。
+    static func cocoaRect(fromCGRect cgRect: CGRect, primaryScreenHeight: CGFloat) -> CGRect {
+        CGRect(
+            x: cgRect.minX,
+            y: primaryScreenHeight - cgRect.maxY,
+            width: cgRect.width,
+            height: cgRect.height)
+    }
+
     /// 拖拽起止点 → 正尺寸 rect（支持任意方向起拖）。
     static func normalizedRect(from start: CGPoint, to end: CGPoint) -> CGRect {
         CGRect(
@@ -260,6 +271,153 @@ final class RegionSelectionSession {
     }
 }
 
+// MARK: - 窗口区域选择会话（P3b：窗口锚定拖框）
+
+/// 一次窗口区域拖拽的完整会话（P3b）：遮罩窗口覆盖**目标窗口 frame**（非整屏），拖拽产出
+/// **窗口相对系** rect——原点 = 窗口 frame 左上、points、y 向下，即 `CaptureMode.windowRegion`
+/// 的坐标契约（`SCContentFilter(desktopIndependentWindow:)` + `sourceRect` 的裁剪口径）。
+/// 交互与 `RegionSelectionSession` 同构（拖拽语义、ESC、窗口被外部关闭、恰一次 finish），
+/// 复用同一遮罩视图与全部坐标纯函数，三处差异：
+/// - 遮罩铺目标窗口 frame，clamp 边界 = 窗口 bounds（拖出窗口即钉回，输出恒在窗口内
+///   ——开录钳制在选区即完成）；
+/// - 收尾换算只走「窗口基 rect → Cocoa 全局 → 窗口相对左上系」一次平移 + 翻转，不再进
+///   显示器全局系（简报 Produces：不经 F3 全局坐标坑）。翻转沿用 `RegionSelectorMath.cgRect`：
+///   以窗口 frame 充当「锚屏 frame」、CG 原点取 .zero，算式恰为「顶边距离」的窗口相对化，
+///   不另推公式；
+/// - 取消语义同款：ESC / 亚点拖动（`isMeaningfulSelection` 一期最小尺寸语义）/ 遮罩窗被
+///   外部关闭都收敛到唯一 `finish(nil)`。
+/// 结构为与 `RegionSelectionSession` 平行的实现（phase 闩 / 自持 / monitor 三件套逐行同款）：
+/// 二者收尾换算的目标系不同，泛化合并需改动一期已验收会话的 private 状态，风险大于收益。
+/// internal（非 private）供无头测试驱动拖拽生命周期。
+@MainActor
+final class WindowRegionSelectionSession {
+    private enum Phase { case selecting, finished }
+
+    /// 目标窗口的 Cocoa 全局 frame（遮罩铺此 frame；收尾换算的翻转锚点）。
+    let anchorFrame: CGRect
+    let overlayView = RegionSelectionOverlayView(frame: .zero)
+
+    private let onFinish: (CGRect?) -> Void
+    private let window: NSWindow
+    private var phase: Phase = .selecting
+    /// begin 恰一次闩：二次 begin 会导致 monitor/光标重复装（pop 只平衡一次）。
+    private var hasBegun = false
+    /// 会话自持：`selectWindowRegion` 的 continuation 体返回后无人再持会话，若不自持，
+    /// continuation 永不 resume（checked continuation 误用直接崩溃）。finish 末尾断开。
+    private var selfRetainer: WindowRegionSelectionSession?
+    /// 拖拽起点（窗口基坐标 == 内容视图坐标）；nil = 未按下。
+    private var dragStart: CGPoint?
+    private var keyMonitor: Any?
+    private var closeObserver: NSObjectProtocol?
+
+    /// - Parameters:
+    ///   - anchorFrame: 目标窗口 Cocoa 全局 frame（遮罩铺此 frame，输出换算的翻转锚点）。
+    ///   - onFinish: 唯一收尾回调（nil = 取消）；由 phase 闩保证恰调一次。
+    ///   - windowFactory: 测试缝——无头测试注入只计数的记录窗口。
+    init(anchorFrame: CGRect,
+         onFinish: @escaping (CGRect?) -> Void,
+         windowFactory: @MainActor @escaping (CGRect) -> NSWindow = RegionSelector.makeOverlayWindow) {
+        self.anchorFrame = anchorFrame
+        self.onFinish = onFinish
+        self.window = windowFactory(anchorFrame)
+    }
+
+    func begin() {
+        guard phase == .selecting, !hasBegun else { return }
+        hasBegun = true
+        selfRetainer = self
+        overlayView.frame = NSRect(origin: .zero, size: anchorFrame.size)
+        overlayView.onMouseDown = { [weak self] in self?.dragBegan(at: $0) }
+        overlayView.onMouseDragged = { [weak self] in self?.dragMoved(to: $0) }
+        overlayView.onMouseUp = { [weak self] in self?.dragEnded(at: $0) }
+        window.contentView = overlayView
+        window.orderFrontRegardless() // 不夺焦点（配合 canBecomeKey == false）
+        NSCursor.crosshair.push()
+        // ESC 本地 monitor（覆盖层不 key、keyDown 须走应用分发口；同一期区域选择纪律）
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, CountdownOverlayController.isEscapeKey(event) else { return event }
+            self.performCancel()
+            return nil // ESC 消费掉
+        }
+        // 窗口被外部关闭（NSApp 收尾 / AppleScript 等）→ 收敛到唯一 finish(nil)
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: nil
+        ) { [weak self] _ in
+            Task { @MainActor in self?.performCancel() }
+        }
+    }
+
+    // MARK: 拖拽生命周期（视图回调与无头测试共用；点为窗口基坐标，边界 = 窗口 bounds）
+
+    func dragBegan(at point: CGPoint) {
+        guard phase == .selecting else { return }
+        dragStart = RegionSelectorMath.clamped(point: point, to: overlayView.bounds)
+        overlayView.selectionRect = .zero
+    }
+
+    func dragMoved(to point: CGPoint) {
+        guard phase == .selecting else { return }
+        applyDrag(to: point)
+    }
+
+    /// 松开算完成：clamp 于窗口 bounds → 归一化 → 亚点拖动按取消 → 换窗口相对 rect 收尾。
+    func dragEnded(at point: CGPoint) {
+        guard phase == .selecting, let start = dragStart else { return }
+        let rect = RegionSelectorMath.clamped(
+            rect: RegionSelectorMath.normalizedRect(
+                from: start,
+                to: RegionSelectorMath.clamped(point: point, to: overlayView.bounds)),
+            to: overlayView.bounds)
+        guard RegionSelectorMath.isMeaningfulSelection(rect) else {
+            performCancel() // 亚点拖动 = 误触：按取消处理（一期区域模式最小尺寸语义）
+            return
+        }
+        // 窗口基 rect →（加遮罩窗 origin）Cocoa 全局 →（窗口 frame 充当锚屏、CG 原点 .zero
+        // 的 cgRect 算式）窗口相对左上系。屏幕点仅此一次换算直达契约系。
+        let cocoaRect = RegionSelectorMath.cocoaRect(fromWindowRect: rect, windowOrigin: window.frame.origin)
+        finish(with: RegionSelectorMath.cgRect(
+            fromCocoaRect: cocoaRect,
+            screenFrame: anchorFrame,
+            cgDisplayOrigin: .zero))
+    }
+
+    private func applyDrag(to point: CGPoint) {
+        guard let start = dragStart else { return }
+        let clamped = RegionSelectorMath.clamped(point: point, to: overlayView.bounds)
+        overlayView.selectionRect = RegionSelectorMath.normalizedRect(from: start, to: clamped)
+    }
+
+    // MARK: 三条出口收敛的唯一收尾
+
+    /// ESC（monitor）与遮罩窗被外部关闭（willClose 观察者）与亚点拖动的共用取消入口。
+    func performCancel() {
+        finish(with: nil)
+    }
+
+    var isFinished: Bool { phase == .finished }
+
+    /// 恰一次 resume 的收敛点：phase 闩防重入，任何后续出口一律 no-op。
+    private func finish(with result: CGRect?) {
+        guard phase == .selecting else { return }
+        phase = .finished
+        if let keyMonitor {
+            NSEvent.removeMonitor(keyMonitor)
+            self.keyMonitor = nil
+        }
+        if let closeObserver {
+            NotificationCenter.default.removeObserver(closeObserver)
+            self.closeObserver = nil
+        }
+        overlayView.onMouseDown = nil
+        overlayView.onMouseDragged = nil
+        overlayView.onMouseUp = nil
+        NSCursor.pop()
+        window.orderOut(nil)
+        onFinish(result)
+        selfRetainer = nil // 断开自持：会话自此释放（窗口已收起，无泄漏）
+    }
+}
+
 // MARK: - RegionSelector（简报 Produces：静态 async 入口，按需调用、不进装配容器）
 
 /// 自定义区域选择器（T13）：用户在目标屏上拖一个框，产出与 `CaptureMode.region` 同坐标系的
@@ -276,6 +434,22 @@ final class RegionSelector {
             let session = RegionSelectionSession(
                 screenFrame: screenFrame,
                 cgDisplayOrigin: cgOrigin,
+                onFinish: { continuation.resume(returning: $0) } // session phase 闩保证恰一次
+            )
+            session.begin()
+        }
+    }
+
+    /// 窗口区域选择入口（P3b）：在目标窗口 frame 上铺遮罩等待拖拽，返回**窗口相对系**
+    /// rect（原点 = 窗口左上、points、y 向下，`CaptureMode.windowRegion` 契约）；ESC /
+    /// 亚点拖动 / 遮罩窗被外部关闭 / frame 零面积 → nil。逐次调用逐次建窗，无状态、不进
+    /// AppAssembly（同 selectRegion）。目标窗口本身由装配层选择并解析 frame（SCWindow.frame
+    /// 经 `RegionSelectorMath.cocoaRect(fromCGRect:primaryScreenHeight:)` 换算）。
+    static func selectWindowRegion(anchorFrame: CGRect) async -> CGRect? {
+        guard anchorFrame.width >= 1, anchorFrame.height >= 1 else { return nil }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<CGRect?, Never>) in
+            let session = WindowRegionSelectionSession(
+                anchorFrame: anchorFrame,
                 onFinish: { continuation.resume(returning: $0) } // session phase 闩保证恰一次
             )
             session.begin()

@@ -457,6 +457,10 @@ final class AppAssembly: ObservableObject {
     /// 行为规格 1/2）；偏好设置「选择窗口…」路径 false（只持久化）。onSelect 闭包捕获容器
     /// 弱引用，在选定时刻读取本标记（同一次打开内确定）。
     private var pendingWindowPickerStartsRecording = false
+    /// 本次打开的选择器是否为「窗口区域」入口（P3b）：选定后不直接开录，改为窗口内拖框
+    ///（窗口相对 rect）再按 `.windowRegion` 开录。与 startsRecording 互斥（区域路径不写
+    /// `windowCaptureTarget`——它的持久化是 `startRecording` 里的 `lastCaptureMode`）。
+    private var pendingWindowPickerAnchorsRegion = false
 
     /// 打开窗口选择器（⇧⌘W 无目标/失效兜底，或偏好设置「选择窗口…」入口）。`showsStaleNotice`
     /// 为 true 时在列表上方显示「上次选择的窗口不可用，请重新选择」（简报行为规格 2 的用户
@@ -474,6 +478,14 @@ final class AppAssembly: ObservableObject {
     func openAppPicker() {
         pendingWindowPickerStartsRecording = true
         presentPicker(scope: .apps, bannerText: nil)
+    }
+
+    /// 菜单「开始录制 → 窗口区域…」入口（P3b）：先开窗口选择器（窗口范围），选定后在所选
+    /// 窗口内拖框，按所选窗口 + 窗口相对 rect 开录。idle 预检/成对收起纪律与「窗口…」一致
+    ///（菜单项已按状态置灰，选定回调另有同款守卫）。
+    func startWindowRegionRecording() {
+        pendingWindowPickerAnchorsRegion = true
+        presentPicker(scope: .windows, bannerText: nil)
     }
 
     /// 选择器呈现的共同出口（P3a 从 openWindowPicker 抽取）：窗口归装配容器（装配红线），
@@ -522,10 +534,12 @@ final class AppAssembly: ObservableObject {
 
     /// 选定回调（主 actor，`WindowPickerView` 双击触发）：关窗 → 单窗所有者快照组装稳定
     /// 标识（裁定 1：PID → bundle id，ownerName 兜底）→ 持久化 → 按打开场景决定是否立即
-    /// 开始（⇧⌘W 路径 `.window` 随之成为上次使用模式，同 ⇧⌘R 惯例）。快照/标识取不到
-    /// （选中间隙窗口关闭）记日志后放弃：不持久化、不开录（死 windowID 开录必败）。
-    /// 审查修复轮 1：非 `.idle`（录制/倒计时/收尾中）整体拒绝——即使未来出现绕过 idle 预检
-    /// 的路径，也不允许选定动作在录制中途覆写 `windowCaptureTarget`。
+    /// 开始（⇧⌘W 路径 `.window` 随之成为上次使用模式，同 ⇧⌘R 惯例）。P3b「窗口区域」入口
+    /// 在持久化之前分流：选定后转窗口内拖框（`beginWindowRegionSelection`），不写
+    /// `windowCaptureTarget`。快照/标识取不到（选中间隙窗口关闭）记日志后放弃：不持久化、
+    /// 不开录（死 windowID 开录必败）。审查修复轮 1：非 `.idle`（录制/倒计时/收尾中）整体
+    /// 拒绝——即使未来出现绕过 idle 预检的路径，也不允许选定动作在录制中途覆写
+    /// `windowCaptureTarget`。
     private func windowPickerSelected(_ windowID: CGWindowID) {
         guard controller.state == .idle else {
             NSLog("WindowPicker: 忽略选定窗口 \(windowID)（当前状态非 idle：\(controller.state)），不覆写捕获目标")
@@ -534,8 +548,13 @@ final class AppAssembly: ObservableObject {
             dismissWindowPicker()
             return
         }
+        let anchorsRegion = pendingWindowPickerAnchorsRegion
         let startsRecording = pendingWindowPickerStartsRecording
         dismissWindowPicker()
+        if anchorsRegion {
+            beginWindowRegionSelection(windowID: windowID)
+            return
+        }
         guard let snapshot = WindowTargetResolver.windowOwnerSnapshot(windowID: windowID),
               let target = WindowTargetResolver.makeTarget(windowID: windowID, snapshot: snapshot) else {
             NSLog("WindowPicker: 选定窗口 \(windowID) 的所有者信息读取失败（可能已关闭），未持久化目标")
@@ -548,11 +567,40 @@ final class AppAssembly: ObservableObject {
         }
     }
 
+    /// 窗口内拖框（P3b）：现场解析所选窗口的当前 frame（选中间隙已关/已最小化不可见 →
+    /// 记日志放弃——死 windowID 开录必败，同 windowPickerSelected 纪律）→ 遮罩锚定该窗口
+    /// → 拖拽产出窗口相对 rect → 开录 `.windowRegion`。ESC / 亚点拖动 / 遮罩中途被关 =
+    /// 取消，静默放弃不开录（同区域录制取消语义）。持久化走 startRecording 统一入口
+    ///（`lastCaptureMode` 随之记为 windowRegion，⇧⌘R 上次使用模式自动包含）。
+    private func beginWindowRegionSelection(windowID: CGWindowID) {
+        Task { @MainActor in
+            let windows: [ShareableWindow]
+            do {
+                windows = try await WindowPicker.enumeratedWindows()
+            } catch {
+                NSLog("WindowRegion: 窗口枚举失败，放弃窗口区域选择：\(error)")
+                return
+            }
+            guard let frame = windows.first(where: { $0.windowID == windowID })?.frame else {
+                NSLog("WindowRegion: 所选窗口 \(windowID) 已不可见或已关闭，放弃窗口区域选择")
+                return
+            }
+            // SCWindow.frame 为 CG 全局（左上原点）→ 遮罩 NSWindow 需 Cocoa 全局 frame
+            //（主屏高翻 Y；多屏通用——两全局系共享主屏原点，同 ClickHighlightTracker 口径）。
+            let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? 0
+            let cocoaFrame = RegionSelectorMath.cocoaRect(fromCGRect: frame, primaryScreenHeight: primaryHeight)
+            guard let rect = await RegionSelector.selectWindowRegion(anchorFrame: cocoaFrame) else { return }
+            startRecording(mode: .windowRegion(window: windowID, rect: rect))
+        }
+    }
+
     /// 收起残留的选择器窗口并清「选定即开录」标记（审查修复轮 1）：两个动作必须成对——
     /// 只收窗不清标记，窗口重建前的旧 onSelect 仍会带 true；只清标记不收窗，用户会在
-    /// 已失效的列表里二次选定。直录分支（`.start`）与选定回调共用。
+    /// 已失效的列表里二次选定。直录分支（`.start`）与选定回调共用。P3b 起同清区域锚定
+    /// 标记（同款成对纪律）。
     private func dismissWindowPicker() {
         pendingWindowPickerStartsRecording = false
+        pendingWindowPickerAnchorsRegion = false
         windowPickerWindowController?.window?.orderOut(nil)
     }
 
@@ -799,6 +847,7 @@ struct ScreenRecorderApp: App {
                 onStartWindowPicker: { assembly.openWindowPicker(startsRecordingOnSelection: true) },
                 onStartAppPicker: { assembly.openAppPicker() },
                 onStartRegion: { assembly.startRegionRecording() },
+                onStartWindowRegion: { assembly.startWindowRegionRecording() },
                 onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenPreferences: { assembly.openPreferences() }
             )

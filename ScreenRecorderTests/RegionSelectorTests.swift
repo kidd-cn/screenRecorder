@@ -253,3 +253,87 @@ final class RegionSelectionSessionTests: XCTestCase {
         XCTAssertNil(RegionSelector.screen(for: CGDirectDisplayID(0xDEAD_BEEF)), "无效 displayID 找不到屏")
     }
 }
+
+// MARK: - 窗口区域选择（P3b：窗口锚定拖框，输出窗口相对 rect）
+
+/// 窗口区域会话夹具推导：目标窗口 Cocoa 全局 frame (200,150,800,500)（主屏内）。
+/// 输出契约 = **窗口相对系**：原点在窗口 frame 左上、points、y 向下——`CaptureMode.windowRegion`
+/// 的 rect，即 `SCContentFilter(desktopIndependentWindow:)` + `sourceRect` 的裁剪口径。
+@MainActor
+final class WindowRegionSelectionTests: XCTestCase {
+    private let windowFrame = CGRect(x: 200, y: 150, width: 800, height: 500)
+
+    private var window: SpyRegionWindow!
+    private var box: RecordingFinishBox!
+
+    private func makeSession() -> WindowRegionSelectionSession {
+        window = SpyRegionWindow(contentRect: windowFrame)
+        box = RecordingFinishBox()
+        return WindowRegionSelectionSession(
+            anchorFrame: windowFrame,
+            onFinish: { [box] in box.results.append($0) },
+            windowFactory: { [window] _ in window }
+        )
+    }
+
+    /// 简报 Step 1 钉测：屏幕点 → 窗口相对 rect。视图（窗口基、y 向上）(100,100)→(300,250)
+    /// 的拖拽，输出原点须落在窗口左上系 (100, 250)——y 按「距窗口顶边距离」翻转
+    ///（视图顶边 100+150=250 → 窗口高 500 − 250 = 250），不经显示器全局系。
+    func testWindowAnchoredRectIsWindowRelative() {
+        let session = makeSession()
+        session.begin()
+
+        session.dragBegan(at: CGPoint(x: 100, y: 100))
+        session.dragEnded(at: CGPoint(x: 300, y: 250))
+
+        XCTAssertEqual(box.results.count, 1, "拖拽完成：恰一次 finish")
+        XCTAssertEqual(box.soleResult, CGRect(x: 100, y: 250, width: 200, height: 150),
+                       "视图 rect → Cocoa 全局 (300,250,200,150) → 窗口相对 (100,250,200,150)（左上原点、y 向下）")
+    }
+
+    /// 简报 Step 1 钉测：拖出窗口边界 → 拖拽全程钉回窗口内，输出恒落在窗口 bounds 内。
+    func testRectClampedToWindowBounds() {
+        let session = makeSession()
+        session.begin()
+
+        session.dragBegan(at: CGPoint(x: 600, y: 100))
+        session.dragMoved(to: CGPoint(x: 1500, y: -50)) // 拖出右/上边界 → 钉回 (800, 0)
+        XCTAssertEqual(session.overlayView.selectionRect, CGRect(x: 600, y: 0, width: 200, height: 100),
+                       "拖动中亮框实时钳制在窗口 bounds 内")
+        session.dragEnded(at: CGPoint(x: 1500, y: -50))
+
+        XCTAssertEqual(box.results.count, 1)
+        XCTAssertEqual(box.soleResult, CGRect(x: 600, y: 400, width: 200, height: 100),
+                       "窗口相对 rect 仍在窗口 bounds 内（钳制后收尾，不再二次越界）")
+        if let rect = box.soleResult {
+            XCTAssertTrue(CGRect(origin: .zero, size: windowFrame.size).contains(rect),
+                          "窗口相对 rect 必须完全落在窗口 bounds（原点左上、尺寸同窗口）内")
+        }
+    }
+
+    /// 简报 Step 1 钉测：亚点尺寸拖动沿用一期区域模式最小尺寸语义（宽或高 <1pt = 误触）
+    /// → 按取消处理，不产零面积 rect。
+    func testDragSmallerThanMinimumIgnored() {
+        let session = makeSession()
+        session.begin()
+
+        session.dragBegan(at: CGPoint(x: 100, y: 100))
+        session.dragMoved(to: CGPoint(x: 100.5, y: 200)) // 宽 0.5pt < 1pt
+        session.dragEnded(at: CGPoint(x: 100.5, y: 200))
+
+        XCTAssertEqual(box.results.count, 1)
+        XCTAssertNil(box.soleResult, "亚点拖动按取消处理（一期区域模式同语义）")
+        session.performCancel()
+        XCTAssertEqual(box.results.count, 1, "取消后再取消：恰一次闩不重入")
+    }
+
+    /// 装配层锚定遮罩用的换算：SCWindow.frame（CG 全局、左上原点）→ 遮罩 NSWindow 的
+    /// Cocoa 全局 frame（主屏左下原点）——x 与尺寸不动，y 按主屏高翻转（rect 版逆变换）。
+    func testCocoaRectFromCGRectFlipsYByPrimaryHeight() {
+        XCTAssertEqual(
+            RegionSelectorMath.cocoaRect(fromCGRect: CGRect(x: 200, y: 300, width: 800, height: 500),
+                                         primaryScreenHeight: 900),
+            CGRect(x: 200, y: 100, width: 800, height: 500),
+            "CG 顶边 y=300 → Cocoa 顶边 y = 900−300 = 600，即 frame.minY = 100（尺寸与 x 不动）")
+    }
+}

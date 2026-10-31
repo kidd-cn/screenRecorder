@@ -528,12 +528,14 @@ final class CaptureController: ObservableObject {
 
     /// 源丢失匹配语义（裁定 2）：display/region 模式监视其所在显示器；window 模式无定
     /// 显示器（窗口可移动/跨屏）→ nil = 采集全台语义，任一显示器移除即源丢失；app 模式
-    ///（P3a）无定显示器（窗口可跨屏）→ nil，源丢失改由 bundle 窗口计数轮询判定。
+    ///（P3a）无定显示器（窗口可跨屏）→ nil，源丢失改由 bundle 窗口计数轮询判定；
+    /// windowRegion（P3b）锚定单窗口，沿用窗口模式同款语义（nil，不做 App 式窗口计数
+    /// ——窗口关闭跟随一期窗口模式的既有路径，显示器移除按全台语义自动保存）。
     private static func capturedDisplayID(of mode: CaptureMode) -> CGDirectDisplayID? {
         switch mode {
         case .display(let displayID): return displayID
         case .region(_, let displayID): return displayID
-        case .window: return nil
+        case .window, .windowRegion: return nil
         case .app: return nil
         }
     }
