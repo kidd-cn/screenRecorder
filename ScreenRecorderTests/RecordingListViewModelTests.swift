@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 
 @testable import ScreenRecorder
@@ -126,4 +127,144 @@ final class RecordingListViewModelTests: XCTestCase {
         var store: RecordingFileStore
         init(store: RecordingFileStore) { self.store = store }
     }
+
+    // MARK: - P8 导出编排（T16）：ExportServing/ExportNotifying 缝无头直达
+
+    /// 可注入导出缝与通知缝的模型构造（既有 makeViewModel 保持缺省缝零改动）。
+    private func makeViewModel(
+        exportService: ExportServing,
+        notifier: ExportNotifying?
+    ) -> RecordingListViewModel {
+        RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 42.0 },
+            exportService: exportService,
+            notifier: notifier)
+    }
+
+    private func makeItem(named name: String) -> RecordingFileMetadata {
+        RecordingFileMetadata(
+            id: directory.appendingPathComponent(name),
+            url: directory.appendingPathComponent(name),
+            name: name,
+            sizeBytes: 0,
+            createdAt: nil,
+            duration: nil)
+    }
+
+    /// T15 契约「进度回调主线程外调用」→ 模型转发必须 @MainActor hop。判别面：`@Published`
+    /// 的 Combine sink 在写入线程同步触发——全部非 nil 投递必须带 `Thread.isMainThread`。
+    func testExportProgressHopsToMain() async throws {
+        let vm = makeViewModel(exportService: OffMainProgressExporter(), notifier: nil)
+
+        var deliveries: [(value: Double, onMain: Bool)] = []
+        let offMainValueDelivered = expectation(description: "假缝主线程外推送的 0.42 送达主线程")
+        let cancellable = vm.$exportProgress.sink { value in
+            guard let value else { return } // 完成复位(nil)不计
+            deliveries.append((value, Thread.isMainThread))
+            if value == 0.42 { offMainValueDelivered.fulfill() }
+        }
+        defer { cancellable.cancel() }
+
+        await vm.exportGIF(makeItem(named: "录屏_2026-10-25_09-00-00.mp4"), options: GIFExportOptions())
+        await fulfillment(of: [offMainValueDelivered], timeout: 5)
+
+        XCTAssertEqual(deliveries.map(\.value), [0.0, 0.42], "进度序列：模型置 0 + 假缝主线程外推送的 0.42")
+        XCTAssertTrue(
+            deliveries.allSatisfy(\.onMain),
+            "全部进度投递必须发生在主线程（T15 主线程外回调 → VM hop 契约）：\(deliveries)")
+        XCTAssertNil(vm.exportProgress, "导出完成后进度复位空闲")
+    }
+
+    /// 假缝抛错（T15 ExportError 文案族）→ 失败必须以通知呈现（errorDescription 原样
+    /// 透传），不发完成通知，进度复位空闲。
+    func testExportFailureSurfacesNotification() async throws {
+        let spy = SpyExportNotifier()
+        let vm = makeViewModel(
+            exportService: ThrowingExporter(error: ExportError.gifEncodingFailed),
+            notifier: spy)
+        let item = makeItem(named: "录屏_2026-10-25_09-00-00.mp4")
+
+        await vm.exportGIF(item, options: GIFExportOptions())
+
+        XCTAssertEqual(
+            spy.failureMessages,
+            ["导出失败：GIF 编码失败，请重试"],
+            "失败必须以通知呈现（ExportError errorDescription 原样透传）")
+        XCTAssertTrue(spy.completedURLs.isEmpty, "失败路径不得发完成通知")
+        XCTAssertNil(vm.exportProgress, "失败后进度复位空闲")
+    }
+
+    /// 建议输出名（小窗预填）：`<原名>_gif.gif` 形（brief 钉定）；冲突沿用扩展名前
+    /// " (n)" 自 2 递增惯例（复用 ExportCore 命名助手——单一事实源）；压缩为
+    /// `<原名>_压缩.mp4`。
+    func testExportSuggestedDestinationName() async throws {
+        let vm = makeViewModel()
+        let item = makeItem(named: "录屏_2026-10-25_09-00-00.mp4")
+
+        XCTAssertEqual(vm.suggestedGIFDestinationName(for: item), "录屏_2026-10-25_09-00-00_gif.gif")
+
+        try Data().write(to: directory.appendingPathComponent("录屏_2026-10-25_09-00-00_gif.gif"))
+        XCTAssertEqual(
+            vm.suggestedGIFDestinationName(for: item),
+            "录屏_2026-10-25_09-00-00_gif (2).gif",
+            "冲突沿用 \" (n)\" 惯例")
+
+        XCTAssertEqual(
+            vm.suggestedCompressedDestinationName(for: item),
+            "录屏_2026-10-25_09-00-00_压缩.mp4")
+    }
+}
+
+// MARK: - P8 导出编排测试替身（T16）：ExportCore 为 enum 静态面不可替换，经缝注入假实现
+
+/// 主线程外推送进度的假导出服务：模拟 T15 契约「进度回调在主线程外」；返回前自身
+/// hop 主线程一次——VM 续体晚于进度 hop 入队（主队列 FIFO），hop 必先执行，断言不受
+/// 「晚到 hop 被代际校验丢弃」竞态干扰。
+private final class OffMainProgressExporter: ExportServing {
+    func exportGIF(
+        from url: URL, options: GIFExportOptions, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                progress(0.42)
+                continuation.resume()
+            }
+        }
+        await MainActor.run {}
+        return url
+    }
+
+    func compress(
+        from url: URL, preset: CompressionPreset, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        url
+    }
+}
+
+/// 恒抛错的假导出服务：失败路径无头直达。
+private struct ThrowingExporter: ExportServing {
+    let error: Error
+
+    func exportGIF(
+        from url: URL, options: GIFExportOptions, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        throw error
+    }
+
+    func compress(
+        from url: URL, preset: CompressionPreset, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        throw error
+    }
+}
+
+/// ExportNotifying spy：收集导出完成/失败通知供断言（同 CaptureControllerTests SpyNotifier 纪律）。
+@MainActor
+private final class SpyExportNotifier: ExportNotifying {
+    var completedURLs: [URL] = []
+    var failureMessages: [String] = []
+
+    func notifyExportCompleted(fileURL: URL) { completedURLs.append(fileURL) }
+    func notifyExportFailed(message: String) { failureMessages.append(message) }
 }

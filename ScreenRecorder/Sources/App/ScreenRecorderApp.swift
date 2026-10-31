@@ -557,13 +557,18 @@ final class AppAssembly: ObservableObject {
     /// 懒建时捕获装配容器弱引用，`updateOutputDirectory` 换装后刷新即见新目录（T17 审查
     /// 发现的固定拷贝缺陷在此封堵）。刷新通道（审查修复轮 1）：首开 `.task` + 复用窗口
     /// 每次激活即刷新（didBecomeKeyNotification，见 `RecordingListWindowController`）。
-    /// LSUIElement 应用需激活再前置（同偏好设置窗口）。
+    /// P8：导出通知缝（ExportNotifying）接容器通知器。LSUIElement 应用需激活再前置
+    ///（同偏好设置窗口）。
     func openRecordingList() {
         if recordingListWindowController == nil {
             let viewModel = RecordingListViewModel(storeProvider: { [weak self] in
                 // 装配容器与 App 同生命周期；nil 仅在容器已释放的理论窗口出现，退避临时目录
                 self?.fileStore ?? RecordingFileStore(baseDirectory: FileManager.default.temporaryDirectory)
-            })
+            },
+            // P8：导出完成/失败通知接容器通知器（ExportNotifying 缝；T11 通知类型进
+            // notifier 同款装配点）。notifier 与容器同寿，viewModel 持有强引用无环
+            //（viewModel 归列表窗口控制器，先于容器释放）。
+            notifier: notifier)
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 720, height: 420),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],

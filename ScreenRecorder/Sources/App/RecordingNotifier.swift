@@ -44,3 +44,20 @@ final class UNRecordingNotifier: RecordingNotifying {
         }
     }
 }
+
+// MARK: - 导出通知（P8/T16：文件列表模型导出编排经 ExportNotifying 缝接入）
+
+extension UNRecordingNotifier: ExportNotifying {
+    /// 导出完成（`notifySaved` 对称文案：「录制完成/已保存」→「导出完成/已保存」）——
+    /// 尽力而为副通道，同 post 纪律。
+    func notifyExportCompleted(fileURL: URL) {
+        post(title: "导出完成", body: "已保存：\(fileURL.lastPathComponent)")
+    }
+
+    /// 导出失败（`notifyFailure` 对称：标题 Severity 类别「导出出现问题」，正文透传
+    /// ExportError 文案族完整行——T15 errorDescription 原样「导出失败：GIF 编码失败，
+    /// 请重试」，不为消重做脆弱的前缀拆分）。
+    func notifyExportFailed(message: String) {
+        post(title: "导出出现问题", body: message)
+    }
+}
