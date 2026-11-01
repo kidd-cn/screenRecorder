@@ -520,4 +520,105 @@ final class CameraBackgroundProcessorTests: XCTestCase {
         }
         XCTFail("\(message)（\(timeout)s 内未达成）")
     }
+
+    // MARK: 无人像防线（验收缺陷：全黑 mask 把人整体抹进背景）
+
+    /// 全黑 mask（Vision 无人/弱光场景的合法返回）必须原帧同一实例直通——照常合成会把
+    /// 人整体抹进背景，成片只剩背景（用户不可见）。无人像 = mask 不可得（同句法直通）。
+    func testAllBlackPersonMaskFallsBackToOriginalFrame() async throws {
+        let segmenter = FakePersonSegmenter { [width = fixtureWidth, height = fixtureHeight] _ in
+            CIImage(color: CIColor.black).cropped(
+                to: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        let processor = CameraBackgroundProcessor(
+            mode: .builtin(.gradientWarm), segmenter: segmenter)
+        let frame = try XCTUnwrap(makeColorBuffer(
+            width: fixtureWidth, height: fixtureHeight,
+            color: BGRAColor(blue: 10, green: 20, red: 30, alpha: 255)))
+
+        let output = await processor.process(frame)
+
+        XCTAssertTrue(output === frame, "全黑 mask（无人像）必须原帧直通，不得把人抹进背景")
+    }
+
+    /// 低于阈值（1×2 白斑 ≈0.26% < 0.5%）同判直通——软边缘噪声不得触发整幅背景替换。
+    func testBelowThresholdPersonMaskFallsBackToOriginalFrame() async throws {
+        let segmenter = FakePersonSegmenter { [width = fixtureWidth, height = fixtureHeight] _ in
+            let blob = CIImage(color: CIColor.white).cropped(to: CGRect(x: 0, y: 0, width: 1, height: 2))
+            let background = CIImage(color: CIColor.black).cropped(
+                to: CGRect(x: 0, y: 0, width: width, height: height))
+            return blob.composited(over: background)
+        }
+        let processor = CameraBackgroundProcessor(
+            mode: .builtin(.gradientWarm), segmenter: segmenter)
+        let frame = try XCTUnwrap(makeColorBuffer(
+            width: fixtureWidth, height: fixtureHeight,
+            color: BGRAColor(blue: 40, green: 50, red: 60, alpha: 255)))
+
+        let output = await processor.process(frame)
+
+        XCTAssertTrue(output === frame, "人像占比低于阈值必须原帧直通（噪声不换背景）")
+    }
+
+    /// 阈值之上照常合成（防线的非误伤面）：满幅 mask 合成出新缓冲（既有行为回归守卫）。
+    func testAboveThresholdPersonMaskStillComposes() async throws {
+        let segmenter = FakePersonSegmenter { [width = fixtureWidth, height = fixtureHeight] _ in
+            fullForegroundMask(width: width, height: height)
+        }
+        let processor = CameraBackgroundProcessor(
+            mode: .builtin(.gradientWarm), segmenter: segmenter)
+        let frame = try XCTUnwrap(makeColorBuffer(
+            width: fixtureWidth, height: fixtureHeight,
+            color: BGRAColor(blue: 70, green: 80, red: 90, alpha: 255)))
+
+        let output = await processor.process(frame)
+
+        XCTAssertFalse(output === frame, "有效人像 mask 必须照常合成（防线不得误伤正常路）")
+    }
+
+    // MARK: P5 预览跟背景呈现缝（已入库帧 → 呈现回调）
+
+    /// 处理器在位：已入库的处理后帧交呈现缝恰一次（呈现面 = 预览跟背景的数据源；
+    /// 场次/序号守卫复用入库判定，呈现只见合法帧）。
+    func testPresenterReceivesProcessedFrameOnce() throws {
+        let controller = CameraPiPController()
+        let segmenter = FakePersonSegmenter { [width = 12, height = 12] _ in
+            fullForegroundMask(width: width, height: height)
+        }
+        controller.backgroundProcessor = CameraBackgroundProcessor(mode: .blur, segmenter: segmenter)
+        let box = PresenterBox()
+        controller.previewFramePresenter = { box.record($0) }
+        let frame = try XCTUnwrap(makeColorBuffer(
+            width: 12, height: 12, color: BGRAColor(blue: 0, green: 0, red: 200, alpha: 255)))
+
+        controller.handleDeliveredFrame(try XCTUnwrap(makeSampleBuffer(frame)))
+        waitUntil("呈现缝应收到已入库的处理后帧") { box.count >= 1 }
+
+        XCTAssertEqual(box.count, 1, "每帧恰一次呈现调用")
+        XCTAssertEqual(CVPixelBufferGetWidth(try XCTUnwrap(box.last)), 12, "呈现的是处理后帧（尺寸保持）")
+    }
+
+    /// 旁路（无处理器）不得触发呈现——off 场覆盖层关闭，预览走原始层（同步直通，断言即时）。
+    func testPresenterNotInvokedWithoutProcessor() throws {
+        let controller = CameraPiPController()
+        let box = PresenterBox()
+        controller.previewFramePresenter = { box.record($0) }
+        let frame = try XCTUnwrap(makeColorBuffer(
+            width: 8, height: 8, color: BGRAColor(blue: 1, green: 2, red: 3, alpha: 255)))
+
+        controller.handleDeliveredFrame(try XCTUnwrap(makeSampleBuffer(frame)))
+
+        XCTAssertEqual(box.count, 0, "旁路不得触发呈现缝")
+    }
+}
+
+/// 呈现缝收数盒（跨线程锁保护——呈现回调在处理完成线程）。
+private final class PresenterBox {
+    private let lock = NSLock()
+    private var buffers: [CVPixelBuffer] = []
+    func record(_ buffer: CVPixelBuffer) {
+        lock.withStateLock { buffers.append(buffer) }
+    }
+    var count: Int { lock.withStateLock { buffers.count } }
+    var last: CVPixelBuffer? { lock.withStateLock { buffers.last } }
 }

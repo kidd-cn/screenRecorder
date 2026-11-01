@@ -1,4 +1,6 @@
+import AppKit
 import AVFoundation
+import CoreImage
 import CoreMedia
 import CoreVideo
 import XCTest
@@ -343,6 +345,108 @@ final class CameraPiPWindowControllerTests: XCTestCase {
     func testPixelBufferProviderPassesThroughToCamera() {
         let controller = makeController()
         XCTAssertNil(controller.latestPixelBuffer())
+    }
+
+    // MARK: P5 预览跟背景覆盖层（验收增强）
+
+    /// 背景场 begin：覆盖层显示（处理后帧的呈现面）+ 浮窗照常装配；end：覆盖层隐藏、
+    /// 呈现面随窗收起——浮窗跨场复用不残留呈现链。
+    func testPreviewOverlayFollowsBackgroundAssembly() {
+        let controller = makeController()
+        let processor = CameraBackgroundProcessor(
+            mode: .builtin(.gradientWarm), segmenter: NoopPersonSegmenter())
+        controller.beginRecording(geometry: geometry, backgroundProcessor: processor)
+        XCTAssertTrue(controller.isWindowVisible)
+        XCTAssertTrue(controller.isPreviewOverlayVisible, "背景场覆盖层必须显示（预览跟背景）")
+
+        controller.endRecording()
+        XCTAssertFalse(controller.isWindowVisible)
+        XCTAssertFalse(controller.isPreviewOverlayVisible, "end 后覆盖层必须隐藏")
+    }
+
+    /// off 场 begin：覆盖层保持隐藏（原始预览直出，与一期一致）。
+    func testPreviewOverlayHiddenInOffMode() {
+        let controller = makeController()
+        controller.beginRecording(geometry: geometry, backgroundProcessor: nil)
+        XCTAssertTrue(controller.isWindowVisible)
+        XCTAssertFalse(controller.isPreviewOverlayVisible, "off 场覆盖层必须隐藏（原始预览直出）")
+        controller.endRecording()
+        XCTAssertFalse(controller.isPreviewOverlayVisible)
+    }
+
+    /// 覆盖层 API：装配后初始隐藏；贴图/清图调用不崩（呈现面的 contents 由呈现器维护）。
+    func testPreviewOverlayImageAPIBasics() {
+        let window = CameraPiPWindow.makeDefault()
+        window.installPreviewLayer(nil)
+        XCTAssertFalse(window.isPreviewOverlayVisible, "装配后覆盖层初始隐藏")
+        window.setPreviewOverlayVisible(true)
+        XCTAssertTrue(window.isPreviewOverlayVisible)
+        window.updatePreviewOverlayImage(nil) // 清图不崩
+        window.setPreviewOverlayVisible(false)
+        XCTAssertFalse(window.isPreviewOverlayVisible)
+    }
+}
+
+/// 覆盖层装配钉测用假分割缝（begin 路径只存处理器不调分割；真 Vision 请求不得进测试进程）。
+private final class NoopPersonSegmenter: PersonSegmenting {
+    func segmentationMask(for pixelBuffer: CVPixelBuffer) async -> CIImage? { nil }
+}
+
+// MARK: - PiPPreviewFramePresenter（P5 预览跟背景：镜像 + 缩限 + 回调缝）
+
+final class PiPPreviewFramePresenterTests: XCTestCase {
+    /// 16×8 帧：左半纯红、右半纯蓝（缓冲列号 0-7 红、8-15 蓝）。
+    private func makeTwoToneFrame() -> CVPixelBuffer? {
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault, 16, 8, kCVPixelFormatType_32BGRA, nil, &buffer
+        ) == kCVReturnSuccess, let buffer else { return nil }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        for row in 0..<8 {
+            let line = base.advanced(by: row * bytesPerRow).assumingMemoryBound(to: UInt8.self)
+            for column in 0..<16 {
+                line[column * 4 + 0] = column < 8 ? 0 : 255 // B
+                line[column * 4 + 1] = 0                    // G
+                line[column * 4 + 2] = column < 8 ? 255 : 0 // R
+                line[column * 4 + 3] = 255                  // A
+            }
+        }
+        return buffer
+    }
+
+    /// 软渲染读图：绘入 RGBA 位图按 (x, y) 取通道（确定性出图，PiPCompositorTests 同精神）。
+    private func sample(
+        _ cg: CGImage, x: Int, y: Int
+    ) -> (red: Int, green: Int, blue: Int) {
+        let context = CGContext(
+            data: nil, width: cg.width, height: cg.height, bitsPerComponent: 8,
+            bytesPerRow: cg.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.draw(cg, in: CGRect(x: 0, y: 0, width: cg.width, height: cg.height))
+        let data = context.data!.assumingMemoryBound(to: UInt8.self)
+        let offset = (y * cg.width + x) * 4
+        return (red: Int(data[offset]), green: Int(data[offset + 1]), blue: Int(data[offset + 2]))
+    }
+
+    /// 镜像钉测：左红右蓝帧 → 呈现图左蓝右红（对齐预览层系统自动镜像的自拍观感——
+    /// 不镜像则开录瞬间画面横向跳变）。
+    func testPresentMirrorsFrameHorizontally() throws {
+        var delivered: CGImage?
+        let presenter = PiPPreviewFramePresenter(
+            context: CIContext(options: [.useSoftwareRenderer: true]),
+            applyOnMain: { delivered = $0 })
+        presenter.present(try XCTUnwrap(makeTwoToneFrame()))
+        let cg = try XCTUnwrap(delivered, "渲染失败不得静默无图")
+        let midY = cg.height / 2
+        let left = sample(cg, x: 2, y: midY)
+        let right = sample(cg, x: cg.width - 3, y: midY)
+        XCTAssertGreaterThan(left.blue, 200, "呈现图左缘应为原帧右半的蓝（镜像）")
+        XCTAssertLessThan(left.red, 60, "呈现图左缘不应残留原帧左半的红")
+        XCTAssertGreaterThan(right.red, 200, "呈现图右缘应为原帧左半的红（镜像）")
+        XCTAssertLessThan(right.blue, 60, "呈现图右缘不应残留原帧右半的蓝")
     }
 }
 

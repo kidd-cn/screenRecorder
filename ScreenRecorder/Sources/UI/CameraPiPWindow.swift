@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import ImageIO
 
 // MARK: - CameraPiPWindow（简报 Produces：圆角摄像头预览浮窗，录制中可拖动）
 
@@ -28,6 +29,7 @@ final class CameraPiPWindow: NSPanel {
 
     /// 安装摄像头预览层（圆角裁切 + 自适应填充）。layer 为 nil（摄像头未启动/无头测试）
     /// 时仅铺深色底——浮窗装配路径不因预览缺位而失败。
+    /// P5：同场装配预览跟背景覆盖层（预览层之上，初始隐藏——off/idle 露原始预览）。
     func installPreviewLayer(_ layer: AVCaptureVideoPreviewLayer?) {
         let content = NSView(frame: NSRect(origin: .zero, size: PiPLacementAnchor.pipSize))
         content.wantsLayer = true
@@ -38,7 +40,70 @@ final class CameraPiPWindow: NSPanel {
             layer.frame = content.bounds
             content.layer?.addSublayer(layer)
         }
+        let overlay = CALayer()
+        overlay.frame = content.bounds
+        // aspect-fill 与成片摆放同语义（窗内所见即成片所得；帧宽高比随机型可 ≠ 窗口）。
+        overlay.contentsGravity = .resizeAspectFill
+        overlay.isHidden = true
+        content.layer?.addSublayer(overlay)
+        previewOverlayLayer = overlay
         contentView = content
+    }
+
+    // MARK: 预览跟背景覆盖层（P5：录制中呈现处理后帧）
+
+    private var previewOverlayLayer: CALayer?
+
+    /// 覆盖层显隐（录制中 + 背景开 = 显示；off/idle/收尾 = 隐藏，露出原始预览层——
+    /// 首帧处理完成前的过渡画面即原始预览，无黑窗跳变）。
+    func setPreviewOverlayVisible(_ visible: Bool) {
+        previewOverlayLayer?.isHidden = !visible
+    }
+
+    /// 贴处理后帧的镜像小图（主线程调用；nil = 清空）。未装配覆盖层时静默忽略。
+    func updatePreviewOverlayImage(_ image: CGImage?) {
+        previewOverlayLayer?.contents = image
+    }
+
+    /// 覆盖层状态（internal 只读，无头测试断言装配/收起）。
+    var isPreviewOverlayVisible: Bool { previewOverlayLayer?.isHidden == false }
+}
+
+// MARK: - PiPPreviewFramePresenter（P5 预览跟背景：处理后帧 → 浮窗覆盖层）
+
+/// 处理完成线程渲染镜像小图、经 `applyOnMain` 交主线程贴覆盖层。水平镜像对齐预览层的
+/// 系统自动镜像（自拍观感）——数据输出帧是「他人视角」，不镜像则开录瞬间画面横向跳变。
+/// 渲染按 ≤2× 浮窗点尺寸等比缩到全幅（覆盖层 aspect-fill 再裁切），全分辨率逐帧渲染是
+/// 无谓的 GPU/内存开销。`@unchecked Sendable`：context 单实例复用（CIContext 线程安全，
+/// CameraBackgroundProcessor 同款），applyOnMain 由装配侧保证主线程投递。
+final class PiPPreviewFramePresenter: @unchecked Sendable {
+    /// 渲染宽度上限（160×120pt 浮窗 @2x=320px 的 2 倍采样余量）。
+    static let maxRenderWidth: CGFloat = 640
+
+    private let context: CIContext
+    private let applyOnMain: (CGImage) -> Void
+
+    /// - Parameters:
+    ///   - context: 渲染上下文（测试缝——软渲染确定性出图；生产默认 GPU）。
+    ///   - applyOnMain: 贴图回调（装配侧闭包内投递主线程；测试可直接断言收到的图）。
+    init(context: CIContext = CIContext(options: [.useSoftwareRenderer: false]),
+         applyOnMain: @escaping (CGImage) -> Void) {
+        self.context = context
+        self.applyOnMain = applyOnMain
+    }
+
+    /// 渲染一帧（水平镜像 + 等比缩限宽 + createCGImage）并回调。mask 不可得的直通帧
+    /// 同样呈现——处理失败在帧路径已回退，呈现面无额外分支。
+    func present(_ frame: CVPixelBuffer) {
+        let image = CIImage(cvPixelBuffer: frame).oriented(.upMirrored)
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return }
+        let scale = min(1, Self.maxRenderWidth / extent.width)
+        let display = scale < 1
+            ? image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            : image
+        guard let cg = context.createCGImage(display, from: display.extent) else { return }
+        applyOnMain(cg)
     }
 }
 
@@ -102,6 +167,7 @@ final class CameraPiPWindowController {
             PiPLacementAnchor.defaultFrame(visibleFrame: visibleFrame, controlBarFrame: controlBarFrameProvider?()),
             display: true)
         panel.installPreviewLayer(camera.previewLayer)
+        installPreviewOverlay(panel, backgroundProcessor: backgroundProcessor)
         publishFrame(panel)
         panel.orderFrontRegardless() // 不夺焦点（nonactivatingPanel）
     }
@@ -109,6 +175,9 @@ final class CameraPiPWindowController {
     /// 录制结束（coordinator.finish 调用，幂等；begin 失败回滚同走此路）：收浮窗 +
     /// 停摄像头 + 清拖动锚点（video 队列侧立即回到纯屏幕直通）。
     func endRecording() {
+        camera.previewFramePresenter = nil
+        window?.setPreviewOverlayVisible(false)
+        window?.updatePreviewOverlayImage(nil)
         frameStore.setScreenRect(nil, screenFrame: .zero, cgDisplayOrigin: .zero)
         frameStore.setGeometry(nil)
         window?.orderOut(nil)
@@ -151,6 +220,23 @@ final class CameraPiPWindowController {
         publishFrame(panel)
     }
 
+    /// P5 预览跟背景装配（主线程）：背景场把「处理完成 → 渲染镜像小图 → 主线程贴覆盖层」
+    /// 的呈现链装机并显示覆盖层；off 场只隐藏覆盖层（原始预览直出，与一期一致）。呈现器
+    /// 随呈现缝持有（end 置 nil 即释放——渲染上下文逐场一个，不逐帧）。
+    private func installPreviewOverlay(_ panel: CameraPiPWindow,
+                                       backgroundProcessor: CameraBackgroundProcessor?) {
+        if let backgroundProcessor {
+            let presenter = PiPPreviewFramePresenter { [weak panel] cg in
+                DispatchQueue.main.async { panel?.updatePreviewOverlayImage(cg) }
+            }
+            camera.previewFramePresenter = { presenter.present($0) }
+            panel.setPreviewOverlayVisible(true)
+        } else {
+            camera.previewFramePresenter = nil
+            panel.setPreviewOverlayVisible(false)
+        }
+    }
+
     /// 拖动锚点写入（主线程）：浮窗 frame（Cocoa 屏坐标）→ 以浮窗当前所在屏为锚换算
     /// CG 全系（RegionSelectorMath 口径）。拖到未录制屏时换算结果落在采集区外，
     /// 合成器按不相交直返——PiP 自然不进成片。
@@ -179,6 +265,9 @@ final class CameraPiPWindowController {
 
     /// 浮窗可见性（internal 只读，测试断言装配/收起）。
     var isWindowVisible: Bool { window?.isVisible ?? false }
+
+    /// 预览跟背景覆盖层可见性（internal 只读，测试断言装配/收起）。
+    var isPreviewOverlayVisible: Bool { window?.isPreviewOverlayVisible ?? false }
 
     /// 以真实 setFrame 路径移动浮窗（触发 didMove/didResize 通知 → 拖动锚点全链）。
     func moveWindowForTesting(to frame: NSRect) {

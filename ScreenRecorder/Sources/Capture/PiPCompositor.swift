@@ -308,7 +308,9 @@ final class PiPCompositor {
             composed = placePip(pip, pipFrame: pipFrame, in: bounds, over: composed ?? base)
         }
 
-        guard let composed, let output = dequeueOutputBuffer(size: bounds.size) else { return screenFrame }
+        guard let composed, let output = dequeueOutputBuffer(size: bounds.size) else {
+            return screenFrame
+        }
         context.render(composed, to: output)
         return output
     }

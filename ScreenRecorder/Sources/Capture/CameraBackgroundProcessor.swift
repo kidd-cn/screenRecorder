@@ -1,6 +1,7 @@
 import CoreImage
 import CoreVideo
 import Foundation
+import ImageIO
 import Vision
 
 // MARK: - PersonSegmenting（简报 Produces 逐字）
@@ -112,19 +113,52 @@ final class CameraBackgroundProcessor {
         self.segmenter = segmenter
     }
 
-    /// 逐帧处理：off 直通；mask 不可得/渲染失败直通原帧（不丢帧）。
+    /// 逐帧处理：off 直通；mask 不可得/渲染失败/无人像直通原帧（不丢帧）。
     func process(_ frame: CVPixelBuffer) async -> CVPixelBuffer {
         if case .off = mode { return frame } // 零开销直通（不触碰分割缝）
         guard let mask = await segmenter.segmentationMask(for: frame) else {
             return frame // mask 不可得：原帧直通不丢帧
         }
-        return compose(frame: frame, mask: mask) ?? frame
+        let composed = compose(frame: frame, mask: mask)
+        return composed ?? frame
     }
 
     /// 当前输出缓冲池（internal 只读，供无头钉测「连帧命中同一池实例」——PiPCompositor
     /// 同款缝）。只在测试读；池字段本就 stateLock 保护。
     var activeOutputPool: CVPixelBufferPool? {
         stateLock.withStateLock { bufferPool }
+    }
+
+    /// 有效人像 mask 的最小白色占比（无人像防线阈值，验收裁定）：坐姿人像在摄像头画幅
+    /// 中的占比通常 >2%；<0.5% 判无人像（mask 全黑/近全黑）。
+    static let minPersonMaskFraction: Double = 0.005
+
+    /// mask 白色占比（渲染到 64×48 统计缓冲，亮度 ≥128 计数——软边缘 mask 二值化口径
+    /// 与 CIBlendWithMask 的亮度取值一致）。渲染失败按 0（= 无人像直通，不丢帧）。
+    private func personFraction(of mask: CIImage, frameWidth: Int, frameHeight: Int) -> Double {
+        let statsWidth = 64
+        let statsHeight = 48
+        var statsBuffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(
+            kCFAllocatorDefault, statsWidth, statsHeight,
+            kCVPixelFormatType_32BGRA, nil, &statsBuffer) == kCVReturnSuccess,
+              let stats = statsBuffer else { return 0 }
+        let scaled = mask.transformed(by: CGAffineTransform(
+            scaleX: CGFloat(statsWidth) / CGFloat(frameWidth),
+            y: CGFloat(statsHeight) / CGFloat(frameHeight)))
+        context.render(
+            scaled.cropped(to: CGRect(x: 0, y: 0, width: statsWidth, height: statsHeight)),
+            to: stats)
+        CVPixelBufferLockBaseAddress(stats, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(stats, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(stats) else { return 0 }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(stats)
+        var whiteCount = 0
+        for y in 0..<statsHeight {
+            let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<statsWidth where row[x * 4 + 2] >= 128 { whiteCount += 1 } // 灰度 mask：取 R 通道
+        }
+        return Double(whiteCount) / Double(statsWidth * statsHeight)
     }
 
     // MARK: 合成（前景叠背景）
@@ -166,6 +200,12 @@ final class CameraBackgroundProcessor {
             .transformed(by: CGAffineTransform(
                 scaleX: bounds.width / maskExtent.width,
                 y: bounds.height / maskExtent.height))
+
+        // 无人像防线（验收裁定）：Vision 在无人/弱光场景会返回「合法但全黑」的 mask——照常
+        // 合成会把人整体抹进背景（成片只剩背景，用户不可见）。无人像 = mask 不可得（同一
+        // 句法原帧直通）：背景替换是「人像增强」，不是画面的门卫。
+        let personFraction = personFraction(of: scaledMask, frameWidth: width, frameHeight: height)
+        guard personFraction >= Self.minPersonMaskFraction else { return nil }
 
         guard let blend = CIFilter(name: "CIBlendWithMask") else { return nil }
         blend.setValue(input, forKey: kCIInputImageKey)

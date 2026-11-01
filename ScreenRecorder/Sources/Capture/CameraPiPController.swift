@@ -94,6 +94,15 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
         set { frameLock.withStateLock { backgroundProcessorStorage = newValue } }
     }
     private var backgroundProcessorStorage: CameraBackgroundProcessor?
+    /// 处理后帧的预览呈现缝（P5 预览跟背景）：录制中由装配层装机，处理完成线程以**已入库**
+    /// 的处理后帧回调（实现侧自行渲染与主线程投递）；nil = 呈现关闭（idle/off 场）。
+    /// frameLock 保护（装配主线程写、协作线程逐帧读——与 backgroundProcessor 同纪律）。
+    /// mask 不可得时 process 直通原帧，呈现面恒为最新可用画面——处理失败无需额外回退路径。
+    var previewFramePresenter: ((CVPixelBuffer) -> Void)? {
+        get { frameLock.withStateLock { previewFramePresenterStorage } }
+        set { frameLock.withStateLock { previewFramePresenterStorage = newValue } }
+    }
+    private var previewFramePresenterStorage: ((CVPixelBuffer) -> Void)?
     /// 处理流水线的帧序号（video 队列串行自增）/ 已入库序号与场次代号（frameLock 保护）。
     /// 处理为异步（Vision 专用队列 + 协作线程渲染），完成可能乱序：入库以「序号更大且同
     /// 场次」为准——慢帧后到不得把 latestFrame 拨回旧帧（合成器逐帧读，回退即成片 PiP
@@ -292,11 +301,13 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
                                   ticket: ProcessingTicket,
                                   processor: CameraBackgroundProcessor) {
         var next: (frame: CVPixelBuffer, ticket: ProcessingTicket)?
+        var acceptedFrame: CVPixelBuffer?
         frameLock.withStateLock {
             if ticket.generation == processingGeneration,
                ticket.sequence > deliveredFrameSequence {
                 deliveredFrameSequence = ticket.sequence
                 latestFrame = frame
+                acceptedFrame = frame
             }
             if let pendingFrame = pendingFrameSlot {
                 next = (pendingFrame, pendingTicketSlot ?? ticket)
@@ -307,6 +318,10 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
                 //（否则新场次在途期间闩被误开，门控短暂漏帧入队——有界但不必要）。
                 processingInFlight = false
             }
+        }
+        // 预览呈现只取已入库帧（锁外回调——呈现链含渲染与主线程投递，不得占锁）。
+        if let acceptedFrame, let presenter = previewFramePresenter {
+            presenter(acceptedFrame)
         }
         if let next {
             spawnProcessing(next.frame, ticket: next.ticket, processor: processor)
