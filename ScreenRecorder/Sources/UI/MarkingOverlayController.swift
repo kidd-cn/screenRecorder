@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import CoreGraphics
 import Foundation
 
@@ -32,16 +33,21 @@ final class MarkingStrokeStore {
 
 // MARK: - 标记覆盖层视图（事件泵）
 
-/// 全屏透明覆盖视图：把鼠标拖拽三拍原样上抛（窗口坐标），换算与画布写全在控制器。
-/// 笔画不在本视图实时显示（画布出图在合成器）；rightMouse 同样不关心（覆盖层无右键语义）。
-/// 唯一的绘制是一层 **5% 透明黑底**：macOS 26+ 窗口服务器把「整窗零不透明像素」的窗口
-/// 判为全透明——渲染与鼠标命中测试整窗跳过（点击直接穿透到下层 App，occlusion 只有
-/// 非 visible 位）。真机取证（验收 P2）：满幅面板已显示、level 2，绘画期间零 hitTest。
-/// 5% 黑在 8bit 下约 1 个色阶，屏幕与成片均不可感知，仅让窗口脱离全透明判定恢复接事件。
-private final class MarkingOverlayView: NSView {
+/// 全屏覆盖视图：把鼠标拖拽三拍原样上抛（窗口坐标），换算与画布写全在控制器；并按
+/// 控制器注入的 `drawInk` **实时渲染墨迹**（所见即所得；成片烧入仍在合成器，配方与
+/// `PiPCompositor.makeStrokesCGImage` 逐条镜像：round 线帽/圆头、短边归一线宽、单点
+/// 画实心圆、y 翻转）。rightMouse 不关心（覆盖层无右键语义）。
+/// 另有一层 **5% 透明黑底**：macOS 26+ 窗口服务器把「整窗零不透明像素」的窗口判为
+/// 全透明——渲染与鼠标命中测试整窗跳过（点击直接穿透到下层 App，occlusion 只有非
+/// visible 位）。真机取证（验收 P2）：满幅面板已显示、level 2，绘画期间零 hitTest。
+/// 5% 黑在 8bit 下约 1 个色阶，屏幕与成片均不可感知；起笔前窗口尚无墨迹，靠这层底色
+/// 脱离全透明判定接住第一击（笔画只在局部，不能依赖墨迹本身撑住命中测试）。
+final class MarkingOverlayView: NSView {
     var onMouseDown: ((CGPoint) -> Void)?
     var onMouseDragged: ((CGPoint) -> Void)?
     var onMouseUp: ((CGPoint) -> Void)?
+    /// 实时墨迹绘制缝（控制器注入；参数为 dirtyRect——实现恒全量重绘，笔画量级小）。
+    var drawInk: ((NSRect) -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -54,6 +60,8 @@ private final class MarkingOverlayView: NSView {
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0, alpha: 0.05).cgColor
     }
+
+    override func draw(_ dirtyRect: NSRect) { drawInk?(dirtyRect) }
 
     override func mouseDown(with event: NSEvent) { onMouseDown?(event.locationInWindow) }
     override func mouseDragged(with event: NSEvent) { onMouseDragged?(event.locationInWindow) }
@@ -77,6 +85,9 @@ private final class MarkingOverlayView: NSView {
 ///   level 略低于浮条（浮条/工具条保持可点）。
 /// - **事件泵**：mouseDown/Dragged/Up → 屏幕（Cocoa 全局）→ 底帧归一化 → canvas
 ///   begin/extend/end。`endStroke` 在 mouseUp 与收起时兜底调用（幂等）。
+/// - **实时墨迹**（验收 P2 后增强）：覆盖层按画布快照实时渲染笔画（所见即所得），
+///   配方与合成器逐条镜像；成片烧入链路不变（画布出图在合成器）。视图另垫 5% 透明
+///   黑底规避 macOS 26+ 全透明窗口的点击穿透（见 MarkingOverlayView 文档）。
 /// - **坐标管线**（`normalizedStrokePoint`，与 Task 2 feedZoomClick 同源换算 + Task 4
 ///   逆映射步）：Cocoa 全局 →（主屏翻转）→ CG 全局 →（几何平移缩放）→ 捕获像素 →
 ///   viewport 归一化（CI 画布 y 向上口径，缩放仿射的作用域）→ `baseFramePoint`
@@ -110,6 +121,8 @@ final class MarkingOverlayController: ObservableObject {
     private let geometryProvider: () -> PiPCaptureGeometry?
     private let panelFactory: (@MainActor () -> NSPanel)
     private var overlayPanel: NSPanel?
+    /// 墨迹实时刷新订阅（画布变更 → 覆盖层重绘；随事件泵装配，一场一条）。
+    private var inkRefreshCancellable: AnyCancellable?
     private(set) var isShowingOverlays = false
 
     /// - Parameters:
@@ -211,6 +224,15 @@ final class MarkingOverlayController: ObservableObject {
         view.onMouseDown = { [weak self] point in self?.handleDown(atWindowPoint: point) }
         view.onMouseDragged = { [weak self] point in self?.handleExtend(atWindowPoint: point) }
         view.onMouseUp = { [weak self] _ in self?.canvas.endStroke() }
+        view.drawInk = { [weak self, weak view] _ in
+            guard let self, let view else { return }
+            self.drawInk(on: view)
+        }
+        // 画布任意变更（begin/extend/undo/clear/清场）→ 覆盖层重绘（订阅在主 actor，
+        // needsDisplay 仅置脏，AppKit 合帧后走 draw → drawInk）。
+        inkRefreshCancellable = canvas.$strokes.sink { [weak view] _ in
+            view?.needsDisplay = true
+        }
         panel.contentView = view
     }
 
@@ -233,6 +255,43 @@ final class MarkingOverlayController: ObservableObject {
             geometry: geometry,
             flipHeight: ClickHighlightTracker.primaryScreenHeight(),
             zoomTransform: .identity) // 绘制面呈现底帧内容（缩放只在成片侧）——见类文档坐标管线
+    }
+
+    // MARK: 实时墨迹（屏上所见即所得；配方镜像 PiPCompositor.makeStrokesCGImage）
+
+    /// 覆盖层实时渲染画布全部笔画（draw 调用，主 actor）。与合成器同款：round 线帽/
+    /// 圆头连接、线宽按底帧**短边**归一（此处以覆盖层 bounds 短边换算——bounds 与底帧
+    /// 同为被录显示器，点/像素比例不影响相对粗细）、单点笔画画实心圆头点、归一化 y 向下
+    /// → 视图坐标 y 向上翻转。撤销/清空/清场经 $strokes 订阅置脏即时反映。
+    private func drawInk(on view: NSView) {
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let bounds = view.bounds
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        for stroke in canvas.snapshot.strokes {
+            let lineWidth = CGFloat(stroke.width) * min(bounds.width, bounds.height)
+            guard lineWidth > 0, lineWidth.isFinite else { continue }
+            context.setStrokeColor(red: CGFloat(stroke.color.red), green: CGFloat(stroke.color.green),
+                                   blue: CGFloat(stroke.color.blue), alpha: 1)
+            context.setFillColor(red: CGFloat(stroke.color.red), green: CGFloat(stroke.color.green),
+                                 blue: CGFloat(stroke.color.blue), alpha: 1)
+            context.setLineWidth(lineWidth)
+            let mapped = stroke.points.map { Self.overlayViewPoint(fromNormalized: $0, in: bounds) }
+            guard let first = mapped.first else { continue }
+            if mapped.count == 1 {
+                // 单点笔画：圆头半径的实心点（与合成器同款——描边零长线段不出墨）。
+                let radius = lineWidth / 2
+                context.fillEllipse(in: CGRect(x: first.x - radius, y: first.y - radius,
+                                               width: lineWidth, height: lineWidth))
+                continue
+            }
+            context.beginPath()
+            context.move(to: first)
+            for point in mapped.dropFirst() {
+                context.addLine(to: point)
+            }
+            context.strokePath()
+        }
     }
 
     // MARK: 坐标换算（纯函数，headless 钉测缝）
@@ -261,6 +320,15 @@ final class MarkingOverlayController: ObservableObject {
                                  y: 1 - baseCI.y / canvasSize.height)
         guard (0...1).contains(normalized.x), (0...1).contains(normalized.y) else { return nil }
         return normalized
+    }
+
+    /// 底帧归一化点（左上原点、y 向下 0…1）→ 覆盖层视图坐标（Cocoa 左下原点）。
+    /// 与合成器位图翻转同口径（y = 高 − y×高），原点不假定为零（多屏负坐标安全）。
+    /// 实时墨迹渲染的逆换算缝：归一化（`normalizedStrokePoint` 产出）与视图坐标互逆，
+    /// 往返恒等。
+    static func overlayViewPoint(fromNormalized point: CGPoint, in bounds: CGRect) -> CGPoint {
+        CGPoint(x: bounds.minX + point.x * bounds.width,
+                y: bounds.maxY - point.y * bounds.height)
     }
 
     // MARK: 被录显示器 bounds（显示时刻现场解析，无屏幕 API 的纯逻辑由测试另钉）

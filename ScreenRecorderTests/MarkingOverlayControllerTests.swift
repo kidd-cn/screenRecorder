@@ -212,4 +212,77 @@ final class MarkingOverlayControllerTests: XCTestCase {
         box.markingEnabled = false
         XCTAssertFalse(controller.shouldShowOverlays(), "拉取式缝与纯函数同一判定真源")
     }
+
+    // MARK: 实时墨迹（验收 P2 后增强：归一化↔视图坐标互逆 + 绘制/刷新装配）
+
+    /// 归一化（y 向下 0…1）→ 覆盖层视图坐标（Cocoa 左下原点）翻转缝：角点/中心/任意点
+    /// 与原点无关边界（多屏负坐标 bounds）。与合成器位图翻转同口径，且与
+    /// `normalizedStrokePoint` 的归一化互逆——单位方形上往返恒等。
+    func testOverlayViewPointMapping() {
+        let bounds = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        // 角点：左上 (0,1) 归一化 → 视图左下 (0,0)；右下 (1,0) → 右上 (1512,982)。
+        let topLeft = MarkingOverlayController.overlayViewPoint(fromNormalized: CGPoint(x: 0, y: 1), in: bounds)
+        XCTAssertEqual(topLeft.x, 0, accuracy: Self.accuracy, "归一化 y=1（底帧下缘）= 视图 y=0（下缘）")
+        XCTAssertEqual(topLeft.y, 0, accuracy: Self.accuracy)
+        let bottomRight = MarkingOverlayController.overlayViewPoint(fromNormalized: CGPoint(x: 1, y: 0), in: bounds)
+        XCTAssertEqual(bottomRight.x, 1512, accuracy: Self.accuracy, "归一化 x=1 = 视图右缘")
+        XCTAssertEqual(bottomRight.y, 982, accuracy: Self.accuracy, "归一化 y=0（底帧上缘）= 视图上缘")
+        // 中心。
+        let center = MarkingOverlayController.overlayViewPoint(fromNormalized: CGPoint(x: 0.5, y: 0.5), in: bounds)
+        XCTAssertEqual(center.x, 756, accuracy: Self.accuracy)
+        XCTAssertEqual(center.y, 491, accuracy: Self.accuracy)
+        // 原点无关（多屏负坐标 bounds）：平移一致。
+        let offscreen = CGRect(x: -1920, y: -500, width: 1920, height: 1080)
+        let shifted = MarkingOverlayController.overlayViewPoint(fromNormalized: CGPoint(x: 0.25, y: 0.75), in: offscreen)
+        XCTAssertEqual(shifted.x, -1920 + 0.25 * 1920, accuracy: Self.accuracy, "x 含 bounds.minX 平移")
+        XCTAssertEqual(shifted.y, -500 + 1080 - 0.75 * 1080, accuracy: Self.accuracy, "y 自 bounds.maxY 翻转，负坐标屏安全")
+        // 往返恒等：视图点经同一归一化管线应回到原归一化值（与 testScreenPointToNormalizedMapping
+        // 的输出口径互逆；此处以纯几何复核翻转互逆性）。
+        let normalized = CGPoint(x: 0.4, y: 0.2)
+        let viewPoint = MarkingOverlayController.overlayViewPoint(fromNormalized: normalized, in: bounds)
+        let roundTripped = CGPoint(x: (viewPoint.x - bounds.minX) / bounds.width,
+                                   y: (bounds.maxY - viewPoint.y) / bounds.height)
+        XCTAssertEqual(roundTripped.x, normalized.x, accuracy: Self.accuracy, "归一化→视图→归一化往返恒等")
+        XCTAssertEqual(roundTripped.y, normalized.y, accuracy: Self.accuracy)
+    }
+
+    /// 墨迹装配：首次 show 装事件泵时注入绘制缝 + 画布变更订阅——覆盖层视图就位
+    /// （contentView）、`drawInk` 已接、画布 begin/undo 后视图置脏（needsDisplay），
+    /// 撤销到空后同样置脏（撤销墨迹即时消失的面）。
+    func testInkViewWiringAndRefresh() throws {
+        let box = VisibilityStateBox()
+        box.geometry = displayGeometry
+        let spy = SpyMarkingPanel()
+        let canvas = MarkingCanvas()
+        let controller = MarkingOverlayController(
+            canvas: canvas,
+            modeProvider: { box.mode },
+            stateProvider: { box.state },
+            markingEnabledProvider: { box.markingEnabled },
+            geometryProvider: { box.geometry },
+            panelFactory: { spy })
+
+        controller.refreshVisibility(enabled: true, state: .recording)
+        XCTAssertTrue(controller.isShowingOverlays)
+        let inkView = try XCTUnwrap(spy.contentView as? MarkingOverlayView,
+                                    "覆盖层视图应为面板 contentView（事件泵装配即注入墨迹绘制）")
+        XCTAssertNotNil(inkView.drawInk, "绘制缝必须在事件泵装配时接好")
+        // $strokes 订阅按 Combine 语义即发初值（[]）→ 装配时置脏一次，无害的空重绘。
+        inkView.needsDisplay = false
+
+        // begin 一笔：$strokes 订阅触发置脏（主 actor 同步）。
+        canvas.beginStroke(color: .red, width: 0.008, at: CGPoint(x: 0.5, y: 0.5))
+        XCTAssertTrue(inkView.needsDisplay, "画布变更必须置脏覆盖层（实时墨迹）")
+        inkView.needsDisplay = false
+
+        // 撤销到空：同样置脏（墨迹即时消失）。
+        canvas.undoLast()
+        XCTAssertTrue(inkView.needsDisplay, "撤销后必须置脏重绘（清屏）")
+        inkView.needsDisplay = false
+
+        // 隐藏面板不拆除墨迹装配（复用面板下一场直接可用）。
+        controller.refreshVisibility(enabled: false, state: .recording)
+        XCTAssertFalse(controller.isShowingOverlays)
+        XCTAssertTrue(spy.contentView === inkView, "隐藏只 orderOut，视图装配保持")
+    }
 }
