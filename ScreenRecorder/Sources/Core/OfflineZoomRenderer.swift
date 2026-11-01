@@ -41,6 +41,18 @@ struct ExportVideoOptions: Equatable {
 /// 占比推到 0.95，finishWriting 完成恰推一次 1.0。
 /// 真实渲染链路（GPU CI、长片吞吐）归批次真机验收；headless 测试经 `context:` 缝
 /// 注入软件渲染上下文（PiPCompositorTests 同纪律）。
+///
+/// R1 修复（审阅 F1/F2/F3）：
+/// - **会话锚点 = 双轨首样本最小 PTS**（F1）——外部文件形态「某轨首样本晚于另一轨」
+///   下，锚单轨首样本会让早到轨的样本以早于会话起点的 PTS 追加：macOS 27 静默钳到
+///   成片起点压扁片头时间线，旧平台直接追加失败。锚点在装配期（startWriting 前）
+///   一次性确定；appenders 兜底跳过早于锚点的病态样本（B 帧源解码序首个样本 PTS
+///   未必最小——正常源零行为变化）；
+/// - **isReady 有界看门狗**（F2）——轮询 30s 不复位转类型化错误，不无限挂起
+///   （`AssetWriterSession.finish` 有界等待同纪律）；
+/// - **零可解码样本防线**（F3）——双轨均无可解码样本在 startWriting 前抛
+///   `.noRenderableSamples`（损坏源不触达「未 startWriting 的 finishWriting」
+///   ObjC 异常路径）；视频轨在但零帧解出（音轨在、视频零帧）在收尾前防线拦截。
 enum OfflineZoomRenderer {
     /// 缓入窗口（秒）= 实时 attack 时长——`AutoZoomState.attackDuration` 单一真源
     ///（Task 17 钉定：离线侧不复制常量，与实时同窗）。
@@ -57,6 +69,11 @@ enum OfflineZoomRenderer {
         case appendFailedVideo(underlying: Error?)
         case appendFailedAudio(underlying: Error?)
         case cannotCreateOutputBuffer
+        /// R1 F2：编码器输入长时间未就绪（isReady 看门狗超时——导出中止而非挂起）
+        case appendInputStalled(mediaType: String)
+        /// R1 F3：源不含可解码的媒体样本（视频轨在但零可解码帧等损坏源——
+        /// 不产出无视频的半残成片，也不触达未启动会话的 finishWriting）
+        case noRenderableSamples
 
         var errorDescription: String? {
             switch self {
@@ -74,6 +91,10 @@ enum OfflineZoomRenderer {
                 return "缩放导出失败：音频样本写入失败：\(underlying.map(String.init(describing:)) ?? "未知原因")"
             case .cannotCreateOutputBuffer:
                 return "缩放导出失败：无法创建输出像素缓冲"
+            case .appendInputStalled(let mediaType):
+                return "缩放导出失败：\(mediaType)编码器长时间未就绪，导出已中止"
+            case .noRenderableSamples:
+                return "缩放导出失败：源不含可解码的媒体样本"
             }
         }
     }
@@ -192,30 +213,36 @@ enum OfflineZoomRenderer {
             ])
 
         push(0)
-        var sessionStarted = false
-        // 首个到轨样本锚定会话时间轴（AssetWriterSession 同款纪律——音画起点一致）
-        func startSessionIfNeeded(at pts: CMTime) {
-            guard !sessionStarted else { return }
-            writer.startWriting()
-            writer.startSession(atSourceTime: pts)
-            sessionStarted = true
-        }
 
         // 音频输入须在 startWriting 前装配（AVAssetWriter 硬约束）——首个 PCM 样本
         // 在 reader.startReading 后拉取取解码格式建 AAC 输入（copyNextSampleBuffer
-        // 须待 reader 进入 reading；该样本暂存，循环内首个追加）。音轨存在但零样本
-        // 时 audioInput 保持 nil：循环内音轨侧拉到 nil 即收尾，按纯视频装配。
+        // 须待 reader 进入 reading；该样本暂存）。视频首样本同步装配期拉取：会话锚点
+        // 须取**双轨最小首 PTS**（R1 F1——见类注释）。音轨存在但零样本时 audioInput
+        // 保持 nil：音轨侧拉到 nil 即收尾，按纯视频装配。
         var audioInput: AVAssetWriterInput?
+        var pendingVideoSample: CMSampleBuffer?
         var pendingAudioSample: CMSampleBuffer?
+        /// 会话锚点（双轨最小首 PTS；appenders 据此兜底跳过早于锚点的病态样本）
+        var sessionAnchor: CMTime = .invalid
+        /// 已写入视频帧数（R1 F3 零可解码视频帧防线）
+        var appendedVideoFrames = 0
 
         /// 离线无丢帧：轮询到受理再追加（取消感知、writer 失败即抛——不吞错误空转）。
-        func waitForReady(_ input: AVAssetWriterInput) async throws {
+        /// R1 F2 有界看门狗：isReady 长时间不复位（编码器停摆/macOS 27 跨轨饿死形态）
+        /// 超时转类型化错误，不无限挂起（AssetWriterSession.finish 有界等待同纪律）。
+        func waitForReady(_ input: AVAssetWriterInput, mediaType: String) async throws {
+            let timeout: TimeInterval = 30
+            var waited: TimeInterval = 0
             while !input.isReadyForMoreMediaData {
                 if Task.isCancelled { throw CancellationError() }
                 guard writer.status != .failed else {
                     throw RenderError.writerFailed(status: writer.status, underlying: writer.error)
                 }
+                guard waited < timeout else {
+                    throw RenderError.appendInputStalled(mediaType: mediaType)
+                }
                 try await Task.sleep(nanoseconds: 5_000_000)
+                waited += 0.005
             }
         }
 
@@ -260,15 +287,51 @@ enum OfflineZoomRenderer {
                 audioInput = input
                 pendingAudioSample = first
             }
+            // 视频首样本装配期拉取（锚点取双轨最小首 PTS——R1 F1）
+            if let first = videoOutput.copyNextSampleBuffer() {
+                pendingVideoSample = first
+            }
+
+            // 会话锚点 = 双轨首样本最小 PTS（R1 F1）；双轨均无可解码样本 = 损坏源
+            //（R1 F3）——startWriting 前抛类型化错误，不触达未启动会话的 finishWriting
+            let videoFirst = pendingVideoSample.map(CMSampleBufferGetPresentationTimeStamp)
+            let audioFirst = pendingAudioSample.map(CMSampleBufferGetPresentationTimeStamp)
+            switch (videoFirst, audioFirst) {
+            case let (v?, a?):
+                sessionAnchor = CMTimeCompare(v, a) <= 0 ? v : a
+            case let (v?, nil):
+                sessionAnchor = v
+            case let (nil, a?):
+                sessionAnchor = a
+            default:
+                throw RenderError.noRenderableSamples
+            }
+            writer.startWriting()
+            writer.startSession(atSourceTime: sessionAnchor)
+
+            // 双轨首样本按 PTS 序入轨（均 ≥ 锚点）
+            switch (pendingVideoSample, pendingAudioSample) {
+            case let (v?, a?):
+                if CMTimeCompare(CMSampleBufferGetPresentationTimeStamp(v),
+                                 CMSampleBufferGetPresentationTimeStamp(a)) <= 0 {
+                    try await appendVideo(v)
+                    try await appendAudio(a)
+                } else {
+                    try await appendAudio(a)
+                    try await appendVideo(v)
+                }
+            case let (v?, nil):
+                try await appendVideo(v)
+            case let (nil, a?):
+                try await appendAudio(a)
+            default:
+                break
+            }
+            pendingVideoSample = nil
+            pendingAudioSample = nil
 
             while !videoDone || !audioDone {
                 if Task.isCancelled { throw CancellationError() }
-
-                // 暂存的首个音频样本先行入轨（其格式已建好 audioInput）
-                if let pending = pendingAudioSample {
-                    pendingAudioSample = nil
-                    try await appendAudio(pending)
-                }
 
                 if !videoDone {
                     if let sample = videoOutput.copyNextSampleBuffer() {
@@ -294,6 +357,13 @@ enum OfflineZoomRenderer {
             try? FileManager.default.removeItem(at: destinationURL)
             throw RenderError.readerFailed(status: reader.status, underlying: reader.error)
         }
+        guard appendedVideoFrames > 0 else {
+            // 零可解码视频帧防线（R1 F3）：视频轨在但一帧都解不出（无音轨的损坏源
+            // 已在装配期锚点防线拦截；此处拦「音轨在、视频零帧」形态）——不产出
+            // 无视频的半残成片
+            try? FileManager.default.removeItem(at: destinationURL)
+            throw RenderError.noRenderableSamples
+        }
 
         videoInput.markAsFinished()
         audioInput?.markAsFinished()
@@ -311,6 +381,9 @@ enum OfflineZoomRenderer {
 
         func appendVideo(_ sample: CMSampleBuffer) async throws {
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            // 早于会话锚点的病态样本兜底跳过（R1 F1——B 帧源解码序首个样本 PTS 未必
+            // 最小；不给「早于会话起点的追加」留门。正常源零行为变化）
+            guard CMTimeCompare(pts, sessionAnchor) >= 0 else { return }
             guard let sourceBuffer = CMSampleBufferGetImageBuffer(sample) else { return } // 无像素载荷：跳过
             let t = CMTimeGetSeconds(pts)
 
@@ -347,18 +420,19 @@ enum OfflineZoomRenderer {
                 outputBuffer = rendered
             }
 
-            startSessionIfNeeded(at: pts)
-            try await waitForReady(videoInput)
+            try await waitForReady(videoInput, mediaType: "视频")
             guard adaptor.append(outputBuffer, withPresentationTime: pts) else {
                 throw RenderError.appendFailedVideo(underlying: writer.error)
             }
+            appendedVideoFrames += 1
             pushFrameProgress(t)
         }
 
         func appendAudio(_ sample: CMSampleBuffer) async throws {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            guard CMTimeCompare(pts, sessionAnchor) >= 0 else { return } // 同 appendVideo 兜底
             guard let input = audioInput else { throw RenderError.cannotAddAudioInput }
-            startSessionIfNeeded(at: CMSampleBufferGetPresentationTimeStamp(sample))
-            try await waitForReady(input)
+            try await waitForReady(input, mediaType: "音频")
             guard input.append(sample) else {
                 throw RenderError.appendFailedAudio(underlying: writer.error)
             }

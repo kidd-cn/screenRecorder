@@ -198,6 +198,94 @@ final class OfflineZoomRendererTests: XCTestCase {
         }
     }
 
+    // MARK: - R1 修复钉测（会话锚点 / 损坏源防线）
+
+    func testRenderLateAudioHeadGapKeepsTimeline() async throws {
+        // 音轨带头部空档的源（外部文件形态：音频首样本晚于视频首样本 0.5s，经
+        // makeFixtureVideo(audioStartOffset:) 构造）。渲染器会话锚点取双轨首样本
+        // 最小 PTS（R1 F1 修法）——本钉测锁该形态的时间线 passthrough 不变量：
+        // 视频轨片头原位不压扁、音轨时间线与源逐项一致、容器时长为双轨并集。
+        //
+        // 平台实测注记（R1 F1 红测不可构造的根因，审阅已如实申报）：AVAssetWriter
+        // 把音频头部空档结构化进容器（AAC 档转写为 elst 空编辑；LPCM-MOV 同形），
+        // 但 AVAssetReader 音频解码对空编辑**从 0 起静音填充**——reader 层首音频
+        // PTS 恒 = 0 = 视频首 PTS，「音频首样本晚于视频首样本」的 reader 级输入
+        // 无法经 AVAssetWriter 或轨道合成构造（合成导出被拒 -11838）。锚点决策
+        // 因此无 head 级红测（勿造重言），修法由装配期 min() + appends 兜底保证。
+        let sourceURL = directory.appendingPathComponent("音晚源.mp4")
+        try await makeFixtureVideo(at: sourceURL, audioStartOffset: 0.5)
+
+        let sourceAsset = AVURLAsset(url: sourceURL)
+        let sourceAudioTracks = try await sourceAsset.loadTracks(withMediaType: .audio)
+        let sourceAudio = try XCTUnwrap(sourceAudioTracks.first, "夹具音轨在")
+        let sourceAudioTimeRange = try await sourceAudio.load(.timeRange)
+
+        let outputURL = try await OfflineZoomRenderer.render(
+            sourceURL: sourceURL,
+            segments: [],
+            options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+            progress: { _ in },
+            context: CIContext(options: [.useSoftwareRenderer: true]))
+
+        let output = AVURLAsset(url: outputURL)
+        let outputVideoTracks = try await output.loadTracks(withMediaType: .video)
+        let outputVideo = try XCTUnwrap(outputVideoTracks.first, "输出应有视频轨")
+        let videoTimeRange = try await outputVideo.load(.timeRange)
+        XCTAssertEqual(videoTimeRange.start.seconds, 0, accuracy: 0.02,
+                       "视频轨起点 = 视频首样本 PTS 0（片头原位，不被会话锚点钳走）")
+        XCTAssertEqual(videoTimeRange.duration.seconds, 2.0, accuracy: 0.05,
+                       "视频轨时长与源一致（片头不压扁）")
+        let outputAudioTracks = try await output.loadTracks(withMediaType: .audio)
+        let outputAudio = try XCTUnwrap(outputAudioTracks.first, "源音轨仍直通")
+        let audioTimeRange = try await outputAudio.load(.timeRange)
+        XCTAssertEqual(audioTimeRange.start.seconds, sourceAudioTimeRange.start.seconds,
+                       accuracy: 0.02, "音轨起点与源一致")
+        XCTAssertEqual(audioTimeRange.duration.seconds, sourceAudioTimeRange.duration.seconds,
+                       accuracy: 0.1, "音轨时长与源一致（时间线不动）")
+        let outputDuration = try await output.load(.duration).seconds
+        let sourceDuration = try await sourceAsset.load(.duration).seconds
+        XCTAssertEqual(outputDuration, sourceDuration, accuracy: 0.1,
+                       "容器时长与源一致")
+    }
+
+    func testRenderCorruptSourceThrowsTypedErrorWithoutResidue() async throws {
+        // 损坏源（视频轨在但解码配置 avcC 被腐蚀 → 零可解码帧）必须抛类型化错误且
+        // 不留半截成片（R1 F3 防线：会话锚点装配后才 startWriting——双轨均无可解码
+        // 样本时在 startWriting 前抛 `.noRenderableSamples`，「未 startWriting 就
+        // finishWriting」的 ObjC 异常路径结构性不可达）。本钉测锁可观察契约：
+        // 错误类型为 RenderError + 目标路径无残壳。
+        let sourceURL = directory.appendingPathComponent("损坏源.mp4")
+        try await makeFixtureVideo(at: sourceURL)
+        var data = try Data(contentsOf: sourceURL)
+        let range = try XCTUnwrap(data.range(of: Data("avcC".utf8)), "夹具缺 avcC（H.264 配置）")
+        let start = range.upperBound + 4 // avcC 头 + SPS 长度字段 → 直达 SPS 载荷
+        let corruption: [UInt8] = [0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF]
+        for (index, byte) in corruption.enumerated() {
+            data[start + index] = byte
+        }
+        try data.write(to: sourceURL)
+
+        let expectedOutput = directory.appendingPathComponent("损坏源_缩放.mp4")
+        try? FileManager.default.removeItem(at: expectedOutput)
+
+        do {
+            _ = try await OfflineZoomRenderer.render(
+                sourceURL: sourceURL,
+                segments: [],
+                options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+                progress: { _ in },
+                context: CIContext(options: [.useSoftwareRenderer: true]))
+            XCTFail("损坏源必须抛类型化错误")
+        } catch let error as OfflineZoomRenderer.RenderError {
+            XCTAssertFalse(error.localizedDescription.isEmpty,
+                           "类型化错误带可呈现文案：\(error.localizedDescription)")
+        } catch {
+            XCTFail("必须抛 RenderError 类型，实得：\(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: expectedOutput.path),
+                       "失败路径不留半截成片")
+    }
+
     // MARK: - Codable（持久化面）与输出命名
 
     func testSegmentCodableRoundtrip() throws {
@@ -228,7 +316,12 @@ final class OfflineZoomRendererTests: XCTestCase {
     /// 程序生成 2s@30fps 320×180 源：近黑背景 + 亮红运动标记（x 向 sin 摆动，帧间可辨）
     /// + 静音 AAC 立体声音轨（44.1kHz）。标记为垂直居中厚条（探针中高免翻转口径），
     /// 水平中心 x = (0.25 + 0.04·sin(2π·帧/60))w——frame 3 ≈ 0.2624w、frame 30 恰 0.25w。
-    private func makeFixtureVideo(at url: URL) async throws {
+    /// - Parameters:
+    ///   - audioStartOffset: 音轨首样本 PTS 偏移（默认 0 = 音画同起；≠ 0 时音轨相对
+    ///     视频后移 0.5s 量级的外部文件形态）。平台注记：AVAssetWriter 会把该头部
+    ///     空档结构化进容器（AAC 档转写为 elst 空编辑——结构在容器里，解码层从 0
+    ///     静音填充），音轨 timeRange 仍自容器起点起算（空档含在内）。
+    private func makeFixtureVideo(at url: URL, audioStartOffset: TimeInterval = 0) async throws {
         let width = 320
         let height = 180
         let fps = 30
@@ -279,8 +372,8 @@ final class OfflineZoomRendererTests: XCTestCase {
         writer.add(audioInput)
 
         XCTAssertTrue(writer.startWriting(), "夹具 writer 启动失败")
-        // 夹具音画起点均为 0：会话时间轴直接锚 0（AssetWriterSession 首样本锚定同款纪律——
-        // macOS 27 上不 startSession 追加像素缓冲直接抛 NSInternalInconsistencyException）
+        // 夹具默认音画起点均为 0：会话时间轴直接锚 0（AssetWriterSession 首样本锚定同款
+        // 纪律——macOS 27 上不 startSession 追加像素缓冲直接抛 NSInternalInconsistencyException）
         writer.startSession(atSourceTime: .zero)
 
         // isReady 轮询到受理再追加（无丢帧）；20s 仍不受理（= 饿死）按夹具故障失败，
@@ -319,7 +412,8 @@ final class OfflineZoomRendererTests: XCTestCase {
                 pcm.floatChannelData![0][index] = 0
                 pcm.floatChannelData![1][index] = 0
             }
-            let pts = CMTime(value: CMTimeValue(chunk * framesPerChunk), timescale: CMTimeScale(sampleRate))
+            let pts = CMTime(value: CMTimeValue(audioStartOffset * sampleRate) + CMTimeValue(chunk * framesPerChunk),
+                             timescale: CMTimeScale(sampleRate))
             let sample = try XCTUnwrap(
                 AudioSampleBridge.makeSampleBuffer(
                     pcm: pcm, skipFrames: 0, pts: pts, formatDescription: audioDescription),
