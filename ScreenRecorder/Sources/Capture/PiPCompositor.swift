@@ -414,9 +414,21 @@ final class PiPCompositor {
         let pipImage = CIImage(cvPixelBuffer: pip)
         guard pipImage.extent.width > 0, pipImage.extent.height > 0, targetRect.width > 0 else { return nil }
 
-        // 摄像头帧等比缩放到目标 rect（源为 .vga640x480，窗口同 4:3，等比即完整覆盖）
-        let scale = targetRect.width / pipImage.extent.width
-        var placedPip = pipImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        // 摄像头帧 aspect-fill 到目标 rect（scale 取宽高比大者 + 中心裁剪）：设备实际交付
+        // 帧宽高比随机型/系统变化（验收机交付 16:9，`.vga640x480` 的 4:3 假设未被遵循），
+        // 按宽等比缩放会在 rect 顶部留空档透出下层画面（验收缺陷：顶条原画面）。fill 与
+        // 预览层 `.resizeAspectFill` 同语义——窗内所见即成片所得。
+        let scale = max(targetRect.width / pipImage.extent.width,
+                        targetRect.height / pipImage.extent.height)
+        let scaled = pipImage.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        // 中心裁剪到 rect 尺寸：origin 归零后打圆角（圆角 mask 与图像须同 origin-0 对齐），
+        // 最后统一平移到摆放位。等比失配时裁掉溢出侧，恰好匹配时裁剪/平移皆为零（原行为）。
+        let cropOrigin = CGPoint(
+            x: scaled.extent.midX - targetRect.width / 2,
+            y: scaled.extent.midY - targetRect.height / 2)
+        var placedPip = scaled
+            .cropped(to: CGRect(origin: cropOrigin, size: targetRect.size))
+            .transformed(by: CGAffineTransform(translationX: -cropOrigin.x, y: -cropOrigin.y))
         placedPip = applyRoundedCornerMask(to: placedPip, radius: pipFrame.cornerRadius)
         // CI 坐标系 y 向上；目标 rect 是缓冲区坐标（左上原点）。换算平移量：CI y = 画布高 - rect 底。
         let ciOrigin = CGPoint(x: targetRect.minX, y: bounds.height - targetRect.maxY)

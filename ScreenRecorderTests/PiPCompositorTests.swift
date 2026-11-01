@@ -384,6 +384,33 @@ final class PiPCompositorTests: XCTestCase {
         assertColor(samplePixel(output, x: 130, y: 140), equals: pipColor, "PiP rect（实测系）中心应为摄像头内容")
         assertColor(samplePixel(output, x: 30, y: 170), equals: screenColor, "超出 init 假设的区域应保留屏幕内容")
     }
+
+    /// 宽高比失配必须 aspect-fill 铺满 rect（验收缺陷钉测）：设备实际交付帧宽高比随
+    /// 机型/系统变化（验收机 16:9，sessionPreset .vga640x480 的 4:3 假设未被遵循），
+    /// 按宽等比缩放会在 4:3 rect 顶部留空档透出下层画面（真机实测 ~60px 顶条）。
+    /// fill 语义 = scale 取宽高比大者 + 中心裁剪，与预览层 .resizeAspectFill 一致。
+    func testCompositeAspectMismatchCoversFullRect() {
+        let compositor = makeCompositor()
+        let screen = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        // 16:9 横帧入 4:3 rect：纵向 fill（裁上下）、横向恰好铺满。
+        let wide = makeColorBuffer(width: 64, height: 36, color: pipColor)!
+        let wideRect = PiPFrame(rectInCapturePixels: CGRect(x: 200, y: 16, width: 96, height: 72))
+        let wideOut = compositor.composite(screenFrame: screen, pip: wide, pipFrame: wideRect, at: .zero, into: softwareContext)
+        assertColor(samplePixel(wideOut, x: 248, y: 20), equals: pipColor, "16:9 帧：rect 顶带必须覆盖（原缺陷露原画面的位置）")
+        assertColor(samplePixel(wideOut, x: 248, y: 84), equals: pipColor, "16:9 帧：rect 底带覆盖（回归守卫）")
+        assertColor(samplePixel(wideOut, x: 202, y: 52), equals: pipColor, "16:9 帧：rect 左缘覆盖")
+        assertColor(samplePixel(wideOut, x: 294, y: 52), equals: pipColor, "16:9 帧：rect 右缘覆盖")
+        assertColor(samplePixel(wideOut, x: 100, y: 52), equals: screenColor, "rect 外屏幕内容保持")
+
+        // 9:16 竖帧（外接连续互通相机）入同 rect：横向 fill（裁左右）、纵向恰好铺满。
+        let tall = makeColorBuffer(width: 36, height: 64, color: pipColor)!
+        let tallRect = PiPFrame(rectInCapturePixels: CGRect(x: 16, y: 16, width: 96, height: 72))
+        let tallOut = compositor.composite(screenFrame: screen, pip: tall, pipFrame: tallRect, at: .zero, into: softwareContext)
+        assertColor(samplePixel(tallOut, x: 20, y: 52), equals: pipColor, "9:16 帧：rect 左缘覆盖")
+        assertColor(samplePixel(tallOut, x: 108, y: 52), equals: pipColor, "9:16 帧：rect 右缘覆盖")
+        assertColor(samplePixel(tallOut, x: 64, y: 20), equals: pipColor, "9:16 帧：rect 顶带覆盖")
+        assertColor(samplePixel(tallOut, x: 64, y: 84), equals: pipColor, "9:16 帧：rect 底带覆盖")
+    }
 }
 
 // MARK: - T16 点击高亮合成（黄描边半透明圆 + 衰减透明度 + 直通纪律）
