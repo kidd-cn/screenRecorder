@@ -33,11 +33,27 @@ final class MarkingStrokeStore {
 // MARK: - 标记覆盖层视图（事件泵）
 
 /// 全屏透明覆盖视图：把鼠标拖拽三拍原样上抛（窗口坐标），换算与画布写全在控制器。
-/// 不绘制任何内容（画布出图在合成器）；rightMouse 同样不关心（覆盖层无右键语义）。
+/// 笔画不在本视图实时显示（画布出图在合成器）；rightMouse 同样不关心（覆盖层无右键语义）。
+/// 唯一的绘制是一层 **5% 透明黑底**：macOS 26+ 窗口服务器把「整窗零不透明像素」的窗口
+/// 判为全透明——渲染与鼠标命中测试整窗跳过（点击直接穿透到下层 App，occlusion 只有
+/// 非 visible 位）。真机取证（验收 P2）：满幅面板已显示、level 2，绘画期间零 hitTest。
+/// 5% 黑在 8bit 下约 1 个色阶，屏幕与成片均不可感知，仅让窗口脱离全透明判定恢复接事件。
 private final class MarkingOverlayView: NSView {
     var onMouseDown: ((CGPoint) -> Void)?
     var onMouseDragged: ((CGPoint) -> Void)?
     var onMouseUp: ((CGPoint) -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0, alpha: 0.05).cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor(white: 0, alpha: 0.05).cgColor
+    }
 
     override func mouseDown(with event: NSEvent) { onMouseDown?(event.locationInWindow) }
     override func mouseDragged(with event: NSEvent) { onMouseDragged?(event.locationInWindow) }
@@ -172,6 +188,9 @@ final class MarkingOverlayController: ObservableObject {
         if let frame = modeProvider().flatMap(Self.recordedDisplayFrame) {
             panel.setFrame(frame, display: false) // 铺满被录显示器（每次显示重定位）
         }
+        guard !isShowingOverlays else { return }
+        panel.orderFrontRegardless() // 不夺焦点（nonactivatingPanel 语义）
+        isShowingOverlays = true
         guard !isShowingOverlays else { return }
         panel.orderFrontRegardless() // 不夺焦点（nonactivatingPanel 语义）
         isShowingOverlays = true
