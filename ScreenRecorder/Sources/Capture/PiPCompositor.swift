@@ -506,23 +506,31 @@ final class PiPCompositor {
     }
 
     /// 圆角 mask（最终尺寸空间）：CIBlendWithMask 用圆角矩形亮度图把 PiP 圆角外抹成透明。
+    /// 缓存的是 mask 形状图（尺寸/半径录制中恒定，逐帧零生成）；混合每帧现跑——缓存合成
+    /// 输出会把输出 DAG 钉在首帧缓冲上，键恒定即第二帧起命中缓存，成片 PiP 冻结在第一帧
+    ///（真机验收缺陷：亮场首帧恰为合成图而「看着正常」，暗场首帧黑而「人像不见」；
+    /// 钉测 testConsecutiveCompositesTrackNewPipContent）。
     private func applyRoundedCornerMask(to image: CIImage, radius: CGFloat) -> CIImage {
         let extent = image.extent
         guard radius > 0, extent.width > 2 * radius, extent.height > 2 * radius else { return image }
         let key = MaskCacheKey(width: Int(extent.width), height: Int(extent.height), radius: radius)
-        if let cached = maskCache[key] { return cached }
-        guard let maskCG = PiPCompositor.makeRoundedRectMaskCGImage(extent: extent, radius: radius) else {
-            return image // mask 生成失败：方角降级（不丢帧）
+        let mask: CIImage
+        if let cached = maskCache[key] {
+            mask = cached
+        } else {
+            guard let maskCG = PiPCompositor.makeRoundedRectMaskCGImage(extent: extent, radius: radius) else {
+                return image // mask 生成失败：方角降级（不丢帧）
+            }
+            mask = CIImage(cgImage: maskCG)
+            if maskCache.count < 8 {
+                maskCache[key] = mask // 封顶缓存（尺寸恒定，实际远低于上限）
+            }
         }
-        let mask = CIImage(cgImage: maskCG)
         guard let blend = CIFilter(name: "CIBlendWithMask") else { return image }
         blend.setValue(image, forKey: kCIInputImageKey)
         blend.setValue(CIImage(color: .clear).cropped(to: extent), forKey: kCIInputBackgroundImageKey)
         blend.setValue(mask, forKey: kCIInputMaskImageKey)
         guard let masked = blend.outputImage else { return image }
-        if maskCache.count < 8 {
-            maskCache[key] = masked.cropped(to: extent) // 封顶缓存（尺寸恒定，实际远低于上限）
-        }
         return masked.cropped(to: extent)
     }
 

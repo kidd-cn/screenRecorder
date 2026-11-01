@@ -368,6 +368,30 @@ final class PiPCompositorTests: XCTestCase {
         }
     }
 
+    /// 连帧内容更新钉死（真机验收缺陷：成片 PiP 冻结在首帧）：圆角 mask 只能缓存 mask
+    /// 形状图，不得缓存合成输出——输出 DAG 引用首帧缓冲，而缓存键（宽/高/半径）录制中
+    /// 恒定，第二帧起命中缓存即让成片 PiP 永远重渲染第一帧内容。真机表现：亮场首帧恰好
+    /// 是合成图而「看着正常」，暗场首帧黑（曝光未收敛）而「人像不见/画中画不见了」。
+    func testConsecutiveCompositesTrackNewPipContent() {
+        let compositor = makeCompositor()
+        let screen = makeColorBuffer(width: 320, height: 240, color: screenColor)!
+        let firstPip = makeColorBuffer(width: 64, height: 48, color: pipColor)!
+        let secondPip = makeColorBuffer(width: 64, height: 48, color: BGRAColor(blue: 0, green: 0, red: 255, alpha: 255))
+        let frame = PiPFrame(rectInCapturePixels: CGRect(x: 200, y: 16, width: 96, height: 72), cornerRadius: 12)
+
+        _ = compositor.composite(screenFrame: screen, pip: firstPip, pipFrame: frame, at: .zero, into: softwareContext)
+        let second = compositor.composite(screenFrame: screen, pip: secondPip, pipFrame: frame, at: .zero, into: softwareContext)
+
+        assertColor(
+            samplePixel(second, x: 248, y: 52),
+            equals: BGRAColor(blue: 0, green: 0, red: 255, alpha: 255),
+            "第二帧 PiP 中心必须是第二帧内容（不得冻结在首帧）")
+        assertColor(
+            samplePixel(second, x: 201, y: 17),
+            equals: screenColor,
+            "第二帧圆角外仍透出屏幕内容（缓存的是 mask 形状，裁切持续生效）")
+    }
+
     /// 画布尺寸必须取 screenFrame 实测值（init pixelSize 只是池种子提示）——尺寸失配时
     /// 不得把实测坐标内的 PiP 误判为越界直通、也不得输出错误尺寸（修复轮 Minor #2）。
     func testCompositeUsesMeasuredScreenBufferSizeNotInitHint() throws {
