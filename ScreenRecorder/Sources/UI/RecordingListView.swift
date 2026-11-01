@@ -105,6 +105,13 @@ struct RecordingListView: View {
             renameTarget = item
         }
         .disabled(selection.count != 1)
+        Button("编辑…") {
+            // P9/T18 缩放分段编辑器：独立时间线窗（AVPlayer 预览 + 分段 + 导出），
+            // 按成片 URL 键控单实例（ZoomEditorWindowOpener 登记/复用）。
+            guard let item = selection.first else { return }
+            ZoomEditorWindowOpener.open(for: item, viewModel: viewModel)
+        }
+        .disabled(selection.count != 1)
         Button("导出 GIF…") {
             guard let item = selection.first else { return }
             exportTarget = ExportTarget(item: item, kind: .gif)
