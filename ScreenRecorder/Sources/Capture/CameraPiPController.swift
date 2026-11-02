@@ -195,6 +195,9 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
             session.commitConfiguration()
         }
 
+        // P5 验收：曝光锚定（亮源入镜拽走测光 → 人脸剪影），装配后、出流前应用。
+        applyExposureAnchoringIfAvailable()
+
         previewLayer = AVCaptureVideoPreviewLayer(session: session)
         previewLayer?.videoGravity = .resizeAspectFill
         // 预览连接由系统按前置摄像头自动镜像（自拍习惯）；数据输出不镜像——成片里是
@@ -210,6 +213,43 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     /// 「有输入/无输出」残留会让下一场跳过整块装配，输出永久缺失（PiP 静默消失）。
     static func assemblyPlan(inputs: Int, outputs: Int) -> (input: Bool, output: Bool) {
         (input: inputs == 0, output: outputs == 0)
+    }
+
+    /// 曝光锚定计划（internal 供无头钉测；能力查询绑定真机不可无头测试，纯决策部分钉死）：
+    /// 亮源入镜（吊灯/窗）会拽走测光——相机对灯曝光，人脸欠曝成剪影，Vision 分割随之
+    /// 塌到无人像防线之下，成片只见灯不见人（验收缺陷 2026-11-01/02）。测光点钉画面中央
+    ///（人像常规位）+ 连续自动曝光；能力不支持逐项跳过（老设备兼容），两项全无 = 空
+    /// 计划，应用层不触碰设备配置。
+    static func exposureAnchoringPlan(
+        isPointOfInterestSupported: Bool,
+        isContinuousExposureSupported: Bool
+    ) -> (point: CGPoint?, mode: AVCaptureDevice.ExposureMode?) {
+        (point: isPointOfInterestSupported ? CGPoint(x: 0.5, y: 0.5) : nil,
+         mode: isContinuousExposureSupported ? .continuousAutoExposure : nil)
+    }
+
+    /// 应用曝光锚定计划（lifecycle 队列、startRunning 之前）：锁配置 → 先设点后设模式
+    ///（设点后设模式即触发向该点收敛）→ 解锁。每次 start 幂等重钉——跨场复用下设备
+    /// 重连后配置可能重置。锁失败/能力缺位只降级不阻断：宁用系统默认测光，不因锚定
+    /// 丢场（T8 混音降级同精神）。
+    private func applyExposureAnchoringIfAvailable() {
+        guard let device = frontCameraProvider() else { return }
+        let plan = Self.exposureAnchoringPlan(
+            isPointOfInterestSupported: device.isExposurePointOfInterestSupported,
+            isContinuousExposureSupported: device.isExposureModeSupported(.continuousAutoExposure))
+        guard plan.point != nil || plan.mode != nil else { return }
+        do {
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if let point = plan.point {
+                device.exposurePointOfInterest = point
+            }
+            if let mode = plan.mode {
+                device.exposureMode = mode
+            }
+        } catch {
+            NSLog("CameraPiP: 曝光锚定不可用（\(error.localizedDescription)），本场使用系统默认测光")
+        }
     }
 
     private func stopOnLifecycleQueue() {

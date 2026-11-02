@@ -480,6 +480,42 @@ final class PiPAssemblyPlanTests: XCTestCase {
     }
 }
 
+// MARK: - PiPExposureAnchoring（曝光锚定计划：亮源入镜拽走测光的守卫，验收裁定）
+
+final class PiPExposureAnchoringTests: XCTestCase {
+    /// 能力齐备：测光点钉画面中央（人像常规位）+ 连续自动曝光。
+    func testPlanAnchorsCenterWithContinuousExposure() {
+        let plan = CameraPiPController.exposureAnchoringPlan(
+            isPointOfInterestSupported: true, isContinuousExposureSupported: true)
+        XCTAssertEqual(plan.point, CGPoint(x: 0.5, y: 0.5))
+        XCTAssertEqual(plan.mode, .continuousAutoExposure)
+    }
+
+    /// 测光点不支持（老设备）：逐项跳过，只带曝光模式。
+    func testPlanSkipsPointWhenUnsupported() {
+        let plan = CameraPiPController.exposureAnchoringPlan(
+            isPointOfInterestSupported: false, isContinuousExposureSupported: true)
+        XCTAssertNil(plan.point)
+        XCTAssertEqual(plan.mode, .continuousAutoExposure)
+    }
+
+    /// 连续曝光不支持：只带测光点。
+    func testPlanSkipsModeWhenUnsupported() {
+        let plan = CameraPiPController.exposureAnchoringPlan(
+            isPointOfInterestSupported: true, isContinuousExposureSupported: false)
+        XCTAssertEqual(plan.point, CGPoint(x: 0.5, y: 0.5))
+        XCTAssertNil(plan.mode)
+    }
+
+    /// 两项都不支持：空计划 = 不触碰设备配置（应用层跳过锁配置）。
+    func testPlanEmptyWhenNoCapabilitySupported() {
+        let plan = CameraPiPController.exposureAnchoringPlan(
+            isPointOfInterestSupported: false, isContinuousExposureSupported: false)
+        XCTAssertNil(plan.point)
+        XCTAssertNil(plan.mode)
+    }
+}
+
 // MARK: - PiPLacementAnchor（浮条避让的初始拖动锚点）
 
 final class PiPLacementAnchorTests: XCTestCase {
