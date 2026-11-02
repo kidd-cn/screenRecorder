@@ -266,6 +266,85 @@ final class ZoomEditorLogicTests: XCTestCase {
             vm.items.map(\.name), ["录屏_2026-10-30_12-00-00_缩放.mp4"],
             "成功后自动入列（refresh——按 _压缩.mp4 先例）")
     }
+
+    /// 出场换代钉测（T18 停放缺陷修复）：renderZoom 完整退场（defer 已
+    /// `zoomRenderRunID += 1`）后，渲染缝持旧代 runID 入队的晚到 hop 必须被代际校验
+    /// 丢弃——修复前无出场换代，runID 未变，晚到 hop 穿守卫把已复位的进度顶成 0.9。
+    /// 确定性：hop 由测试在退场**之后**驱动，非并发竞态面。
+    func testLateProgressHopFromFinishedGenerationIsDropped() async throws {
+        let seam = HopCaptureZoomRenderer(outputURL: directory.appendingPathComponent("晚到钉测_缩放.mp4"))
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 42.0 },
+            zoomRenderer: seam)
+        let item = makeItem(named: "录屏_2026-10-30_12-00-00.mp4")
+
+        await vm.renderZoom(
+            item, segments: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
+
+        let forward = try XCTUnwrap(seam.forward, "渲染缝必须捕获 VM 下发的进度回调")
+        forward(0.9) // 本代退场后才入队的晚到 hop（主线程外回调契约）
+        try await Task.sleep(nanoseconds: 200_000_000) // 给晚到 hop 的投递判决一个窗口
+
+        XCTAssertNil(vm.zoomRenderProgress, "旧代晚到 hop 必须被代际校验丢弃，不得冒充现役")
+    }
+
+    /// 互门（GIF/压缩 × 缩放渲染，停放项收口）：缩放渲染进行中，导出入口直接忽略
+    /// ——计次恒 0、进度面不动、零通知；且请求不排队（放行渲染后导出不得复活）。
+    func testExportIgnoredWhileZoomRenderInFlight() async throws {
+        let seam = GatedZoomRenderer(outputURL: directory.appendingPathComponent("互门A_缩放.mp4"))
+        let exporter = CountingExportService()
+        let spy = SpyExportNotifier()
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 42.0 },
+            exportService: exporter,
+            notifier: spy,
+            zoomRenderer: seam)
+        let item = makeItem(named: "录屏_2026-10-30_12-00-00.mp4")
+
+        let run = Task {
+            await vm.renderZoom(
+                item, segments: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
+        }
+        await fulfillment(of: [seam.entered], timeout: 5)
+
+        await vm.exportGIF(item, options: GIFExportOptions())
+        XCTAssertEqual(exporter.callCount, 0, "缩放渲染进行中 GIF/压缩导出必须被互门忽略")
+        XCTAssertNil(vm.exportProgress, "被忽略的导出不得触碰进度面")
+        XCTAssertTrue(spy.failureMessages.isEmpty, "被忽略的导出不得发失败通知")
+        XCTAssertTrue(spy.completedURLs.isEmpty, "被忽略的导出不得发完成通知")
+
+        seam.resumeGate()
+        await run.value
+        XCTAssertEqual(exporter.callCount, 0, "互门忽略的请求不排队——放行渲染后导出不得复活")
+    }
+
+    /// 互门反向：GIF/压缩导出进行中，缩放渲染入口直接忽略（渲染缝零调用、进度面不动）。
+    func testZoomRenderIgnoredWhileExportInFlight() async throws {
+        let exporter = GatedExportService()
+        let seam = GatedZoomRenderer(outputURL: directory.appendingPathComponent("互门B_缩放.mp4"))
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 42.0 },
+            exportService: exporter,
+            notifier: SpyExportNotifier(),
+            zoomRenderer: seam)
+        let item = makeItem(named: "录屏_2026-10-30_12-00-00.mp4")
+
+        let run = Task { await vm.exportGIF(item, options: GIFExportOptions()) }
+        await fulfillment(of: [exporter.entered], timeout: 5)
+
+        await vm.renderZoom(
+            item, segments: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
+        XCTAssertEqual(seam.callCount, 0, "导出进行中缩放渲染必须被互门忽略")
+        XCTAssertNil(vm.zoomRenderProgress, "被忽略的渲染不得触碰进度面")
+
+        exporter.resumeGate()
+        await run.value
+        XCTAssertEqual(seam.callCount, 0, "互门忽略的请求不排队——导出完成后渲染不得复活")
+        XCTAssertNil(vm.zoomRenderProgress)
+    }
 }
 
 // MARK: - 缩放渲染编排测试替身（OfflineZoomRenderer 为 enum 静态面不可替换——经缝注入）
@@ -335,5 +414,140 @@ private final class GatedZoomRenderer: ZoomRendering, @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         self.continuation = continuation
+    }
+}
+
+// MARK: - 互门/出场换代测试替身
+
+/// 计次假导出缝：只记调用次数立即返回（互门钉测——被忽略则计次恒 0，零 FS 副作用）。
+/// `@unchecked Sendable`：可变状态全在 NSLock 内（GatedZoomRenderer 同纪律）。
+private final class CountingExportService: ExportServing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var countStorage = 0
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return countStorage
+    }
+
+    private func bump() {
+        lock.lock()
+        countStorage += 1
+        lock.unlock()
+    }
+
+    func exportGIF(
+        from url: URL, options: GIFExportOptions, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        bump()
+        return url
+    }
+
+    func compress(
+        from url: URL, preset: CompressionPreset, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        bump()
+        return url
+    }
+}
+
+/// 可门控假导出缝（GatedZoomRenderer 同款）：进入即置位 entered、挂续体等测试放行；
+/// 放行后返回原 URL（不写盘——runExport 成功路径无 refresh，无 FS 消费面）。
+private final class GatedExportService: ExportServing, @unchecked Sendable {
+    let entered = XCTestExpectation(description: "导出缝进入")
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+
+    func resumeGate() {
+        lock.lock()
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume()
+    }
+
+    func exportGIF(
+        from url: URL, options: GIFExportOptions, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        entered.fulfill()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+        }
+        return url
+    }
+
+    func compress(
+        from url: URL, preset: CompressionPreset, progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        entered.fulfill()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            lock.lock()
+            self.continuation = continuation
+            lock.unlock()
+        }
+        return url
+    }
+}
+
+/// 捕获进度回调的假渲染缝：不推进度立即返回——晚到 hop 由测试在本代退场后驱动
+///（出场换代钉测；确定性：hop 入队晚于 defer，非并发竞态面）。可变状态全在 NSLock 内。
+private final class HopCaptureZoomRenderer: ZoomRendering, @unchecked Sendable {
+    private let outputURL: URL
+    private let lock = NSLock()
+    private var forwardStorage: ((Double) -> Void)?
+
+    init(outputURL: URL) {
+        self.outputURL = outputURL
+    }
+
+    var forward: ((Double) -> Void)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return forwardStorage
+    }
+
+    func render(
+        sourceURL: URL, segments: [ZoomSegment], options: ExportVideoOptions,
+        progress: @escaping (Double) -> Void
+    ) async throws -> URL {
+        lock.lock()
+        forwardStorage = progress
+        lock.unlock()
+        return outputURL
+    }
+}
+
+/// ExportNotifying spy：收集导出完成/失败通知供断言（RecordingListViewModelTests
+/// 同款；NSLock 纪律同上——存取收拢进同步方法）。
+private final class SpyExportNotifier: ExportNotifying {
+    private let lock = NSLock()
+    private var completedURLsStorage: [URL] = []
+    private var failureMessagesStorage: [String] = []
+
+    var completedURLs: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return completedURLsStorage
+    }
+
+    var failureMessages: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return failureMessagesStorage
+    }
+
+    func notifyExportCompleted(fileURL: URL) {
+        lock.lock()
+        completedURLsStorage.append(fileURL)
+        lock.unlock()
+    }
+
+    func notifyExportFailed(message: String) {
+        lock.lock()
+        failureMessagesStorage.append(message)
+        lock.unlock()
     }
 }

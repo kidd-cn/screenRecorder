@@ -311,6 +311,59 @@ final class OfflineZoomRendererTests: XCTestCase {
             "录屏_2026-10-30_10-00-00_缩放 (2).mp4", "同名冲突 → 追加 (2)（nextFileURL 同款惯例）")
     }
 
+    // MARK: - R1 F2 看门狗（waitForInputReady 提参缝，headless 毫秒级档）
+
+    /// isReady 即真 → 立即返回不 sleep 不抛（生产默认参数走同一主体）。
+    func testWatchdogReturnsImmediatelyWhenInputReady() async throws {
+        try await OfflineZoomRenderer.waitForInputReady(
+            mediaType: "video",
+            isReady: { true },
+            writerStatus: { .unknown },
+            writerError: { nil })
+    }
+
+    /// isReady 恒假 → 超时转 `appendInputStalled`（mediaType 透传），不无限挂起
+    /// （macOS 27 跨轨饿死形态的类型化出口）。
+    func testWatchdogTimesOutWithAppendInputStalled() async throws {
+        do {
+            try await OfflineZoomRenderer.waitForInputReady(
+                mediaType: "audio",
+                isReady: { false },
+                writerStatus: { .unknown },
+                writerError: { nil },
+                timeout: 0.05,
+                pollIntervalNanoseconds: 1_000_000)
+            XCTFail("恒不受理必须超时抛 appendInputStalled")
+        } catch let error as OfflineZoomRenderer.RenderError {
+            guard case .appendInputStalled(let mediaType) = error, mediaType == "audio" else {
+                XCTFail("期望 appendInputStalled(mediaType: \"audio\")，实得 \(error)")
+                return
+            }
+        }
+    }
+
+    /// 等待途中 writer 失败 → 先于超时立即转 `writerFailed`（携带 status 与底层错误）。
+    func testWatchdogThrowsWriterFailedWhenWriterFailsMidWait() async throws {
+        let underlying = NSError(domain: "OfflineZoomRendererTests", code: 42)
+        do {
+            try await OfflineZoomRenderer.waitForInputReady(
+                mediaType: "video",
+                isReady: { false },
+                writerStatus: { .failed },
+                writerError: { underlying },
+                timeout: 30,
+                pollIntervalNanoseconds: 1_000_000)
+            XCTFail("writer 失败必须立即抛 writerFailed，不得等满超时")
+        } catch let error as OfflineZoomRenderer.RenderError {
+            guard case .writerFailed(let status, let wrapped) = error,
+                  status == .failed,
+                  (wrapped as NSError?)?.code == 42 else {
+                XCTFail("期望 writerFailed(status: .failed, underlying)，实得 \(error)")
+                return
+            }
+        }
+    }
+
     // MARK: - 夹具装配（测试基础设施，失败即测试失败）
 
     /// 程序生成 2s@30fps 320×180 源：近黑背景 + 亮红运动标记（x 向 sin 摆动，帧间可辨）

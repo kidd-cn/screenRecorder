@@ -340,8 +340,10 @@ enum ExportCore {
     }
 
     /// `RecordingFileStore.nextFileURL` 同款冲突惯例：目标存在 → 扩展名前追加
-    /// " (n)"（n 自 2 递增）取首个不存在的候选；不创建文件。
-    private static func conflictFreeURL(for target: URL) -> URL {
+    /// " (n)"（n 自 2 递增）取首个不存在的候选；不创建文件。GIF/压缩/缩放三处派生
+    /// 命名共用（`OfflineZoomRenderer.zoomedDestinationURL` 复用本助手——惯例单一
+    /// 事实源）。
+    static func conflictFreeURL(for target: URL) -> URL {
         let stem = target.deletingPathExtension().lastPathComponent
         let ext = target.pathExtension
         let directory = target.deletingLastPathComponent()

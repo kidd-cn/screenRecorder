@@ -228,7 +228,9 @@ final class KeyboardOverlayState: ObservableObject {
     }
 
     /// 特殊键 glyph 表（ANSI 码）：仅收常用键（F 键受「F1 作功能键」系统设置影响
-    /// characters 不稳定，不收录——未收录键走 characters 直显/静默忽略兜底）。
+    /// characters 不稳定，不收录——未收录键走 characters 直显/静默忽略兜底）；
+    /// caps lock（57）不收录——修饰键经 `modifierBit` 入记账位、前缀掩码滤除永不出
+    /// glyph（死表项已删，modifierBit 的记账映射保留）。
     private static let specialKeyGlyphs: [UInt64: String] = [
         36: "⏎",    // return
         76: "⏎",    // keypad return
@@ -237,7 +239,6 @@ final class KeyboardOverlayState: ObservableObject {
         51: "⌫",    // delete（退格）
         117: "⌦",   // forward delete
         53: "⎋",    // escape
-        57: "⇪",    // caps lock
         115: "↖",   // home
         116: "⇞",   // page up
         119: "↘",   // end

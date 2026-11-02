@@ -111,7 +111,8 @@ struct RecordingListView: View {
             guard let item = selection.first else { return }
             ZoomEditorWindowOpener.open(for: item, viewModel: viewModel)
         }
-        .disabled(selection.count != 1)
+        // 仅声音成片（P7a .m4a）无视频画布，缩放分段编辑（视频轨编排）不适用。
+        .disabled(selection.count != 1 || selection.first?.url.pathExtension.lowercased() == "m4a")
         Button("导出 GIF…") {
             guard let item = selection.first else { return }
             exportTarget = ExportTarget(item: item, kind: .gif)

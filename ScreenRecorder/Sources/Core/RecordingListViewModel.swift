@@ -80,7 +80,8 @@ final class RecordingListViewModel: ObservableObject {
 
     /// 进行中缩放渲染的进度（T18，编辑器小窗进度条消费）：nil = 空闲；0…1 = 进行中。
     /// OfflineZoomRenderer 回调在主线程外（T17 契约）——写路径一律经 `renderZoom`
-    /// 的 @MainActor hop。与 `exportProgress` 相互独立（GIF/压缩与缩放渲染是两条编排）。
+    /// 的 @MainActor hop。GIF/压缩与缩放渲染两条编排经忙布尔**互门**（一方进行中则
+    /// 另一方入口直接忽略——见 `runExport` / `renderZoom`）。
     @Published private(set) var zoomRenderProgress: Double?
 
     /// 当前 store 取数缝（装配层提供）。
@@ -90,9 +91,13 @@ final class RecordingListViewModel: ObservableObject {
     private let zoomRenderer: ZoomRendering
     private let notifier: ExportNotifying?
 
-    /// 进行中导出代际（非 Published，主 actor 独占）：0 = 空闲，>0 = 单飞进行中；
-    /// 同时作进度 hop 的代际校验（见 `runExport`）。
+    /// 进行中导出代际（非 Published，主 actor 独占）：**单调递增、不复用**——进度 hop
+    /// 的代际校验（见 `runExport`）；`defer` 出场即换代，本代结束后晚到的 hop 不得穿
+    /// 守卫冒充下一代（T16 归位回收形态的停放缺陷修复，与 `zoomRenderRunID` 同形态）。
     private var exportRunID = 0
+
+    /// 导出单飞忙布尔（与代数解耦）：进行中判定只看本布尔，不复用 0/1 回收。
+    private var exportInFlight = false
 
     /// 缩放渲染运行代数（T18，主 actor 独占）：**单调递增、不复用**——只作进度 hop 的
     /// 代际校验（本代结束后晚到的 hop 被丢弃）；T16 `exportRunID` 归位回收形态的已知
@@ -214,8 +219,10 @@ final class RecordingListViewModel: ObservableObject {
         }
     }
 
-    /// 导出编排共用主体：单飞门 + 进度 @MainActor hop + 完成/失败通知。
-    /// - 单飞：进行中（`exportRunID > 0`）忽略新请求（UI 侧「开始导出」按钮同禁用）；
+    /// 导出编排共用主体：单飞门（GIF/压缩 × 缩放渲染互门）+ 进度 @MainActor hop +
+    /// 完成/失败通知。
+    /// - 单飞：进行中（`exportInFlight`）忽略新请求（UI 侧「开始导出」按钮同禁用）；
+    ///   缩放渲染进行中（`zoomRenderInFlight`）同样忽略（互门）；
     /// - 进度 hop：T15 回调主线程外——`@Sendable` 缝闭包（不携带模型 actor 隔离）内
     ///   `Task { @MainActor }` 写 `exportProgress`；`exportRunID` 代际校验丢弃本代结束
     ///   后晚到的 hop（终值 1.0 晚于复位会卡死空闲判定），`max` 保 hop 乱序下仍单调
@@ -224,12 +231,14 @@ final class RecordingListViewModel: ObservableObject {
     ///   非 ExportError 透出系统本地化描述（重命名失败 NSAlert 同纪律）；
     /// - 成功：完成通知（`notifySaved` 对称文案）。
     private func runExport(_ plan: ExportPlan) async {
-        guard exportRunID == 0 else { return }
+        guard !exportInFlight, !zoomRenderInFlight else { return }
+        exportInFlight = true
         exportRunID += 1
         let runID = exportRunID
         exportProgress = 0
         defer {
-            exportRunID = 0
+            exportRunID += 1 // 出场即换代：本代结束后晚到的 hop 不得穿守卫冒充下一代
+            exportInFlight = false
             exportProgress = nil
         }
 
@@ -290,17 +299,19 @@ final class RecordingListViewModel: ObservableObject {
     /// - 进度 hop：T17 回调主线程外且严格递增——`@Sendable` 缝闭包内 `Task { @MainActor }`
     ///   写 `zoomRenderProgress`，代际校验丢晚到 hop，`max` 护 hop 重排（runExport 同款）；
     /// - 成功：先 refresh（自动入列——按 `_压缩.mp4` 先例，T18 默认裁定）再完成通知；
-    ///   失败：errorDescription 透传通知缝（runExport 同纪律）。注意 GIF/压缩编排
-    ///   （`runExport`）未反向门本入口——缩放渲染与其并发无害（冲突命名 + 独立通知面），
-    ///   见任务报告停放项。
+    ///   失败：errorDescription 透传通知缝（runExport 同纪律）。GIF/压缩导出进行中
+    ///   （`exportInFlight`）时本入口直接忽略（互门——原「并发无害」停放项收口）；
+    /// - 出场：defer 内 `zoomRenderRunID += 1` 换代——本代结束后晚到的 hop 被代际
+    ///   校验丢弃，不冒充下一代（钉测 testLateProgressHopFromFinishedGenerationIsDropped）。
     func renderZoom(_ item: RecordingFileMetadata, segments: [ZoomSegment],
                     options: ExportVideoOptions) async {
-        guard !zoomRenderInFlight else { return }
+        guard !zoomRenderInFlight, !exportInFlight else { return }
         zoomRenderInFlight = true
         zoomRenderRunID += 1
         let runID = zoomRenderRunID
         zoomRenderProgress = 0
         defer {
+            zoomRenderRunID += 1 // 出场即换代：本代结束后晚到的 hop 不得穿守卫冒充下一代
             zoomRenderInFlight = false
             zoomRenderProgress = nil
         }

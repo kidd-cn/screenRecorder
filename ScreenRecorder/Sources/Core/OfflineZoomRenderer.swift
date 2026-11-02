@@ -120,19 +120,40 @@ enum OfflineZoomRenderer {
     // MARK: - 输出命名（nextFileURL 冲突惯例，与 ExportCore 对齐）
 
     /// 输出 URL：源同目录 `<原名>_缩放.mp4`，同名冲突追加 " (n)" 自 2 递增
-    /// （`RecordingFileStore.nextFileURL` 同款惯例；不创建文件）。
+    /// （复用 `ExportCore.conflictFreeURL`——冲突惯例单一事实源；不创建文件）。
     static func zoomedDestinationURL(for sourceURL: URL) -> URL {
         let target = sourceURL.deletingLastPathComponent().appendingPathComponent(
             "\(sourceURL.deletingPathExtension().lastPathComponent)_缩放.mp4")
-        let stem = target.deletingPathExtension().lastPathComponent
-        let directory = target.deletingLastPathComponent()
-        var candidate = target
-        var counter = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = directory.appendingPathComponent("\(stem) (\(counter)).mp4")
-            counter += 1
+        return ExportCore.conflictFreeURL(for: target)
+    }
+
+    // MARK: - R1 F2 有界看门狗（appenders 共用；timeout/poll 提参为无头钉测缝）
+
+    /// 等输入受理（离线无丢帧轮询）：isReady 翻真即返回；取消感知、writer 失败即抛
+    /// 类型化 `writerFailed`——不吞错误空转；isReady 长时间不复位（编码器停摆/
+    /// macOS 27 跨轨饿死形态）超时转 `appendInputStalled`，不无限挂起
+    /// （AssetWriterSession.finish 有界等待同纪律）。timeout/poll 提参（生产默认
+    /// 30s / 5ms）供 headless 毫秒级档钉测。
+    static func waitForInputReady(
+        mediaType: String,
+        isReady: () -> Bool,
+        writerStatus: () -> AVAssetWriter.Status,
+        writerError: () -> Error?,
+        timeout: TimeInterval = 30,
+        pollIntervalNanoseconds: UInt64 = 5_000_000
+    ) async throws {
+        var waited: TimeInterval = 0
+        while !isReady() {
+            if Task.isCancelled { throw CancellationError() }
+            guard writerStatus() != .failed else {
+                throw RenderError.writerFailed(status: writerStatus(), underlying: writerError())
+            }
+            guard waited < timeout else {
+                throw RenderError.appendInputStalled(mediaType: mediaType)
+            }
+            try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+            waited += TimeInterval(pollIntervalNanoseconds) / 1_000_000_000
         }
-        return candidate
     }
 
     // MARK: - 渲染
@@ -228,22 +249,14 @@ enum OfflineZoomRenderer {
         var appendedVideoFrames = 0
 
         /// 离线无丢帧：轮询到受理再追加（取消感知、writer 失败即抛——不吞错误空转）。
-        /// R1 F2 有界看门狗：isReady 长时间不复位（编码器停摆/macOS 27 跨轨饿死形态）
-        /// 超时转类型化错误，不无限挂起（AssetWriterSession.finish 有界等待同纪律）。
+        /// 看门狗主体在 `waitForInputReady`（R1 F2 有界等待；timeout/poll 测试缝
+        /// 单一事实源，生产默认 30s / 5ms）。
         func waitForReady(_ input: AVAssetWriterInput, mediaType: String) async throws {
-            let timeout: TimeInterval = 30
-            var waited: TimeInterval = 0
-            while !input.isReadyForMoreMediaData {
-                if Task.isCancelled { throw CancellationError() }
-                guard writer.status != .failed else {
-                    throw RenderError.writerFailed(status: writer.status, underlying: writer.error)
-                }
-                guard waited < timeout else {
-                    throw RenderError.appendInputStalled(mediaType: mediaType)
-                }
-                try await Task.sleep(nanoseconds: 5_000_000)
-                waited += 0.005
-            }
+            try await OfflineZoomRenderer.waitForInputReady(
+                mediaType: mediaType,
+                isReady: { input.isReadyForMoreMediaData },
+                writerStatus: { writer.status },
+                writerError: { writer.error })
         }
 
         /// 输出像素缓冲（逐帧直建——离线非热路径，池化优化归真机验收注记）。

@@ -657,14 +657,11 @@ final class AppAssembly: ObservableObject {
         }
     }
 
-    /// 标记显隐面重估（state / markingEnabled 任一变化时；含几何解析去重闸）。全部显隐/
-    /// 换装判定只消费 CombineLatest 的**发射值**——sink 在 @Published willSet 阶段同步
-    /// 执行，此刻属性与 provider 回拉都是旧值（T5 修复轮2 Critical 1），一处都不回拉。
-    /// P7b（T13 停放 Minor 一并收口）：无视频画布模式（audioOnly/cameraOnly，共享判定
-    /// `CaptureMode.hasVideoCanvas`）标记面整体不唤出——工具条不显示、画笔按钮保持关闭态、
-    /// 几何不解析（覆盖层激活门在 MarkingOverlayController.refreshVisibility 走同一谓词）。
-    /// `lastCaptureMode` 在 startRecording 起录时刻定格为当次模式、会话期内稳定（与
-    /// MarkingOverlayController 同论证），非发射值时序敏感读，与直传纪律不冲突。
+    /// 标记显隐面重估（state / markingEnabled 任一变化时；含几何解析去重闸）。只消费
+    /// CombineLatest **发射值**，一处不回拉（sink 在 @Published willSet 阶段同步执行——
+    /// T5 修复轮2 Critical 1）；无视频画布模式（`CaptureMode.hasVideoCanvas`）标记面
+    /// 整体不唤出（P7b，覆盖层激活门同谓词）；`lastCaptureMode` 开录时刻定格、会话期
+    /// 内稳定，非发射值时序敏感读，与直传纪律不冲突。
     private func refreshMarkingSurfaces(state: CaptureState, enabled: Bool) {
         let modeHasCanvas = settings.lastCaptureMode.hasVideoCanvas
         markingOverlayController.refreshVisibility(enabled: enabled, state: state)
@@ -685,12 +682,15 @@ final class AppAssembly: ObservableObject {
     }
 
     /// 现场解析标记几何（主 actor Task 内 await；失败留在 nil = 换算丢弃全部点，
-    /// 与点击系「几何失败降级纯屏幕」同一降级精神）。
+    /// 与点击系「几何失败降级纯屏幕」同一降级精神）。落地守卫：解析期间会话已止
+    /// （开录 `setMarkingEnabled(false)` 复位闸）则陈值不落地——否则跨会话晚到的几何
+    /// 占住 `markingGeometry == nil` 闸，下一场错误地免于重解析（停放缺陷修复）。
     private func resolveMarkingGeometry() {
         let mode = settings.lastCaptureMode
         Task { [weak self] in
             let geometry = await PiPCaptureGeometry.resolve(for: mode)
-            self?.markingGeometry = geometry
+            guard let self, self.needsMarkingGeometryResolve else { return }
+            self.markingGeometry = geometry
         }
     }
 
