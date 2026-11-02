@@ -92,6 +92,9 @@ final class AppAssembly: ObservableObject {
     /// 终审 F2：麦克风设置 live 下发链的订阅保活（与容器同寿）。快照链（开始时刻读
     /// config）与 live 链并存：初值由快照负责，live 只发变化。
     private var liveMicCancellables: Set<AnyCancellable> = []
+    /// P5 验收裁定：摄像头背景 live 下发链的订阅保活（与容器同寿）。快照链（begin 读
+    /// config）与 live 链并存：初值由快照负责，live 只发变化（F2 mic 同款两链语义）。
+    private var liveBackgroundCancellables: Set<AnyCancellable> = []
     /// 开机自启装配单元（P6a）：所有权进本容器（装配红线）。开关变化经其内部 Combine
     /// sink 消费（接线裁定：副作用不进 SettingsStore didSet——sink 内的失败回翻若改走
     /// didSet 接线即自赋值重入；sink 侧重入护栏闩见 LaunchAtLoginCoordinator），失败回翻
@@ -250,6 +253,20 @@ final class AppAssembly: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak coordinator] volume in coordinator?.setMicVolume(Float(volume)) }
             .store(in: &liveMicCancellables)
+        // P5 验收裁定：摄像头背景 live 下发（录制中改动实时生效；非录制中 controller 会话
+        // 闸静默 no-op——降级纯屏幕/场次外均无消费面）。off → nil = 帧路径零开销旁路；
+        // blur/builtin → 新处理器实例（Vision 分割单例复用，无逐场冷启动）。receive(on: main)
+        // 与 mic 链同一纪律（浮窗覆盖层重接全主线程）。
+        settings.$cameraBackground
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak cameraPiP] mode in
+                let processor: CameraBackgroundProcessor? = mode == .off
+                    ? nil
+                    : CameraBackgroundProcessor(mode: mode, segmenter: VisionPersonSegmenter.shared)
+                cameraPiP?.switchBackgroundProcessor(to: processor)
+            }
+            .store(in: &liveBackgroundCancellables)
         mountMarkingIfNeeded()
         mountGlobalShortcutsIfNeeded()
     }
@@ -355,7 +372,7 @@ final class AppAssembly: ObservableObject {
             micVolume: settings.micVolume,
             micMuted: settings.micMuted,
             includeCamera: !(audioOnly || cameraOnly) && settings.pipEnabled,
-            cameraBackground: settings.cameraBackground, // P5：开录快照（下一场录制生效）
+            cameraBackground: settings.cameraBackground, // P5：初值快照（录制中改动走 live 下发链实时生效）
             fps: settings.fps,
             codec: settings.videoCodec,
             outputURL: outputURL,

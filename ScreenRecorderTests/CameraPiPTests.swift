@@ -374,6 +374,55 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         XCTAssertFalse(controller.isPreviewOverlayVisible)
     }
 
+    // MARK: P5 实时换背景（验收裁定：录制中改动实时生效）
+
+    /// 录制中热切换：处理器落到帧路径 + 覆盖层保持显示（新背景的呈现面）。
+    func testSwitchBackgroundProcessorMidRecordingSwapsAndRewires() {
+        let controller = makeController()
+        controller.beginRecording(
+            geometry: geometry,
+            backgroundProcessor: CameraBackgroundProcessor(mode: .blur, segmenter: NoopPersonSegmenter()))
+        XCTAssertTrue(controller.isPreviewOverlayVisible)
+
+        let second = CameraBackgroundProcessor(mode: .builtin(.solidSlate), segmenter: NoopPersonSegmenter())
+        controller.switchBackgroundProcessor(to: second)
+
+        XCTAssertTrue(controller.activeBackgroundProcessor === second, "热切换必须落到帧路径（帧回调逐帧读的处理器）")
+        XCTAssertTrue(controller.isPreviewOverlayVisible, "背景切换后覆盖层仍显示（新背景的呈现面）")
+    }
+
+    /// 录制中热切到 off：处理器清空（帧路径回零开销旁路）+ 覆盖层隐藏（露原始预览）。
+    func testSwitchToOffMidRecordingClearsProcessorAndOverlay() {
+        let controller = makeController()
+        controller.beginRecording(
+            geometry: geometry,
+            backgroundProcessor: CameraBackgroundProcessor(mode: .blur, segmenter: NoopPersonSegmenter()))
+
+        controller.switchBackgroundProcessor(to: nil)
+
+        XCTAssertNil(controller.activeBackgroundProcessor)
+        XCTAssertFalse(controller.isPreviewOverlayVisible, "off 覆盖层必须隐藏（露原始预览，与 begin off 场同语义）")
+    }
+
+    /// 非录制中（begin 未调用）：live 下发静默 no-op——初值归 begin 快照链。
+    func testSwitchIgnoredBeforeBegin() {
+        let controller = makeController()
+        controller.switchBackgroundProcessor(
+            to: CameraBackgroundProcessor(mode: .blur, segmenter: NoopPersonSegmenter()))
+        XCTAssertNil(controller.activeBackgroundProcessor, "会话闸外不得触碰帧路径")
+    }
+
+    /// 场次结束（end）后到达的 live 变化：静默 no-op——下一场 begin 快照按当时设置装配。
+    func testSwitchIgnoredAfterRecordingEnds() {
+        let controller = makeController()
+        controller.beginRecording(geometry: geometry)
+        controller.endRecording()
+
+        controller.switchBackgroundProcessor(
+            to: CameraBackgroundProcessor(mode: .blur, segmenter: NoopPersonSegmenter()))
+        XCTAssertNil(controller.activeBackgroundProcessor)
+    }
+
     /// 覆盖层 API：装配后初始隐藏；贴图/清图调用不崩（呈现面的 contents 由呈现器维护）。
     func testPreviewOverlayImageAPIBasics() {
         let window = CameraPiPWindow.makeDefault()

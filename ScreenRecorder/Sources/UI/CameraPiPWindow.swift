@@ -126,6 +126,10 @@ final class CameraPiPWindowController {
     private let stopCamera: (CameraPiPController) -> Void
     private let frameStore = PiPFrameStore()
     private var window: CameraPiPWindow?
+    /// PiP 会话闸（P5 实时换背景）：begin 成功装配（浮窗已显示）置 true、end 复位。
+    /// 降级纯屏幕（几何缺位/摄像头失败）不置位——无 PiP 场的设置变化无消费面，下一场
+    /// begin 快照按当时设置装配。
+    private var isRecordingActive = false
 
     /// - Parameters:
     ///   - camera: 摄像头控制器（跨场录制复用单实例）。
@@ -170,11 +174,13 @@ final class CameraPiPWindowController {
         installPreviewOverlay(panel, backgroundProcessor: backgroundProcessor)
         publishFrame(panel)
         panel.orderFrontRegardless() // 不夺焦点（nonactivatingPanel）
+        isRecordingActive = true
     }
 
     /// 录制结束（coordinator.finish 调用，幂等；begin 失败回滚同走此路）：收浮窗 +
     /// 停摄像头 + 清拖动锚点（video 队列侧立即回到纯屏幕直通）。
     func endRecording() {
+        isRecordingActive = false
         camera.previewFramePresenter = nil
         window?.setPreviewOverlayVisible(false)
         window?.updatePreviewOverlayImage(nil)
@@ -187,6 +193,26 @@ final class CameraPiPWindowController {
     /// 拖动锚点（SCStream video 队列逐帧读取，锁保护）。
     nonisolated func currentPiPFrame() -> PiPFrame? {
         frameStore.currentPiPFrame()
+    }
+
+    // MARK: P5 实时换背景（验收裁定：录制中改动实时生效）
+
+    /// 录制中热切换背景处理器（主线程）：换处理器 + 重接预览覆盖层——installPreviewOverlay
+    /// 与 begin 同一句法（presenter 重挂、覆盖层显隐随背景开合）。会话闸 = `isRecordingActive`
+    ///：非录制中（含 begin 降级纯屏幕）静默 no-op——初值由 begin 快照链负责，live 链只发
+    /// 变化（F2 快照/live 两链并存同语义）。在途帧仍持旧处理器完成并按序号守卫入库：切换
+    /// 后 ≤1 帧按旧背景落画，属可接受过渡；帧序守卫在控制器侧，与处理器实例无关。
+    func switchBackgroundProcessor(to processor: CameraBackgroundProcessor?) {
+        guard isRecordingActive else { return }
+        camera.backgroundProcessor = processor
+        if let window {
+            installPreviewOverlay(window, backgroundProcessor: processor)
+        }
+    }
+
+    /// 当前生效的背景处理器（internal 只读，无头测试断言热切换落位）。
+    var activeBackgroundProcessor: CameraBackgroundProcessor? {
+        camera.backgroundProcessor
     }
 
     /// 最新摄像头帧（SCStream video 队列逐帧读取；锁保护直通摄像头控制器）。

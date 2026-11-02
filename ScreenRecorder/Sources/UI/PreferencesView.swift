@@ -188,8 +188,8 @@ private struct RecordingSourcesTab: View {
             }
             Toggle("摄像头画中画", isOn: $settings.pipEnabled)
             // P5 摄像头背景：off=原画面、blur=模糊、builtin=三内置（程序生成，零素材）。
-            // 开录快照语义（同 pipEnabled——下一场录制生效）；无画中画时背景无意义，
-            // 随画中画开关联动禁用。
+            // live 语义（验收裁定：录制中改动实时生效）；开录初值按当时设置装配，无画中画
+            // 时背景无意义，随画中画开关联动禁用。
             Picker("摄像头背景", selection: $settings.cameraBackground) {
                 Text("原画面").tag(CameraBackgroundMode.off)
                 Text("模糊").tag(CameraBackgroundMode.blur)
@@ -198,7 +198,7 @@ private struct RecordingSourcesTab: View {
                 Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
             }
             .disabled(!settings.pipEnabled)
-            Text("摄像头背景在开始录制时生效。")
+            Text("摄像头背景实时生效：录制中切换，画中画与成片立即跟随。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             Toggle("鼠标点击高亮", isOn: $settings.clickHighlightEnabled)
