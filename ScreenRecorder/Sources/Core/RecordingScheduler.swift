@@ -5,7 +5,8 @@ import Foundation
 /// 定时录制调度器（P6b，Task 12 简报 Produces 逐字）：单次排程（开始时刻 + 可选时长上限），
 /// 四路径规格钉定——到点且空闲 → start；正在录制/收尾 → 跳过 + notify（不 start）；锁屏 →
 /// 跳过 + notify（锁屏检测抽 `isLocked` 注入缝，生产 = `CGSessionCopyCurrentDictionary`
-/// 登录窗判定，测试注入假值、绝不触真 CGSession）；触发时刻已过 **>60s**（睡眠错过）→
+/// 会话字典的 `CGSSessionScreenIsLocked` 键判定，测试注入假值、绝不触真 CGSession）；
+/// 触发时刻已过 **>60s**（睡眠错过）→
 /// 不 start、补 notify（独立带「开始录制」动作缝，动作闭包路由 start 闭包）；≤60s 视为
 /// 正常触发。通知每路径**至多一条**（Review Focus #5）：排程 one-shot 消费——fire 即置
 /// `active = nil`，任何路径都不可能二次触发。
@@ -102,9 +103,19 @@ final class RecordingScheduler: ObservableObject {
 
     // MARK: 排程入口（简报 Produces 逐字）
 
+    /// 日志时刻格式（决策日志用）：排程武装/到点消费/路径选择/受理结果等低频决策点落
+    /// NSLog——2026-11-03 排障（锁屏误判冤杀定时起录）补的可观测性，武装窗口外零输出。
+    private static let logStamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
     /// 排定（重复排定 = 整只替换）：武装心跳计时器。既有停录等待（`stopDeadline`）不受
     /// 影响——新排程到点若会话仍忙，走忙碌跳过路径。
     func schedule(_ s: Schedule) {
+        NSLog("RecordingScheduler: 排程武装 startAt=%@ now=%@",
+              Self.logStamp.string(from: s.startAt), Self.logStamp.string(from: now()))
         active = s
         timerCancellable?.cancel()
         timerCancellable = timerFactory { [weak self] in self?.tick() }
@@ -142,6 +153,7 @@ final class RecordingScheduler: ObservableObject {
         // 2) 时长上限停录：到点即 stop。confirmed 存活是常规路径；awaitingStart 仍是兜底
         //   （起录续延极端滞留的窗口，stop 自守卫：空闲/收尾 no-op——与既有语义一致）。
         if let deadline = stopDeadline, current >= deadline {
+            NSLog("RecordingScheduler: 时长上限到点停录")
             stopDeadline = nil
             stopLiveness = nil
             stop()
@@ -154,9 +166,11 @@ final class RecordingScheduler: ObservableObject {
         // one-shot：立即消费——后续任何路径都不可能二次触发/二次通知
         active = nil
         let lateness = current.timeIntervalSince(schedule.startAt)
+        NSLog("RecordingScheduler: 到点消费 lateness=%.0fs", lateness)
         // 3) 错过路径（>60s，睡眠错过）：不 start，补一条带「开始录制」动作的通知；
         //    动作闭包路由 start 缝（无头钉测钉死）。错过优先于忙/锁屏：排程陈旧是首要事实。
         if lateness > Self.missedThreshold {
+            NSLog("RecordingScheduler: 路径=错过补通知")
             notifyMissed(Self.missedTitle, Self.missedBody(schedule), { [weak self] in
                 guard let self else { return }
                 Task { _ = await self.start() }
@@ -166,12 +180,14 @@ final class RecordingScheduler: ObservableObject {
         }
         // 4) 忙路径：正在录制/收尾（生产含倒计时）→ 跳过 + 恰一条通知，不 start
         if isBusy() {
+            NSLog("RecordingScheduler: 路径=忙跳过")
             notify(Self.skipTitle, Self.busyBody)
             settleTimer()
             return
         }
         // 5) 锁屏路径：登录窗会话 → 跳过 + 恰一条通知，不 start（屏幕解锁后用户自行开始）
         if isLocked() {
+            NSLog("RecordingScheduler: 路径=锁屏跳过")
             notify(Self.skipTitle, Self.lockedBody)
             settleTimer()
             return
@@ -182,8 +198,10 @@ final class RecordingScheduler: ObservableObject {
             stopDeadline = schedule.startAt.addingTimeInterval(limit)
             stopLiveness = .awaitingStart
         }
+        NSLog("RecordingScheduler: 路径=起录")
         Task {
             let accepted = await self.start()
+            NSLog("RecordingScheduler: 起录受理=%@", accepted ? "是" : "否")
             guard accepted else {
                 // 起录未成立（空闲预检失败/begin 失败/开录即被停）：撤销停录等待——定时场
                 // 没起，残留 deadline 会在上限到点误停用户后续手动开的新场（R1 Important 1
@@ -215,12 +233,23 @@ final class RecordingScheduler: ObservableObject {
 
     // MARK: 锁屏判定（系统惯例）
 
-    /// 锁屏判定（系统惯例，生产注入缝的默认来源）：`CGSessionCopyCurrentDictionary` 的
-    /// 登录窗会话字典缺 `kCGSSessionOnKeysKey` = 锁屏（图形会话不在 onKeys 集合）。字典
+    /// 锁屏判定（系统惯例，生产注入缝的默认来源）：`CGSessionCopyCurrentDictionary` 会话
+    /// 字典的 `CGSSessionScreenIsLocked` 键为真 = 锁屏。2026-11-03 本机实证（macOS 26/
+    /// Darwin 27，逐秒轮询真实字典）：解锁态该键**不存在**（11 键），锁屏态新增
+    /// `CGSSessionScreenIsLocked=1`、`CGSSessionScreenLockedTime`、`kCGSSessionSecureInputPID`
+    /// 三键，解锁整体消失（非置 0）；老判定键 `kCGSSessionOnKeysKey` 在新系统字典中已
+    /// 不存在，按其缺失判锁恒真（致定时录制到点被锁屏路径冤杀，本次排障根因）。字典
     /// 取不到（会话未就绪的极端窗口）按未锁处理——起录与否交由 busy/空闲判定。测试绝不
-    /// 触真 CGSession：一律经 init 的 `isLocked` 缝注入假值。
+    /// 触真 CGSession：一律经 init 的 `isLocked` 缝注入假值；字典→结论映射抽纯函数全量钉测。
     static func isScreenLocked() -> Bool {
-        guard let session = CGSessionCopyCurrentDictionary() else { return false }
-        return (session as NSDictionary)["kCGSSessionOnKeysKey"] == nil
+        isScreenLocked(session: CGSessionCopyCurrentDictionary() as NSDictionary? as? [AnyHashable: Any])
+    }
+
+
+    /// 锁屏判定纯函数（字典→结论，无头可测）：nil/空字典未锁；键值为真（数值 1 / 布尔
+    /// true，CF 桥接 NSNumber 统一取 boolValue）锁屏，键缺席或值为假未锁。
+    static func isScreenLocked(session: [AnyHashable: Any]?) -> Bool {
+        guard let locked = session?["CGSSessionScreenIsLocked"] else { return false }
+        return (locked as? NSNumber)?.boolValue ?? false
     }
 }

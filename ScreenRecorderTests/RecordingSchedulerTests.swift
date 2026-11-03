@@ -267,4 +267,49 @@ final class RecordingSchedulerTests: XCTestCase {
         XCTAssertEqual(self.stopCalls, 0, "起录未成立：deadline 已撤销，到点不得 stop")
         XCTAssertEqual(self.startAttempts, 1, "起录缝恰被调一次（未重试）")
     }
+
+    // MARK: 锁屏判定纯函数（isScreenLocked(session:)，2026-11-03 排障抽出可无头钉测——
+    // 真 CGSession 仍由裁定禁止直触，字典→结论的映射归纯函数全量钉死）
+
+    /// 空字典/nil 会话（会话未就绪极端窗口）→ 未锁：交 busy/空闲判定兜底，不拦起录。
+    func testLockDetectionNilAndEmptySessionIsUnlocked() {
+        XCTAssertFalse(RecordingScheduler.isScreenLocked(session: nil))
+        XCTAssertFalse(RecordingScheduler.isScreenLocked(session: [:]))
+    }
+
+    /// 解锁态（2026-11-03 本机 macOS 26 实证字典形状）：无锁键 → 未锁。老
+    /// `kCGSSessionOnKeysKey` 键在新系统会话字典中**不存在**——即便误放也不参与判定。
+    func testLockDetectionUnlockedSessionShapeIsUnlocked() {
+        let unlocked: [AnyHashable: Any] = [
+            "kCGSSessionOnConsoleKey": 1,
+            "kCGSessionLoginDoneKey": 1,
+            "kCGSSessionUserIDKey": 501,
+            "kCGSSessionUserNameKey": "user",
+        ]
+        XCTAssertFalse(RecordingScheduler.isScreenLocked(session: unlocked))
+        let legacyKeyPresent: [AnyHashable: Any] = [
+            "kCGSSessionOnKeysKey": [1, 2],
+            "kCGSSessionUserIDKey": 501,
+        ]
+        XCTAssertFalse(
+            RecordingScheduler.isScreenLocked(session: legacyKeyPresent),
+            "老 OnKeys 键不参与判定：缺新键即未锁")
+    }
+
+    /// 锁屏态（2026-11-03 实证：锁屏时新增 `CGSSessionScreenIsLocked=1` + LockedTime +
+    /// SecureInputPID 三键，解锁整体消失）：新键为真 → 锁屏；数值与布尔两形态都钉。
+    func testLockDetectionScreenIsLockedKeyIsLocked() {
+        let numeric: [AnyHashable: Any] = ["CGSSessionScreenIsLocked": 1]
+        XCTAssertTrue(RecordingScheduler.isScreenLocked(session: numeric))
+        let boolean: [AnyHashable: Any] = ["CGSSessionScreenIsLocked": true]
+        XCTAssertTrue(RecordingScheduler.isScreenLocked(session: boolean))
+    }
+
+    /// 防御钉测：新键出现但为假值（0/false）→ 未锁（键值优先于键存在）。
+    func testLockDetectionScreenIsLockedZeroIsUnlocked() {
+        XCTAssertFalse(
+            RecordingScheduler.isScreenLocked(session: ["CGSSessionScreenIsLocked": 0]))
+        XCTAssertFalse(
+            RecordingScheduler.isScreenLocked(session: ["CGSSessionScreenIsLocked": false]))
+    }
 }

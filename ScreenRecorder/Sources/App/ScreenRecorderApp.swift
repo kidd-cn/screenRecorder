@@ -443,9 +443,18 @@ final class AppAssembly: ObservableObject {
                 // 主 run loop 每秒一拍（common mode：菜单拖拽等 UI 事件循环中也心跳）；
                 // 仅排程/停录等待期保活（调度器 settleTimer 沉降摘除）。sink 闭包继承
                 // @MainActor 装配语境，body 直调 tick 与调度器隔离一致。
-                Timer.publish(every: 1, on: .main, in: .common)
+                var tickCount = 0
+                return Timer.publish(every: 1, on: .main, in: .common)
                     .autoconnect()
-                    .sink { _ in body() }
+                    .sink { _ in
+                        tickCount += 1
+                        // 首拍日志（每次武装恰一条）：计时器投递链（run loop→Combine）的
+                        // 存活证据，武装窗口外不产生任何输出。
+                        if tickCount == 1 {
+                            NSLog("ScheduledRecording: 心跳首拍（计时器投递正常）")
+                        }
+                        body()
+                    }
             },
             start: { [weak self] in await self?.startScheduledRecording() ?? false },
             stop: { [weak controller] in controller?.stop() },
@@ -471,7 +480,10 @@ final class AppAssembly: ObservableObject {
         guard controller.state == .idle else { return false }
         let task = startRecording(mode: settings.lastCaptureMode, bypassCountdown: true)
         await task.value
-        return controller.state == .recording || controller.state == .paused
+        let accepted = controller.state == .recording || controller.state == .paused
+        NSLog("ScheduledRecording: 起录出口 state=%@ 受理=%@",
+              String(describing: controller.state), accepted ? "是" : "否")
+        return accepted
     }
 
     /// 打开定时录制面板（菜单「定时录制…」入口）：窗口归装配容器（装配红线），懒建单例
@@ -480,6 +492,7 @@ final class AppAssembly: ObservableObject {
     /// 敞开期的陈旧开始时刻——同 presentPicker 重建纪律）。排定回调 = 调度器 schedule
     ///（重复排定整只替换）+ 收起面板；取消回调只收起（撤销既有排程走菜单「取消定时录制」）。
     func openScheduledRecordingPanel() {
+        NSLog("ScheduledRecording: 定时面板打开")
         if scheduledPanelWindowController == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 400, height: 240),
