@@ -92,6 +92,20 @@ final class SCStreamRecorder: NSObject {
     /// nil，热路径零渲染）。样式与停留时长在快照内（live 语义逐帧携带），enabled 开关由
     /// 装配层控制监听层——监听不刷新桥即恒 nil。仅 video 队列调用。
     var keyboardOverlayProvider: (() -> KeyboardOverlaySnapshot?)?
+    /// pip-swap 对调布局取数缝（T4）：video 队列逐帧读（PiPFrameStore 锁保护快照，T5 由
+    /// 协调器以 `cameraPiP?.isLayoutSwapped` 满足）。nil/false = 屏幕为主——composite 的
+    /// `layoutSwapped` 恒 false，与今日行为逐字节一致（无缓存，逐帧闭包调用）。
+    var layoutSwappedProvider: (() -> Bool)?
+    /// pip-swap 对调态屏幕缩略图消费缝（T4）：video 队列调用，≤ `thumbnailInterval`
+    /// （0.5s）节流；CGImage 已渲染完成，消费方自行跳主线程。nil = 不产缩略图（零渲染
+    /// ——不对调态连缩略图都不产，热路径纪律与 PiP 各路同款）。
+    var screenThumbnailConsumer: ((CGImage) -> Void)?
+    /// 缩略图节拍时钟注入缝（T4 测试手控；缺省 systemUptime——只做同源差值，跨源无语义）。
+    var thumbnailNow: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// 上次出图时刻：仅 video 队列触碰（handleVideoSample 串行上下文），无锁。
+    private var lastThumbnailUptime: TimeInterval = 0
+    /// 缩略图最小间隔（简报钉定 0.5s）。
+    static let thumbnailInterval: TimeInterval = 0.5
 
     /// `stop()` 完成后的成片 URL；nil 表示本次无产出（启动失败 / 流失败 / 零样本）。
     private(set) var finishedFileURL: URL?
@@ -155,22 +169,11 @@ final class SCStreamRecorder: NSObject {
         // P7a：audioOnly 无视频画布——pixelSize 以 .zero 占位（纯音轨会话永不
         // addVideoInput，该值不参与任何装配，见 AssetWriterSession.init 注释）。
         let session = try AssetWriterSession(config: config, pixelSize: target?.pixelSize ?? .zero)
-        // T15/T16：合成器按需装配——PiP 开启（摄像头 + 位置注入缝在位）、点击高亮开启
-        //（取数注入缝在位）、自动缩放开启（P1a，取数缝在位）或笔画快照桥在位（P2：标记
-        // 开关是录制中会话态，可中途开——桥在位即按「笔画可能活跃」装配）时建（CIContext/
-        // CVPixelBufferPool 均惰性持有，未走到合成不产生缓冲分配）。全关时保持 nil =
-        // 直通路径零开销。P7a：audioOnly 无视频帧，合成器永不触及，整体不装配。
+        // T15/T16：合成器按需装配（判定单一真源 `makeCompositorIfActive`：PiP/点击/缩放/
+        // 笔画/键帽任一活跃即建；全关 nil = 直通路径零开销）。P7a：audioOnly 无视频帧，
+        // target 为 nil，整体不装配。
         if let target {
-            let pipActive = config.includeCamera && pipPixelBufferProvider != nil && pipFrameProvider != nil
-            let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
-            let zoomActive = config.autoZoomEnabled && zoomStateProvider != nil
-            let strokesActive = strokeOverlayProvider != nil
-            // P4 键帽路同 strokes 惯例：凡装配了快照桥（生产恒装配）即视「键帽可能活跃」，
-            // 合成器按需装配；逐帧无键帽由合成器全缺省直返兜住（零渲染直通）。
-            let keyboardActive = keyboardOverlayProvider != nil
-            if pipActive || clickActive || zoomActive || strokesActive || keyboardActive {
-                pipCompositor = PiPCompositor(pixelSize: target.pixelSize)
-            }
+            pipCompositor = makeCompositorIfActive(pixelSize: target.pixelSize)
         }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
         // 时混音器同样在位（系统声源节点持续渲染静音，与麦克风混合）。启动失败（如无输出设备
@@ -271,6 +274,25 @@ final class SCStreamRecorder: NSObject {
         }
     }
 
+    /// 合成器按需装配判定（start() 与无头装配缝 `armForTesting` 共用的单一真源）：PiP
+    /// 开启（摄像头 + 双取数缝在位）、点击高亮开启（取数注入缝在位）、自动缩放开启
+    ///（P1a，取数缝在位）或笔画快照桥在位（P2：标记开关是录制中会话态，可中途开——桥
+    /// 在位即按「笔画可能活跃」装配）时建（CIContext/CVPixelBufferPool 均惰性持有，未
+    /// 走到合成不产生缓冲分配）。全关时 nil = 直通路径零开销。
+    private func makeCompositorIfActive(pixelSize: CGSize) -> PiPCompositor? {
+        let pipActive = config.includeCamera && pipPixelBufferProvider != nil && pipFrameProvider != nil
+        let clickActive = config.clickHighlightEnabled && clickOverlayProvider != nil
+        let zoomActive = config.autoZoomEnabled && zoomStateProvider != nil
+        let strokesActive = strokeOverlayProvider != nil
+        // P4 键帽路同 strokes 惯例：凡装配了快照桥（生产恒装配）即视「键帽可能活跃」，
+        // 合成器按需装配；逐帧无键帽由合成器全缺省直返兜住（零渲染直通）。
+        let keyboardActive = keyboardOverlayProvider != nil
+        guard pipActive || clickActive || zoomActive || strokesActive || keyboardActive else {
+            return nil
+        }
+        return PiPCompositor(pixelSize: pixelSize)
+    }
+
     /// 登记麦克风输入（Task 9）：SCStream 的 `.microphone` 输出 macOS 15+ 才有（维持丢弃），
     /// 麦克风统一走 engine inputNode tap。无音频输入设备的极端环境访问 inputNode 会抛 ObjC
     /// 异常（Swift 侧接不住），先以 AVCaptureDevice 预检降级为不含麦克风的混音；设备在位但
@@ -314,6 +336,24 @@ final class SCStreamRecorder: NSObject {
     func scheduleClickEffect() {
         let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
         mixer?.scheduleClickEffect()
+    }
+
+    // MARK: - 无头帧驱动测试缝（T4，SCStreamRecorderSwapSeamTests 帧驱动 harness 专用）
+
+    /// 无头帧驱动装配缝：不经 start()（SCStream 构造依赖 SCContentFilter / TCC 授权，
+    /// 无头不可用）直接装配真实 writer 会话，并按与 start() 同源的装配判定
+    ///（`makeCompositorIfActive`）建合成器。此后帧经 `deliverVideoFrameForTesting`
+    /// 逐帧驱动，与生产 `.screen` 分支完全同路（首帧装配 writer、暂停门控、合成、
+    /// append、失败通道全量在测）。
+    func armForTesting(writerSession session: AssetWriterSession, pixelSize: CGSize) {
+        stateLock.withStateLock { writerSession = session }
+        pipCompositor = makeCompositorIfActive(pixelSize: pixelSize)
+    }
+
+    /// 无头帧驱动入口：生产 = `stream(_:didOutputSampleBuffer:of:)` 的 `.screen` 分支
+    ///（SCStream 实例无头不可造，测试经本缝进入同一条 handleVideoSample 路）。
+    func deliverVideoFrameForTesting(_ sampleBuffer: CMSampleBuffer) {
+        handleVideoSample(sampleBuffer)
     }
 
     // MARK: - 暂停 / 恢复（Task 10）
@@ -656,6 +696,7 @@ extension SCStreamRecorder: SCStreamOutput {
                     strokes: strokeOverlayProvider?(),
                     zoomTransform: zoomStateProvider?(),
                     keyboardOverlay: keyboardOverlayProvider?(),
+                    layoutSwapped: layoutSwappedProvider?() ?? false,
                     at: shiftedPTS,
                     into: pipCompositor.context)
             } else {
@@ -668,6 +709,20 @@ extension SCStreamRecorder: SCStreamOutput {
                 //（有暂停时两者相差累计暂停量，gate 只做初筛不承担最终裁决）。
                 let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
                 mixer?.setGatePTS(rawPTS)
+            }
+            // T4 对调态缩略图派发（composite/append 之后）：仅对调态产屏幕缩略图（不对调
+            // 态零渲染——连缩略图都不产）；≤ 0.5s/张节流（首拍打点，窗口内静默），节拍时
+            // 钟经 thumbnailNow 注入；lastThumbnailUptime 仅本队列触碰无锁。合成器 nil
+            //（直通路径）整段跳过；出图失败（源异常）本拍不回调消费方。
+            if let layoutSwappedProvider, layoutSwappedProvider(),
+               let screenThumbnailConsumer, let pipCompositor {
+                let now = thumbnailNow()
+                if now - lastThumbnailUptime >= Self.thumbnailInterval {
+                    lastThumbnailUptime = now
+                    if let cg = pipCompositor.makeScreenThumbnail(from: pixelBuffer) {
+                        screenThumbnailConsumer(cg)
+                    }
+                }
             }
         } catch {
             recordFailure(error)
