@@ -120,9 +120,13 @@ final class CameraPiPWindowController {
     /// 浮条避让锚点数据源（装配层喂数；nil = 无浮条信息，不做避让）。
     var controlBarFrameProvider: (() -> CGRect?)?
 
-    /// 摄像头断源接线缝（Task 3，用户裁决 (a)；装配层 init 注入一次）：beginRecording
-    /// 成功装配后转发给 `camera.onSourceLost`，endRecording 置 nil——会话边界与会话闸
-    /// 一致；stop 后控制器侧 armed 闸已摘，在途投递经 nil 吸收，不越过会话边界。
+    /// 摄像头断源接线缝（Task 3，用户裁决 (a)；装配层 init 注入一次，**应用级接线、会话间
+    /// 永不清**——场次语义在控制器侧 `camera.onSourceLost`）：beginRecording 装配会话级
+    /// 转发，endRecording 摘除控制器侧转发（window 侧若随场次置 nil，第二场起投递落空
+    /// ——检测死锁、成片冻结在最后帧，审查 Critical）。end 后在途投递的吸收闸链：armed 闸
+    ///（stop 已摘武装）→ camera.onSourceLost 已 nil（投递时读空）→ `handleSessionFailure`
+    /// `.idle`/`.finishing` 重入 no-op；亚秒 stop+rebegin 拥塞下的残余竞态与既有
+    /// SourceLossMonitor 同型存在，不在本批修。
     var onCameraSourceLost: (() -> Void)?
 
     private let camera: CameraPiPController
@@ -168,10 +172,11 @@ final class CameraPiPWindowController {
             NSLog("CameraPiP: \(error.localizedDescription)")
             return
         }
-        // 断源转发缝接线（Task 3）：camera.onSourceLost → 装配层 onCameraSourceLost。
-        // 控制器侧投递契约保证主线程，`MainActor.assumeIsolated` 直进主 actor 读缝
-        //（CaptureController click tracker 回调同款桥接）；start 失败降级路径不接线
-        //（无会话无断源），下一场 begin 重挂。
+        // 断源转发缝接线（Task 3）：camera.onSourceLost → 装配层 onCameraSourceLost
+        //（window 侧由装配层 init 注入一次、本方法只装配**会话级转发**）。控制器侧投递
+        // 契约保证主线程，`MainActor.assumeIsolated` 直进主 actor 读缝（CaptureController
+        // click tracker 回调同款桥接）；start 失败降级路径不接线（无会话无断源），会话级
+        // 转发每场 begin 重挂、end 摘除。
         camera.onSourceLost = { [weak self] in
             guard let self else { return }
             MainActor.assumeIsolated {
@@ -198,7 +203,10 @@ final class CameraPiPWindowController {
     /// 停摄像头 + 清拖动锚点（video 队列侧立即回到纯屏幕直通）。
     func endRecording() {
         isRecordingActive = false
-        onCameraSourceLost = nil // 断源接线缝随会话收起（会话闸一致；在途投递被 nil 吸收）
+        // 断源会话级转发摘除（Task 3，审查 Critical）：只摘控制器侧 camera.onSourceLost——
+        // window 侧 onCameraSourceLost 是装配层 init 注入的应用级接线，永不清（误摘则第二
+        // 场起投递落空、成片冻结在最后帧）。在途投递吸收闸链见 onCameraSourceLost 缝注释。
+        camera.onSourceLost = nil
         camera.previewFramePresenter = nil
         window?.setPreviewOverlayVisible(false)
         window?.updatePreviewOverlayImage(nil)

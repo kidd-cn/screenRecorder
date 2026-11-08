@@ -374,13 +374,19 @@ final class CameraPiPWindowControllerTests: XCTestCase {
 
     private var started = false
     private var stopped = false
+    /// 断源链钉测用：捕获 begin 装配的控制器侧摄像头实例（startCamera 注入缝送达）。
+    private var capturedCamera: CameraPiPController?
 
     private func makeController() -> CameraPiPWindowController {
         started = false
         stopped = false
+        capturedCamera = nil
         return CameraPiPWindowController(
             windowFactory: { CameraPiPWindow.makeDefault() },
-            startCamera: { _ in self.started = true },
+            startCamera: {
+                self.capturedCamera = $0
+                self.started = true
+            },
             stopCamera: { _ in self.stopped = true })
     }
 
@@ -560,6 +566,37 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         controller.switchBackgroundProcessor(
             to: CameraBackgroundProcessor(mode: .blur, segmenter: NoopPersonSegmenter()))
         XCTAssertNil(controller.activeBackgroundProcessor)
+    }
+
+    // MARK: 断源转发链跨场次存活（审查 Critical 钉测）
+
+    /// window 侧 `onCameraSourceLost` 是装配层 init 注入的应用级接线，会话间永不清——
+    /// 第二场次（end → begin 之后）watchdog fire 必须仍可达 window 侧闭包。若 end 误摘
+    /// window 侧 seam，场次 2 投递落空：检测死锁、成片冻结在最后帧（恰是本批要消灭的
+    /// 失败模式）。场次内 watchdog fire 经生产武装入口 + tick 测试缝直驱（与节拍同判定）。
+    func testCameraSourceLostForwardingSurvivesAcrossSessions() throws {
+        let controller = makeController()
+        var windowFireCount = 0
+        controller.onCameraSourceLost = { windowFireCount += 1 }
+
+        // 场次 1：begin 装配会话级转发 → fire 可达（wire 确认）→ end。
+        controller.beginRecording(geometry: geometry)
+        let camera = try XCTUnwrap(capturedCamera, "夹具自检：须捕获到控制器侧摄像头实例")
+        var now: TimeInterval = 1000
+        camera.nowProvider = { now }
+        camera.armSourceLossWatchdog()
+        now += 4
+        camera.watchdogTickForTesting()
+        XCTAssertEqual(windowFireCount, 1, "场次 1 断源投递可达 window 侧闭包（wire 确认）")
+        controller.endRecording()
+
+        // 场次 2：重新 begin（spy 不重设——模拟装配层只注入一次的现实）→ fire 仍须可达。
+        controller.beginRecording(geometry: geometry)
+        camera.armSourceLossWatchdog()
+        now += 4
+        camera.watchdogTickForTesting()
+        XCTAssertEqual(windowFireCount, 2, "场次 2 断源投递必须仍可达 window 侧闭包（应用级接线不得随场次被摘）")
+        controller.endRecording()
     }
 
     /// 覆盖层 API：装配后初始隐藏；贴图/清图调用不崩（呈现面的 contents 由呈现器维护）。

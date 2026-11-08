@@ -494,6 +494,13 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         frameLock.withStateLock { latestFrame = pixelBuffer }
     }
+
+    deinit {
+        // 看门狗节拍 timer 收尾摘除（Minor 1，SourceLossMonitor deinit { stop() } 同款
+        // 先例）：handler 以 [weak self] 持控制器，实例释放后节拍不得继续空转；deinit
+        // 独占访问（无其他强引用存活），直读免锁。
+        watchdogTimer?.cancel()
+    }
 }
 
 // MARK: - PiPFrameStore（拖动锚点桥：主线程写 / video 队列读）
