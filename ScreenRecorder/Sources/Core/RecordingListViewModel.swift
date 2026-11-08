@@ -90,6 +90,10 @@ final class RecordingListViewModel: ObservableObject {
     private let exportService: ExportServing
     private let zoomRenderer: ZoomRendering
     private let notifier: ExportNotifying?
+    /// 已移出条目记账缝（Q4）：`removeFromList` 的持久化出口；缺省空集 + write no-op
+    /// ——既有用例零改动。生产装配与 fileStore 注入**同一实例**（过滤在 store.contents()
+    /// 读同一账本，记账与列表一致）。
+    private let removedList: RemovedListStore
 
     /// 进行中导出代际（非 Published，主 actor 独占）：**单调递增、不复用**——进度 hop
     /// 的代际校验（见 `runExport`）；`defer` 出场即换代，本代结束后晚到的 hop 不得穿
@@ -115,13 +119,15 @@ final class RecordingListViewModel: ObservableObject {
         durationProvider: @escaping (URL) async throws -> TimeInterval? = { try await AVURLAsset(url: $0).load(.duration).seconds },
         exportService: ExportServing = ExportCoreService(),
         notifier: ExportNotifying? = nil,
-        zoomRenderer: ZoomRendering = OfflineZoomRendererService()
+        zoomRenderer: ZoomRendering = OfflineZoomRendererService(),
+        removedList: RemovedListStore = RemovedListStore(read: { [] }, write: { _ in })
     ) {
         self.storeProvider = storeProvider
         self.durationProvider = durationProvider
         self.exportService = exportService
         self.notifier = notifier
         self.zoomRenderer = zoomRenderer
+        self.removedList = removedList
     }
 
     /// 固定 store 便捷构造（既有测试与一次性场景）：取数缝恒返回该 store。
@@ -130,11 +136,13 @@ final class RecordingListViewModel: ObservableObject {
         durationProvider: @escaping (URL) async throws -> TimeInterval? = { try await AVURLAsset(url: $0).load(.duration).seconds },
         exportService: ExportServing = ExportCoreService(),
         notifier: ExportNotifying? = nil,
-        zoomRenderer: ZoomRendering = OfflineZoomRendererService()
+        zoomRenderer: ZoomRendering = OfflineZoomRendererService(),
+        removedList: RemovedListStore = RemovedListStore(read: { [] }, write: { _ in })
     ) {
         self.init(
             storeProvider: { store }, durationProvider: durationProvider,
-            exportService: exportService, notifier: notifier, zoomRenderer: zoomRenderer)
+            exportService: exportService, notifier: notifier, zoomRenderer: zoomRenderer,
+            removedList: removedList)
     }
 
     /// 重新扫描目录并补齐每条时长；读取失败按 nil 处理。store 在调用时刻经缝取当前值
@@ -154,6 +162,16 @@ final class RecordingListViewModel: ObservableObject {
         storeProvider().delete(item.url)
         try? FileManager.default.removeItem(at: Self.draftURL(for: item.url))
         items.removeAll { $0.id == item.id }
+    }
+
+    /// 移出列表（Q4，记账不删文件）：路径入已移出集合（经账本缝持久化）并 refresh
+    /// 复核列表——条目消失而磁盘文件原地保留。记账按绝对路径：同名文件日后重现或
+    /// 改名产生的新路径不在集合 → 条目照常出现；集合中的 stale 路径由 contents()
+    /// 自愈剔除（见 RecordingFileStore.contents）。作用于**账本缝自身**（不随
+    /// storeProvider 换目录——账本实例由装配层与 fileStore 共用同一只）。
+    func removeFromList(_ item: RecordingFileMetadata) async {
+        removedList.remove(item.url.path)
+        await refresh()
     }
 
     /// 同目录内重命名并刷新列表；失败（重名/权限等）时错误照抛给视图层做告警，但列表

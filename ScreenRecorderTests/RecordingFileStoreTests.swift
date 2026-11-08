@@ -134,4 +134,75 @@ final class RecordingFileStoreTests: XCTestCase {
         XCTAssertEqual(second.lastPathComponent, "录屏_2026-10-25_14-30-05 (2).m4a",
                        "冲突递增后缀保持参数扩展名")
     }
+
+    // MARK: - Q4 移出列表（记账不删文件）
+
+    /// 内存版 RemovedListStore 夹具：集合存内存盒，write 收到的集合逐次留痕
+    ///（记账/自愈断言面——「write 收到剔除后的集合」「仅集合有变化时写」都以它钉）。
+    private final class RemovedListBox {
+        var current: Set<String> = []
+        private(set) var writes: [Set<String>] = []
+
+        func write(_ set: Set<String>) {
+            current = set
+            writes.append(set)
+        }
+    }
+
+    /// Q4：已移出路径不出现——contents() = 目录扫描 ∩ {mp4, m4a} − 已移出集合；
+    /// 磁盘文件原地保留（记账不删文件），集合无变化时不写回。
+    func testContentsExcludesRemovedPaths() throws {
+        try store.ensureDirectory()
+        let removedFile = directory.appendingPathComponent("录屏_2026-10-25_14-30-05.mp4")
+        let keptFile = directory.appendingPathComponent("录屏_2026-10-25_14-30-06.mp4")
+        try Data("x".utf8).write(to: removedFile)
+        try Data("x".utf8).write(to: keptFile)
+        let box = RemovedListBox()
+        let list = RemovedListStore(read: { box.current }, write: { box.write($0) })
+        box.current = [removedFile.path]
+        let listed = RecordingFileStore(baseDirectory: directory, removedList: list)
+
+        let names = listed.contents().map(\.name)
+
+        XCTAssertEqual(names, ["录屏_2026-10-25_14-30-06.mp4"], "已移出条目不进列表")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: removedFile.path),
+                      "记账不删文件——磁盘文件原地保留")
+        XCTAssertTrue(box.writes.isEmpty, "集合无变化（无 stale 路径）不得写回")
+    }
+
+    /// Q4 自愈：集合里的路径文件已删 → contents() 把该路径剔除并写回——write 恰一次
+    /// 收到剔除后的集合；仍存活的已移出路径继续被过滤。
+    func testContentsSelfHealsStaleRemovedPaths() throws {
+        try store.ensureDirectory()
+        let staleFile = directory.appendingPathComponent("录屏_2026-10-25_14-30-05.mp4") // 从不落盘 = 已删
+        let aliveFile = directory.appendingPathComponent("录屏_2026-10-25_14-30-06.mp4")
+        try Data("x".utf8).write(to: aliveFile)
+        let box = RemovedListBox()
+        let list = RemovedListStore(read: { box.current }, write: { box.write($0) })
+        box.current = [staleFile.path, aliveFile.path]
+        let listed = RecordingFileStore(baseDirectory: directory, removedList: list)
+
+        let names = listed.contents().map(\.name)
+
+        XCTAssertEqual(names, [], "仍存活的已移出文件不进列表")
+        XCTAssertEqual(box.current, [aliveFile.path], "自愈剔除文件已删的 stale 路径")
+        XCTAssertEqual(box.writes, [[aliveFile.path]], "write 恰一次收到剔除后的集合")
+    }
+
+    /// Q4：改名后新路径不在集合 → 条目重现（记账按路径不随文件移动；旧路径因文件已
+    /// 不在原地被自愈剔除）。
+    func testContentsRenamedFileReappears() throws {
+        try store.ensureDirectory()
+        let original = directory.appendingPathComponent("录屏_2026-10-25_14-30-05.mp4")
+        try Data("x".utf8).write(to: original)
+        let box = RemovedListBox()
+        let list = RemovedListStore(read: { box.current }, write: { box.write($0) })
+        box.current = [original.path]
+        let listed = RecordingFileStore(baseDirectory: directory, removedList: list)
+
+        try listed.rename(original, toName: "重命名后.mp4")
+
+        XCTAssertEqual(listed.contents().map(\.name), ["重命名后.mp4"],
+                       "改名后的新路径不在集合 → 条目重现")
+    }
 }

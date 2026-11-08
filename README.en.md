@@ -25,7 +25,7 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 - **Encoding**: H.264 / HEVC (hardware), 30 or 60 fps
 - **Interruption protection**: captured window closed or display unplugged → auto-save; recording survives lock; low disk space → auto-finalize the take
 - **Quit protection**: quitting mid-recording offers Save & Quit / Discard & Quit / Cancel
-- **Recording list**: play, reveal in Finder, rename, delete
+- **Recording list**: play, reveal in Finder, rename, delete, remove from list (file stays in place)
 - **Export**: right-click "Export GIF…" (frame rate / width / loop options) and "Compress…" (H.264/HEVC, 720/1080) with an options sheet + progress; the GIF lands beside the source, the compressed file joins the list
 - **Zoom segment editor**: right-click "Edit…" opens a timeline window — video preview + playhead; add/remove segments, drag endpoints, zoom levels 1.35x / 1.6x / 1.9x, nine-grid center placement; export parameters (frame rate / resolution / codec) with a size estimate + progress; segment drafts persist beside the take, the rendered `<原名>_缩放.mp4` joins the list
 - **Menu bar**: state-aware icon (idle/countdown/recording/paused/finishing) with full menu access

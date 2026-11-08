@@ -18,6 +18,11 @@ final class AppAssembly: ObservableObject {
     /// 是唯一换装点，并同步换入控制器）。菜单/快捷键的开始路径在点击时刻读本值，保证
     /// 「改输出目录后新文件落新目录」。
     private(set) var fileStore: RecordingFileStore
+    /// 已移出列表条目账本（Q4）：生产缝接 UserDefaults（`RemovedListStore.key` 下存
+    /// `[String]` 路径集），同一实例传入 fileStore 与列表 VM——过滤/自愈在 store.contents()
+    /// 读此账本，记账入口在 VM.removeFromList；换装输出目录（`updateOutputDirectory`）
+    /// 时同一实例跟随新 store，记账跨目录存续。
+    private let removedListStore: RemovedListStore
     /// 面板自持 controller.$state 订阅驱动显隐；装配层只需持有保活。
     private let floatingBarPanel: FloatingControlBarPanel
     /// 倒计时覆盖层（T12）：同样自持 $state 订阅驱动 show/hide；装配层持有保活
@@ -119,7 +124,13 @@ final class AppAssembly: ObservableObject {
 
     init() {
         let settings = SettingsStore()
-        let fileStore = RecordingFileStore(baseDirectory: settings.outputDirectory)
+        // Q4 移出列表记账：账本缝接 UserDefaults（读 stringArray 归 Set，写 set(Array)），
+        // 同一实例传入 fileStore 与列表 VM（见 removedListStore 属性注释）。
+        let removedListStore = RemovedListStore(
+            read: { Set(UserDefaults.standard.stringArray(forKey: RemovedListStore.key) ?? []) },
+            write: { UserDefaults.standard.set(Array($0), forKey: RemovedListStore.key) })
+        let fileStore = RecordingFileStore(
+            baseDirectory: settings.outputDirectory, removedList: removedListStore)
         let cameraPiP = CameraPiPWindowController()
         let clickHighlightTracker = ClickHighlightTracker(enabled: settings.clickHighlightEnabled)
         // P4 键帽链：状态机 + 快照桥 + 监听器（样式/停留时长是 live 语义——provider 逐拍
@@ -201,6 +212,7 @@ final class AppAssembly: ObservableObject {
         self.settings = settings
         self.controller = controller
         self.fileStore = fileStore
+        self.removedListStore = removedListStore
         self.notifier = notifier
         self.sourceLossMonitor = sourceLossMonitor
         self.microphoneRouteWatcher = microphoneRouteWatcher
@@ -415,7 +427,9 @@ final class AppAssembly: ObservableObject {
     /// 控制器 store（此后 discard 删除作用于新目录成片）。
     func updateOutputDirectory(to url: URL) {
         settings.outputDirectory = url
-        let newStore = RecordingFileStore(baseDirectory: url)
+        // Q4：换装 store 携带同一只移出账本（记账按绝对路径跨目录存续——旧目录的已移出
+        // 记录不因换目录丢失或重现）。
+        let newStore = RecordingFileStore(baseDirectory: url, removedList: removedListStore)
         fileStore = newStore
         controller.updateStore(newStore)
     }
@@ -600,7 +614,9 @@ final class AppAssembly: ObservableObject {
             // P8：导出完成/失败通知接容器通知器（ExportNotifying 缝；T11 通知类型进
             // notifier 同款装配点）。notifier 与容器同寿，viewModel 持有强引用无环
             //（viewModel 归列表窗口控制器，先于容器释放）。
-            notifier: notifier)
+            notifier: notifier,
+            // Q4：移出记账缝与 fileStore 共用同一只账本实例（过滤/自愈与记账读同一账本）。
+            removedList: removedListStore)
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 720, height: 420),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],

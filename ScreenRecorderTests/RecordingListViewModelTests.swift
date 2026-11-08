@@ -214,6 +214,42 @@ final class RecordingListViewModelTests: XCTestCase {
             vm.suggestedCompressedDestinationName(for: item),
             "录屏_2026-10-25_09-00-00_压缩.mp4")
     }
+
+    // MARK: - Q4 移出列表（记账不删文件）
+
+    /// 内存版 RemovedListStore 夹具：集合存内存盒，write 收到的集合逐次留痕（同
+    /// RecordingFileStoreTests 的 Q4 夹具纪律——记账断言面）。
+    private final class RemovedListBox {
+        var current: Set<String> = []
+        private(set) var writes: [Set<String>] = []
+
+        func write(_ set: Set<String>) {
+            current = set
+            writes.append(set)
+        }
+    }
+
+    /// Q4：removeFromList → 记账持久化（store.write 收到该 path）→ refresh 后列表
+    /// 不含该条目；磁盘文件原地保留（记账不删文件）。移出与过滤读同一账本实例
+    ///（生产装配同款——同一 RemovedListStore 传入 fileStore 与 VM）。
+    func testRemoveFromListPersistsAndRefreshes() async throws {
+        try writeFakeRecordings()
+        let box = RemovedListBox()
+        let removedList = RemovedListStore(read: { box.current }, write: { box.write($0) })
+        let store = RecordingFileStore(baseDirectory: directory, removedList: removedList)
+        let vm = RecordingListViewModel(
+            store: store, durationProvider: { _ in 42.0 }, removedList: removedList)
+        await vm.refresh()
+        XCTAssertEqual(vm.items.count, 2)
+
+        let target = vm.items[0]
+        await vm.removeFromList(target)
+
+        XCTAssertEqual(box.writes, [[target.url.path]], "记账持久化：store.write 收到移出路径")
+        XCTAssertFalse(vm.items.contains(where: { $0.id == target.id }), "刷新后列表不含已移出条目")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: target.url.path),
+                      "文件保留原地（记账不删文件）")
+    }
 }
 
 // MARK: - P8 导出编排测试替身（T16）：ExportCore 为 enum 静态面不可替换，经缝注入假实现

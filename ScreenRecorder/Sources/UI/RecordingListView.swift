@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// 文件列表窗口（Task 18 brief Produces）：`Table` 列名称/大小/时长/创建时间；行操作
-/// 播放（`NSWorkspace.shared.open`）/ Finder 显示 / 重命名 / 删除（`NSAlert` 确认）。
+/// 播放（`NSWorkspace.shared.open`）/ Finder 显示 / 重命名 / 删除（`NSAlert` 确认）/
+/// 移出列表（Q4，记账不删文件——条目消失而磁盘文件原地保留）。
 /// 刷新入口（审查修复轮 1）：窗口内容内底部刷新栏（条目数随显）——SwiftUI `.toolbar`
 /// 从 NSHostingView 桥接进 NSWindow 需 macOS 14（sceneBridgingOptions），macOS 13 不渲染，
 /// 故不用工具栏；复用窗口（`isReleasedWhenClosed = false`）下 `.task` 每窗口生命周期仅
@@ -123,6 +124,16 @@ struct RecordingListView: View {
             exportTarget = ExportTarget(item: item, kind: .compress)
         }
         .disabled(selection.count != 1)
+        Button("移出列表") {
+            // Q4 记账不删文件：条目移出列表，磁盘文件原地保留（无确认弹窗——非破坏性，
+            // 与「删除…」的 destructive + NSAlert 确认相对）。
+            Task {
+                for item in selection {
+                    await viewModel.removeFromList(item)
+                }
+            }
+        }
+        .disabled(selection.isEmpty)
         Button("删除…", role: .destructive) {
             confirmDelete(Array(selection))
         }
