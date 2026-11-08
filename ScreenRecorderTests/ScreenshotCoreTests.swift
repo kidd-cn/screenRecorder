@@ -94,7 +94,7 @@ final class ScreenshotCoreTests: XCTestCase {
     /// 下半区）。加像素颜色断言钉 Y 向：涂红**右下半区**（绘制系 bottom-left rect
     /// (20,0,20,10) = 视觉下半），换算出的像素窗应恰落在红区——落错半区整窗灰，尺寸
     /// 断言察觉不了。
-    func testCropWithDisplayOriginOffsetAndYFlip() {
+    func testCropWithDisplayOriginOffsetPinsTopLeftPremise() {
         let image = makeImage(width: 40, height: 20) { context in
             context.setFillColor(Self.grayFill)
             context.fill(CGRect(x: 0, y: 0, width: 40, height: 20))
