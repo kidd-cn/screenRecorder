@@ -108,4 +108,8 @@ struct RecordingConfiguration {
     /// 双源全关 + 本项开启建「效果专用音轨」（音轨存在条件见
     /// `SCStreamRecorder.includesAudioTrack`）。缺省关。
     var clickSoundEnabled: Bool = false
+    /// 鼠标光标显示开关（Q2 开录快照语义，同 clickHighlightEnabled）：映射 SCStream
+    /// showsCursor，仅 SCStream 视频路径消费（audioOnly/cameraOnly 分支不设该键）。
+    /// 缺省 true = 保持既有行为（光标默认入画）。
+    var captureMouseCursor: Bool = true
 }

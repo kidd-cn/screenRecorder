@@ -360,7 +360,8 @@ final class AppAssembly: ObservableObject {
     /// ——规格允许「置灰或忽略」，本处取「忽略」语义（入口保持可翻，开录快照强制关）；
     /// 系统声恒关（系统声唯一采集通道是 SCStream，cameraOnly 不建流——强制 true 只会空转
     /// 一个无源混音器）；麦克风照常（用户偏好，经 recorder 内部 AVAudioEngine mixer 可混）。
-    /// 录制源摄像头不经 includeCamera——那是画中画叠加开关。
+    /// 录制源摄像头不经 includeCamera——那是画中画叠加开关。Q2：鼠标光标显示开关
+    /// 同为快照字段（SCStreamRecorder 据此设 showsCursor，仅 SCStream 视频路径消费）。
     static func makeConfiguration(settings: SettingsStore, mode: CaptureMode, outputURL: URL) -> RecordingConfiguration {
         let audioOnly: Bool = if case .audioOnly = mode { true } else { false }
         let cameraOnly: Bool = if case .cameraOnly = mode { true } else { false }
@@ -379,7 +380,8 @@ final class AppAssembly: ObservableObject {
             clickHighlightEnabled: !cameraOnly && settings.clickHighlightEnabled,
             autoZoomEnabled: !cameraOnly && settings.autoZoomEnabled,
             autoZoomLevel: settings.autoZoomLevel,
-            clickSoundEnabled: !cameraOnly && settings.clickSoundEnabled
+            clickSoundEnabled: !cameraOnly && settings.clickSoundEnabled,
+            captureMouseCursor: settings.captureMouseCursor // Q2：开录快照（SCStream 视频路径消费，audioOnly/cameraOnly 分支不设该键）
         )
     }
 

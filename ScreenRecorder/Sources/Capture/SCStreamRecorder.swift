@@ -215,7 +215,7 @@ final class SCStreamRecorder: NSObject {
                 streamConfig.height = Int(target.pixelSize.height.rounded())
                 streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(config.fps, 1)))
                 streamConfig.queueDepth = 3
-                streamConfig.showsCursor = true
+                streamConfig.showsCursor = config.captureMouseCursor // Q2：开录快照（偏好设置「录制鼠标光标」）
                 streamConfig.pixelFormat = kCVPixelFormatType_32BGRA // 与 adaptor 的像素格式声明一致
                 if let sourceRect = target.sourceRect {
                     streamConfig.sourceRect = sourceRect // points，显示器逻辑坐标系

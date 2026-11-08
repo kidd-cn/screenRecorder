@@ -178,6 +178,14 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    /// 录制鼠标光标显示开关（Q2，默认开 = 既有行为）：false 时开录快照把 SCStream
+    /// showsCursor 置 false，五种 SCStream 画面模式自动全覆盖（audioOnly/cameraOnly
+    /// 不经 SCStream 视频路径，无此键）。开录快照语义（同 clickHighlightEnabled——
+    /// 录制中改设置不影响进行中的录制）。
+    @Published var captureMouseCursor: Bool {
+        didSet { defaults.set(captureMouseCursor, forKey: Self.captureMouseCursorKey) }
+    }
+
     private let defaults: UserDefaults
 
     init(userDefaults: UserDefaults = .standard) {
@@ -239,6 +247,8 @@ final class SettingsStore: ObservableObject {
         } else {
             self.windowCaptureTarget = nil
         }
+        // Q2：录制鼠标光标显示（默认开 = 既有行为；布尔无野值档位）。
+        self.captureMouseCursor = userDefaults.object(forKey: Self.captureMouseCursorKey) as? Bool ?? true
     }
 
     private static let fpsKey = "fps"
@@ -262,6 +272,7 @@ final class SettingsStore: ObservableObject {
     private static let lastCaptureModeKey = "lastCaptureMode"
     private static let windowCaptureTargetKey = "windowCaptureTarget"
     private static let launchAtLoginKey = "launchAtLogin"
+    private static let captureMouseCursorKey = "captureMouseCursor"
 
     /// 合法帧率档位 30/60；越界/缺失回退 30（审查修复轮 1）。
     private static func normalizedFps(_ raw: Int?) -> Int {

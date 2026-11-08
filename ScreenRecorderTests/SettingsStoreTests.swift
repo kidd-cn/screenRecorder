@@ -99,6 +99,23 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.countdownSeconds, 0)
     }
 
+    /// Q2：录制鼠标光标开关默认开（true = 既有行为不变），翻转跨实例持久化、
+    /// 落库写回 true 再构造往返（UserDefaults，key = captureMouseCursor）。
+    func testCaptureMouseCursorDefaultsTrueAndPersists() {
+        let store = SettingsStore(userDefaults: defaults)
+        XCTAssertTrue(store.captureMouseCursor, "默认显示鼠标光标（既有行为不变）")
+
+        // 翻转为 false → 重新用同一 suite 构造 → 仍为 false（持久化）
+        store.captureMouseCursor = false
+        let reloaded = SettingsStore(userDefaults: defaults)
+        XCTAssertFalse(reloaded.captureMouseCursor)
+
+        // defaults 写回 true → 再构造 → true（往返）
+        defaults.set(true, forKey: "captureMouseCursor")
+        let roundTripped = SettingsStore(userDefaults: defaults)
+        XCTAssertTrue(roundTripped.captureMouseCursor)
+    }
+
     /// 终审 F2：「录制中静音麦克风」持久化默认关，翻转跨实例往返。
     func testMicMutedDefaultsToFalseAndPersistsAcrossInstances() {
         let store = SettingsStore(userDefaults: defaults)

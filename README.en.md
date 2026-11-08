@@ -10,6 +10,7 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 - **Audio mixing**: independent system-audio and microphone toggles; live mic volume slider and in-recording mute
 - **Camera PiP**: draggable rounded picture-in-picture; mirrored preview, non-mirrored output (FaceTime-style); auto-degrade and recovery on device unplug/replug
 - **Camera virtual background**: person-segmentation backgrounds for the PiP — blur / warm gradient / cool gradient / slate solid, procedurally generated with zero assets; under overload only the newest frame is kept, and segmentation failure falls back to the original picture
+- **Mouse cursor capture**: the pointer is shown by default, toggleable (snapshot at recording start — changes apply to the next take)
 - **Click highlighting**: fading yellow ring, toggleable
 - **Click auto-zoom**: magnifies at the click point to guide attention (1.35x / 1.6x / 1.9x), recenters on rapid clicks, toggleable
 - **Click sound effect**: a soft tick recorded into the take's audio track, toggleable (creates an effects-only track when both audio sources are off)
