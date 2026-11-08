@@ -128,6 +128,28 @@ struct PiPCaptureGeometry {
     }
 }
 
+// MARK: - SwappedLayout（对调布局 contain 几何纯函数载体）
+
+/// 对调布局纯函数（spec §3.2）：摄像头 contain 进画布——缩放比取宽高比**小者**，
+/// 居中，余处为黑边（合成侧铺纯黑底）。坐标系：捕获像素空间（左上原点、y 向下）。
+enum SwappedLayout {
+    /// 非法输入（任一边 ≤ 0 / 非有限）返回 nil = 本帧不合成摄像头主画面。
+    /// 取整纪律同 ScreenshotCore 裁剪：origin .rounded(.down)、size .rounded(.up)。
+    static func cameraContainRect(canvasSize: CGSize, cameraSize: CGSize) -> CGRect? {
+        guard canvasSize.width > 0, canvasSize.height > 0,
+              cameraSize.width > 0, cameraSize.height > 0,
+              canvasSize.width.isFinite, canvasSize.height.isFinite,
+              cameraSize.width.isFinite, cameraSize.height.isFinite else { return nil }
+        let scale = min(canvasSize.width / cameraSize.width,
+                        canvasSize.height / cameraSize.height)
+        let width = (cameraSize.width * scale).rounded(.up)
+        let height = (cameraSize.height * scale).rounded(.up)
+        let x = ((canvasSize.width - width) / 2).rounded(.down)
+        let y = ((canvasSize.height - height) / 2).rounded(.down)
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+}
+
 // MARK: - PiPCompositor（简报 Produces：逐帧合成器）
 
 /// 逐帧合成器（T15/T16）：屏幕帧为底，PiP 摄像头帧按 `PiPFrame` 贴入捕获像素空间（CI 连续

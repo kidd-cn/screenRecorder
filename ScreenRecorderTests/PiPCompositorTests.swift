@@ -162,6 +162,63 @@ final class PiPCaptureGeometryTests: XCTestCase {
     }
 }
 
+// MARK: - SwappedLayout（对调布局 contain 几何纯函数，spec §3.2）
+
+final class SwappedLayoutTests: XCTestCase {
+    /// 16:9 摄像头 contain 进 16:10 画布：16:9（1.778）比画布 16:10（1.6）**更宽** →
+    /// 按宽度撑满（scale = 640/640，宽高比小者）、垂直居中，上下黑边各 20。
+    func testCameraContainRectLetterboxes169Into1610() {
+        XCTAssertEqual(
+            SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 640, height: 400),
+                                            cameraSize: CGSize(width: 640, height: 360)),
+            CGRect(x: 0, y: 20, width: 640, height: 360),
+            "contain 缩放比取宽高比小者：更宽的源按宽度撑满、上下居中（人脸完整不裁）")
+    }
+
+    /// 4:3 摄像头 contain 进 16:9 画布：4:3（0.75）比画布（1.778）**更窄高** →
+    /// 按高度撑满（scale = 360/480）、水平居中，左右黑边各 80。
+    func testCameraContainRectLetterboxes43Into169() {
+        XCTAssertEqual(
+            SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 640, height: 360),
+                                            cameraSize: CGSize(width: 640, height: 480)),
+            CGRect(x: 80, y: 0, width: 480, height: 360),
+            "更窄高比的源按高度撑满、宽度居中（黑边铺纯黑底，绝不裁剪）")
+    }
+
+    /// 同宽高比：恰好铺满画布（零黑边）。
+    func testCameraContainRectSameRatioFillsCanvas() {
+        XCTAssertEqual(
+            SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 640, height: 400),
+                                            cameraSize: CGSize(width: 640, height: 400)),
+            CGRect(x: 0, y: 0, width: 640, height: 400))
+    }
+
+    /// 非法输入（任一边 ≤ 0 / 非有限）→ nil = 本帧不合成摄像头主画面。
+    func testCameraContainRectRejectsDegenerateInput() {
+        XCTAssertNil(SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 0, height: 400),
+                                                     cameraSize: CGSize(width: 640, height: 360)),
+                     "画布零宽非法")
+        XCTAssertNil(SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 640, height: -1),
+                                                     cameraSize: CGSize(width: 640, height: 360)),
+                     "画布负高非法")
+        XCTAssertNil(SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 640, height: 400),
+                                                     cameraSize: CGSize(width: 0, height: 360)),
+                     "摄像头零宽非法")
+        XCTAssertNil(SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 640, height: 400),
+                                                     cameraSize: CGSize(width: 640, height: -1)),
+                     "摄像头负高非法")
+        XCTAssertNil(SwappedLayout.cameraContainRect(canvasSize: CGSize(width: CGFloat.nan, height: 400),
+                                                     cameraSize: CGSize(width: 640, height: 360)),
+                     "画布非有限宽非法")
+        XCTAssertNil(SwappedLayout.cameraContainRect(canvasSize: CGSize(width: CGFloat.infinity, height: 400),
+                                                     cameraSize: CGSize(width: 640, height: 360)),
+                     "画布无穷大宽非法")
+        XCTAssertNil(SwappedLayout.cameraContainRect(canvasSize: CGSize(width: 640, height: 400),
+                                                     cameraSize: CGSize(width: CGFloat.nan, height: 360)),
+                     "摄像头非有限宽非法")
+    }
+}
+
 // MARK: - PiPFrameStore（主线程写 / video 队列读的锁保护桥）
 
 final class PiPFrameStoreTests: XCTestCase {

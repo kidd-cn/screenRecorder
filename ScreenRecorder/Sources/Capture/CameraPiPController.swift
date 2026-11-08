@@ -409,6 +409,12 @@ final class PiPFrameStore: @unchecked Sendable {
         }
     }
 
+    /// 对调布局旗标（spec §3.1 会话级布尔）：主线程写（浮条按钮 / begin-end 复位）、
+    /// SCStream video 队列读（`layoutSwappedProvider` 逐帧取数）。false = 屏幕为主。
+    private var layoutSwapped = false
+    func setLayoutSwapped(_ swapped: Bool) { lock.withStateLock { layoutSwapped = swapped } }
+    var isLayoutSwapped: Bool { lock.withStateLock { layoutSwapped } }
+
     /// 逐帧合成取数（video 队列）：几何与浮窗位置齐备时给出捕获像素空间 rect，否则 nil
     /// （合成侧按无 PiP 直通）。
     func currentPiPFrame() -> PiPFrame? {

@@ -319,6 +319,38 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         XCTAssertNil(controller.currentPiPFrame())
     }
 
+    // MARK: 对调状态桥（spec §3.1：会话级 layoutSwapped 布尔，主线程写 / video 队列读）
+
+    /// PiPFrameStore 旗标语义：初值 = 屏幕为主；set/get 往返（写读皆经既有 NSLock 串行化）。
+    func testLayoutSwappedFlagRoundTripsAndResets() {
+        let store = PiPFrameStore()
+        XCTAssertFalse(store.isLayoutSwapped) // 初值 = 屏幕为主
+        store.setLayoutSwapped(true)
+        XCTAssertTrue(store.isLayoutSwapped)
+        store.setLayoutSwapped(false)
+        XCTAssertFalse(store.isLayoutSwapped)
+    }
+
+    /// begin 成功装配 → 旗标复位 false：每场开始屏幕为主，上一场遗留的对调态不得带进新场。
+    func testBeginRecordingResetsSwappedLayout() {
+        let controller = makeController()
+        controller.setLayoutSwapped(true)
+        controller.beginRecording(geometry: geometry)
+
+        XCTAssertTrue(started, "夹具自检：本场须走成功装配路径（复位语义挂在成功装配段）")
+        XCTAssertFalse(controller.isLayoutSwapped, "每场开始复位屏幕为主")
+    }
+
+    /// begin 后置 true，endRecording() 后复位 false（收尾幂等复位，与 begin 复位互为双保险）。
+    func testEndRecordingResetsSwappedLayout() {
+        let controller = makeController()
+        controller.beginRecording(geometry: geometry)
+        controller.setLayoutSwapped(true)
+        controller.endRecording()
+
+        XCTAssertFalse(controller.isLayoutSwapped, "收尾复位屏幕为主")
+    }
+
     /// 拖动锚点：浮窗 frame 变化（拖动中连发）实时进换算链——成片位置实时跟随的机制钉测。
     func testWindowMoveUpdatesPipFrame() throws {
         let controller = makeController()

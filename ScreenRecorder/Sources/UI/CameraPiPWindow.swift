@@ -164,6 +164,8 @@ final class CameraPiPWindowController {
             return
         }
         frameStore.setGeometry(geometry)
+        // 每场开始复位屏幕为主（spec §3.1 会话级布尔）：上一场遗留的对调态不得带进新场。
+        frameStore.setLayoutSwapped(false)
         let panel = ensureWindow()
         let visibleFrame = panel.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -186,6 +188,7 @@ final class CameraPiPWindowController {
         window?.updatePreviewOverlayImage(nil)
         frameStore.setScreenRect(nil, screenFrame: .zero, cgDisplayOrigin: .zero)
         frameStore.setGeometry(nil)
+        frameStore.setLayoutSwapped(false) // 幂等复位（与 begin 复位互为双保险）
         window?.orderOut(nil)
         stopCamera(camera)
     }
@@ -194,6 +197,14 @@ final class CameraPiPWindowController {
     nonisolated func currentPiPFrame() -> PiPFrame? {
         frameStore.currentPiPFrame()
     }
+
+    // MARK: 对调状态桥（spec §3.1：会话级 layoutSwapped 布尔）
+
+    /// 对调画面主入口（浮条按钮经装配层调用）：翻 PiPFrameStore 旗标 + 浮窗内容切换
+    ///（T5 装屏幕缩略图层；本任务先只翻旗标）。
+    func setLayoutSwapped(_ swapped: Bool) { frameStore.setLayoutSwapped(swapped) }
+    /// 当前对调态（video 队列可读：`layoutSwappedProvider` 逐帧取数的取数缝）。
+    nonisolated var isLayoutSwapped: Bool { frameStore.isLayoutSwapped }
 
     // MARK: P5 实时换背景（验收裁定：录制中改动实时生效）
 
