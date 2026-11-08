@@ -1039,3 +1039,262 @@ final class PiPCompositorKeyboardTests: XCTestCase {
         assertColor(samplePixel(output, x: 10, y: 10), equals: screenColor, "键帽之外保持屏幕内容")
     }
 }
+
+// MARK: - T2 对调态合成（摄像头主画面 contain + 屏幕缩进小图；spec §3.2）
+
+final class PiPCompositorSwappedTests: XCTestCase {
+    /// 软渲染上下文：无头环境确定性出图（与既有合成测试同缝）。
+    private lazy var softwareContext = CIContext(options: [.useSoftwareRenderer: true])
+
+    /// 统一夹具（简报钉定）：画布 64×40 纯蓝屏帧、摄像头 32×32 纯红、小图位 (40,24,20,12)
+    /// 圆角 3（3 < 半高 6，圆角 mask 生效）。contain rect = 40×40 居中 x=12 → (12,0,40,40)。
+    private let canvasSize = CGSize(width: 64, height: 40)
+    private let screenBlue = BGRAColor(blue: 255, green: 0, red: 0, alpha: 255) // 纯蓝（屏幕）
+    private let cameraRed = BGRAColor(blue: 0, green: 0, red: 255, alpha: 255)  // 纯红（摄像头）
+    private let pureBlack = BGRAColor(blue: 0, green: 0, red: 0, alpha: 255)
+    private let insetFrame = PiPFrame(rectInCapturePixels: CGRect(x: 40, y: 24, width: 20, height: 12),
+                                      cornerRadius: 3)
+
+    private func makeCompositor() -> PiPCompositor {
+        PiPCompositor(pixelSize: canvasSize)
+    }
+
+    private func makeCanvas() -> CVPixelBuffer {
+        makeColorBuffer(width: 64, height: 40, color: screenBlue)!
+    }
+
+    private func makeCamera() -> CVPixelBuffer {
+        makeColorBuffer(width: 32, height: 32, color: cameraRed)!
+    }
+
+    private func keycap(text: String = "A", fontSize: Int = 6) -> KeyboardOverlaySnapshot {
+        KeyboardOverlaySnapshot(text: text,
+                                style: KeyboardOverlayStyle(colorAlternate: false, fontSize: fontSize))
+    }
+
+    private func click(point: CGPoint, alpha: CGFloat = 1) -> ClickOverlayState {
+        ClickOverlayState(point: point, appearedAt: Date(), radiusInPixels: 24, fadeDuration: 0.6, alpha: alpha)
+    }
+
+    /// contain 铁律扫描：所有「明显红」像素（R ≥ 200、G/B ≤ 60）必须落在 `rect` 内——
+    /// 摄像头主画面任何处不得出现被裁剪的红形（aspect-fill 误用即越界红，本扫描即红）。
+    private func assertRedOnlyInside(
+        _ buffer: CVPixelBuffer,
+        rect: CGRect,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        var redCount = 0
+        for y in 0..<CVPixelBufferGetHeight(buffer) {
+            for x in 0..<CVPixelBufferGetWidth(buffer) {
+                let pixel = samplePixel(buffer, x: x, y: y)
+                guard Int(pixel.red) >= 200, Int(pixel.green) <= 60, Int(pixel.blue) <= 60 else { continue }
+                redCount += 1
+                XCTAssertTrue(
+                    rect.contains(CGPoint(x: CGFloat(x), y: CGFloat(y))),
+                    "明显红像素 (\(x),\(y)) 落在 contain rect 之外——摄像头画面被裁剪（contain 铁律破）",
+                    file: file, line: line)
+            }
+        }
+        XCTAssertGreaterThanOrEqual(redCount, 500, "应检出大量摄像头红像素（扫描有效）", file: file, line: line)
+    }
+
+    /// 键帽「65% 黑底压暗底层」带式断言：主分量显著低于全亮底色但远高于 0——「显著低于
+    /// 全亮」钉键帽在场，「显著高于 0」钉半透明。底层色随帧不同（对调=红 / 原样=蓝），
+    /// 只钉主分量带（与既有 assertDimmed 同口径、不依赖底层颜色）。
+    private func assertDimmedKeycap(
+        _ actual: BGRAColor,
+        _ message: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let dominant = max(Int(actual.blue), Int(actual.green), Int(actual.red))
+        XCTAssertGreaterThanOrEqual(dominant, 40, "\(message)（键帽必须在场，主分量不得全透）", file: file, line: line)
+        XCTAssertLessThanOrEqual(dominant, 220, "\(message)（键帽必须压暗内容，主分量不得全亮）", file: file, line: line)
+    }
+
+    private func swapped(
+        _ compositor: PiPCompositor,
+        canvas: CVPixelBuffer,
+        camera: CVPixelBuffer?,
+        pipFrame: PiPFrame? = nil,
+        clickOverlay: ClickOverlayState? = nil,
+        keyboardOverlay: KeyboardOverlaySnapshot? = nil,
+        layoutSwapped: Bool = true
+    ) -> CVPixelBuffer {
+        compositor.composite(screenFrame: canvas, pip: camera, pipFrame: pipFrame,
+                             clickOverlay: clickOverlay, strokes: nil, zoomTransform: nil,
+                             keyboardOverlay: keyboardOverlay, layoutSwapped: layoutSwapped,
+                             at: .zero, into: softwareContext)
+    }
+
+    /// 对调态黑边几何：contain rect = (12,0,40,40)（T1 cameraContainRect 在本夹具的取整读数）
+    /// → 四角与左边缘像素纯黑、中心红；全画布扫描钉「红只在 contain rect 内」（contain 铁律）。
+    func testSwappedCompositeLetterboxesCameraIntoCanvas() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let output = swapped(compositor, canvas: canvas, camera: makeCamera())
+
+        XCTAssertFalse(output === canvas, "对调态必须合成输出（新 buffer，不得直返蓝屏）")
+        XCTAssertEqual(CVPixelBufferGetWidth(output), 64)
+        XCTAssertEqual(CVPixelBufferGetHeight(output), 40)
+        assertColor(samplePixel(output, x: 0, y: 0), equals: pureBlack, "左上角纯黑（黑边）")
+        assertColor(samplePixel(output, x: 63, y: 0), equals: pureBlack, "右上角纯黑（黑边）")
+        assertColor(samplePixel(output, x: 0, y: 39), equals: pureBlack, "左下角纯黑（黑边）")
+        assertColor(samplePixel(output, x: 63, y: 39), equals: pureBlack, "右下角纯黑（黑边）")
+        assertColor(samplePixel(output, x: 0, y: 20), equals: pureBlack, "左边缘纯黑（黑边）")
+        assertColor(samplePixel(output, x: 12, y: 20), equals: cameraRed, "contain rect 左列起为摄像头红")
+        assertColor(samplePixel(output, x: 51, y: 20), equals: cameraRed, "contain rect 右列收于 x=51")
+        assertColor(samplePixel(output, x: 52, y: 20), equals: pureBlack, "contain rect 外右侧纯黑")
+        assertColor(samplePixel(output, x: 32, y: 20), equals: cameraRed, "中心 (32,20) = 摄像头红（contain 居中）")
+        assertRedOnlyInside(output, rect: CGRect(x: 12, y: 0, width: 40, height: 40))
+    }
+
+    /// 对调态小图：inset (40,24,20,12) 内 = 蓝（屏幕内容）；圆角切割处透出下层（左上切割处
+    /// 下层是摄像头红、右下切割处下层是黑画布）= 圆角遮罩生效；inset 外 = 黑边 + 红主画面。
+    /// 注：简报示例像素 (41,25) 距圆角圆心 (43,27) ≈ 2.83 < 半径 3，几何上在圆角**内**
+    /// （整像素覆盖 → 蓝）；圆角 3 的角平方内不存在整像素全在弧外的采样点，故改钉
+    /// (40,24)（弧外为主、透红）与 (59,35)（弧外为主、透黑）两处诚实切割位。
+    func testSwappedCompositePlacesScreenInsetWithRoundedCorners() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let output = swapped(compositor, canvas: canvas, camera: makeCamera(), pipFrame: insetFrame)
+
+        assertColor(samplePixel(output, x: 50, y: 30), equals: screenBlue, "inset 中心 = 屏幕内容蓝")
+        assertColor(samplePixel(output, x: 41, y: 25), equals: screenBlue, "(41,25) 在圆角弧内（距圆心 2.83 < 3）→ 蓝")
+        // 左上角切割位 (40,24)（弧外为主）：透出下层摄像头红——圆角遮罩生效的直接读数。
+        let cornerOverCamera = samplePixel(output, x: 40, y: 24)
+        XCTAssertGreaterThanOrEqual(Int(cornerOverCamera.red), 150, "左上圆角切割位应透出摄像头红（R ≥ 150）")
+        XCTAssertLessThanOrEqual(Int(cornerOverCamera.green), 100, "切割位绿色应被红主导压低")
+        XCTAssertLessThanOrEqual(Int(cornerOverCamera.blue), 100, "切割位蓝色应被红主导压低")
+        // 右下角切割位 (59,35)（弧外为主，下层是黑画布）：读数近纯黑——同样钉遮罩生效。
+        let cornerOverBlack = samplePixel(output, x: 59, y: 35)
+        XCTAssertLessThanOrEqual(Int(cornerOverBlack.red), 60, "右下圆角切割位应透出黑画布")
+        XCTAssertLessThanOrEqual(Int(cornerOverBlack.green), 60, "右下圆角切割位应透出黑画布（G）")
+        XCTAssertLessThanOrEqual(Int(cornerOverBlack.blue), 60, "右下圆角切割位应透出黑画布（B，方角误用时此处为 255）")
+        // inset 外画布 = 黑边 + 红主画面。
+        assertColor(samplePixel(output, x: 0, y: 0), equals: pureBlack, "画布左上角黑边")
+        assertColor(samplePixel(output, x: 63, y: 0), equals: pureBlack, "画布右上角黑边")
+        assertColor(samplePixel(output, x: 32, y: 20), equals: cameraRed, "主画面中心红")
+        assertColor(samplePixel(output, x: 20, y: 35), equals: cameraRed, "inset 左侧主画面红")
+        assertColor(samplePixel(output, x: 50, y: 10), equals: cameraRed, "inset 上方主画面红")
+    }
+
+    /// 逐帧参数各自正确：同一 compositor swapped=true（中心红）→ swapped=false 全缺省
+    /// （直返原蓝屏 buffer）→ 再 swapped=true（中心红）——无跨帧残留。
+    func testSwappedCompositeTogglesFollowPerFrame() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let camera = makeCamera()
+
+        let first = swapped(compositor, canvas: canvas, camera: camera)
+        XCTAssertFalse(first === canvas, "第一帧 swapped=true 必须合成输出")
+        assertColor(samplePixel(first, x: 32, y: 20), equals: cameraRed, "第一帧 swapped=true：中心红")
+
+        let second = swapped(compositor, canvas: canvas, camera: nil, layoutSwapped: false)
+        XCTAssertTrue(second === canvas, "第二帧 swapped=false 全缺省必须直返原 buffer（直返语义）")
+        assertColor(samplePixel(second, x: 32, y: 20), equals: screenBlue, "第二帧 = 原样蓝屏")
+
+        let third = swapped(compositor, canvas: canvas, camera: camera)
+        assertColor(samplePixel(third, x: 32, y: 20), equals: cameraRed, "第三帧再开 swapped：中心仍红（翻转无残留）")
+    }
+
+    /// 对调态 + pipFrame nil：摄像头主画面照常、无小图、画布黑边——不崩溃、不直返蓝屏
+    /// （全画布无任何蓝像素：画面只有黑边与红主画面）。
+    func testSwappedCompositeWithoutPipFrameKeepsCameraMain() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let output = swapped(compositor, canvas: canvas, camera: makeCamera(), pipFrame: nil)
+
+        XCTAssertFalse(output === canvas, "对调态不得直返蓝屏（诚实合成黑画布 + 主画面）")
+        XCTAssertEqual(CVPixelBufferGetWidth(output), 64)
+        XCTAssertEqual(CVPixelBufferGetHeight(output), 40)
+        assertColor(samplePixel(output, x: 32, y: 20), equals: cameraRed, "摄像头主画面照常（中心红）")
+        assertColor(samplePixel(output, x: 0, y: 0), equals: pureBlack, "黑边照常")
+        assertColor(samplePixel(output, x: 63, y: 39), equals: pureBlack, "黑边照常（右下角）")
+        for y in stride(from: 0, to: 40, by: 7) {
+            for x in stride(from: 0, to: 64, by: 5) {
+                let pixel = samplePixel(output, x: x, y: y)
+                XCTAssertFalse(Int(pixel.blue) >= 200 && Int(pixel.red) <= 60 && Int(pixel.green) <= 60,
+                               "(\(x),\(y)) 出现蓝像素——pipFrame nil 时不得有小图/蓝屏残留")
+            }
+        }
+    }
+
+    /// 键帽视口锚定不受对调影响：swapped 与 unswapped 帧的键帽像素位置一致（同点同读数带）。
+    /// 键帽 "A" 字号 6：capH ≈ 12-13、底边距 24 → 缓冲 rect y ≈ 3…16、水平居中 x ≈ 25…39；
+    /// 采样点 (32,6) 在键帽顶带（字形墨迹 y ≥ 9 之上、距键帽边 ≥ 5px），(32,20) 在键帽
+    /// 底缘（y=16）之下的下边距带，(10,6)/(54,6) 在键帽横向覆盖之外。
+    func testSwappedCompositeKeycapStaysBottomCenter() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let camera = makeCamera()
+
+        let swappedFrame = swapped(compositor, canvas: canvas, camera: camera, keyboardOverlay: keycap())
+        let plainFrame = swapped(compositor, canvas: canvas, camera: nil, keyboardOverlay: keycap(),
+                                 layoutSwapped: false)
+
+        assertDimmedKeycap(samplePixel(swappedFrame, x: 32, y: 6), "对调帧键帽顶带（32,6）应压暗底层红")
+        assertDimmedKeycap(samplePixel(plainFrame, x: 32, y: 6), "原样帧同点应压暗底层蓝——两帧键帽同位")
+        assertColor(samplePixel(swappedFrame, x: 32, y: 20), equals: cameraRed,
+                    "键帽底缘（y=16）之下的下边距带不受键帽覆盖（对调帧）")
+        assertColor(samplePixel(plainFrame, x: 32, y: 20), equals: screenBlue,
+                    "下边距带同点两帧一致（原样帧蓝）——键帽底部居中锚定不变")
+        assertColor(samplePixel(swappedFrame, x: 10, y: 6), equals: pureBlack, "键帽左界外 = 黑边（黑边位置）")
+        assertColor(samplePixel(plainFrame, x: 10, y: 6), equals: screenBlue, "键帽左界外两帧一致（原样帧蓝）")
+        assertColor(samplePixel(swappedFrame, x: 54, y: 6), equals: pureBlack, "键帽右界外 = 黑边")
+        assertColor(samplePixel(plainFrame, x: 54, y: 6), equals: screenBlue, "键帽右界外两帧一致（原样帧蓝）")
+    }
+
+    /// 点击环施加于屏幕层、随缩放缩进小图：点击 (16,8)（CI (16,32)）经 aspect-fill
+    /// scale=0.3125 + 中心裁剪 (0,0.25) → inset 内缓冲 (45,26.25)，描边半径 24×0.3125=7.5、
+    /// 描边宽 4×0.3125=1.25 → 描边带 6.875…8.125；(52,26) 整像素落在带内 → 黄；环心 (45,26)
+    /// 在孔内 → 蓝；主画面区（含未缩放环带位 (40,8) 与点击位 (16,8)）无黄。
+    func testSwappedCompositeAppliesClickRingInsideInset() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let camera = makeCamera()
+
+        let baseline = swapped(compositor, canvas: canvas, camera: camera, pipFrame: insetFrame)
+        assertColor(samplePixel(baseline, x: 52, y: 26), equals: screenBlue, "无点击时 inset 同点为纯蓝（基线）")
+
+        let output = swapped(compositor, canvas: canvas, camera: camera, pipFrame: insetFrame,
+                             clickOverlay: click(point: CGPoint(x: 16, y: 8)))
+        let ring = samplePixel(output, x: 52, y: 26)
+        XCTAssertGreaterThanOrEqual(Int(ring.red), 150, "缩放后描边带 (52,26) 应现黄（R 抬起）")
+        XCTAssertGreaterThanOrEqual(Int(ring.green), 150, "黄环 G 同步抬起")
+        XCTAssertLessThanOrEqual(Int(ring.blue), 150, "黄环压低蓝底（B）")
+        assertColor(samplePixel(output, x: 45, y: 26), equals: screenBlue, "环心孔内保持屏幕蓝（描边圈语义随缩放）")
+        assertColor(samplePixel(output, x: 16, y: 8), equals: cameraRed, "主画面点击位无黄（特效只随小图出现）")
+        assertColor(samplePixel(output, x: 40, y: 8), equals: cameraRed, "未缩放环带位 (40,8) 无黄——环不得漏画在主画面")
+    }
+
+    /// 对调态 + 全输入 nil：guard（含 layoutSwapped）短路不得直返蓝屏——诚实输出纯黑画布帧。
+    func testSwappedCompositeWithAllInputsNilStillRendersBlackCanvas() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let output = swapped(compositor, canvas: canvas, camera: nil)
+
+        XCTAssertFalse(output === canvas, "swapped 全输入 nil 不得直返蓝屏（诚实降级）")
+        XCTAssertEqual(CVPixelBufferGetWidth(output), 64)
+        XCTAssertEqual(CVPixelBufferGetHeight(output), 40)
+        assertColor(samplePixel(output, x: 0, y: 0), equals: pureBlack, "纯黑画布")
+        assertColor(samplePixel(output, x: 63, y: 0), equals: pureBlack, "纯黑画布")
+        assertColor(samplePixel(output, x: 0, y: 39), equals: pureBlack, "纯黑画布")
+        assertColor(samplePixel(output, x: 63, y: 39), equals: pureBlack, "纯黑画布")
+        assertColor(samplePixel(output, x: 32, y: 20), equals: pureBlack, "纯黑画布（中心）")
+    }
+
+    /// 屏幕帧缩略图（T4 数据源）：640×360 → 最长边 320（320×180）；100×50 → scale=1 原尺寸。
+    func testMakeScreenThumbnailScalesLongestEdge() {
+        let compositor = makeCompositor()
+        let wide = makeColorBuffer(width: 640, height: 360, color: screenBlue)!
+        let wideThumb = compositor.makeScreenThumbnail(from: wide)
+        XCTAssertEqual(wideThumb?.width, 320, "640×360 最长边缩到 320")
+        XCTAssertEqual(wideThumb?.height, 180, "等比：320×180")
+        let small = makeColorBuffer(width: 100, height: 50, color: screenBlue)!
+        let smallThumb = compositor.makeScreenThumbnail(from: small)
+        XCTAssertEqual(smallThumb?.width, 100, "100×50 最长边 ≤ 320：scale=1 原尺寸")
+        XCTAssertEqual(smallThumb?.height, 50, "原尺寸直出")
+    }
+}

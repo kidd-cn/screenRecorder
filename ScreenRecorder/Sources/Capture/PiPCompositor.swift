@@ -162,7 +162,8 @@ enum SwappedLayout {
 /// - 无 PiP（pip / pipFrame 为 nil）或完全不相交时 PiP 路**零渲染**；无点击态或圈不可得时
 ///   点击路**零渲染**；笔画快照空/nil 时笔画路**零渲染**（未在画的常态帧掩图缓存直取，
 ///   零栅格化）；缩放仿射 nil 时缩放步恒等跳过；键帽快照 nil/文本空时键帽路**零渲染**
-///   （文本不变的常态帧键帽位图缓存直取，零栅格化零 CoreText 排版）；多路皆空时**直返原 buffer**；
+///   （文本不变的常态帧键帽位图缓存直取，零栅格化零 CoreText 排版）；多路皆空时**直返原
+///   buffer**（unswapped；`layoutSwapped` 在位恒合成——对调态全源缺省 = 诚实黑画布，T2）；
 /// - 合成不触碰 PTS（`at pts` 原样透传由调用方 append）；只在任一效果缝在位时被调用
 ///   （调用方门控：`SCStreamRecorder` 按注入缝在位与否装配合成器）。
 /// 线程模型：全部方法在 SCStream video 队列（样本回调队列）串行执行，池与四处缓存（圆角
@@ -275,14 +276,21 @@ final class PiPCompositor {
         self.pixelSize = pixelSize
     }
 
-    /// 逐帧合成（Task 9 终态签名：签名增 `keyboardOverlay`，位于 `zoomTransform` 与 `at`
-    /// 之间、其后无参——终态签名钉定，`at` 之后不得再加参）。screen 为底；全效果缺省直返
-    /// screen（零渲染直返原 buffer，与一期逐字节一致）。单效果缺省时该路零渲染跳过，另路照常。
+    /// 逐帧合成（Task 9 终态签名；T2 增 `layoutSwapped`，位于 `keyboardOverlay` 与 `at`
+    /// 之间、`at` 之后仍无参——终态纪律延续，缺省 false 与今日逐字节一致）。screen 为底；
+    /// unswapped 且全效果缺省直返 screen（零渲染直返原 buffer，与一期逐字节一致）。单效果
+    /// 缺省时该路零渲染跳过，另路照常。
     ///
-    /// 次序终态（Task 9 钉定，修订 Task 8 注释中「键帽在 PiP 之后」的预告）：底帧 → 点击环
-    /// → **标记笔画**（两者皆内容锚定层）→ **统一施加缩放** → **键帽**（底部居中，视口锚定层）
-    /// → PiP（视口锚定层最上——PiP 撞键帽时 PiP 胜出）。笔画与环同在缩放之下——笔画随内容
-    /// 一起缩放（content-anchored）；键帽与 PiP 在缩放之上（viewport-anchored）。
+    /// 次序终态（unswapped，Task 9 钉定）：底帧 → 点击环 → **标记笔画**（两者皆内容锚定层）
+    /// → **统一施加缩放** → **键帽**（底部居中，视口锚定层）→ PiP（视口锚定层最上——PiP 撞
+    /// 键帽时 PiP 胜出）。笔画与环同在缩放之下——笔画随内容一起缩放（content-anchored）；
+    /// 键帽与 PiP 在缩放之上（viewport-anchored）。
+    ///
+    /// 对调态（`layoutSwapped`，spec §3.2，T2）：环/笔画/缩放仍施加于屏幕层之后，布局对调——
+    /// **黑底画布** → **摄像头 contain 主画面**（`SwappedLayout.cameraContainRect` 等比居中、
+    /// 直角无裁剪无圆角）→ **屏幕层**（环/笔画/缩放已施加）aspect-fill 缩进小图（圆角）→
+    /// **键帽**（视口锚定画布底部居中，分支内最上）。对调帧全源缺省不直返：guard 含
+    /// `layoutSwapped`，恒合成诚实黑画布（不透传上一帧屏幕画面）。
     /// `zoomTransform` 为 CI 画布空间（y 向上，与 placeClickOverlay/placePip 的换算口径同源）
     /// 的仿射；`transformed(by:)` 是惰性 CI recipe，热路径零位图分配。
     @discardableResult
@@ -293,9 +301,10 @@ final class PiPCompositor {
                    strokes: MarkingStrokeSnapshot? = nil,
                    zoomTransform: CGAffineTransform? = nil,
                    keyboardOverlay: KeyboardOverlaySnapshot? = nil,
+                   layoutSwapped: Bool = false,
                    at pts: CMTime,
                    into context: CIContext) -> CVPixelBuffer {
-        guard pip != nil || clickOverlay != nil || strokes != nil || zoomTransform != nil || keyboardOverlay != nil else { return screenFrame } // 全缺省：零开销直返原 buffer
+        guard pip != nil || layoutSwapped || clickOverlay != nil || strokes != nil || zoomTransform != nil || keyboardOverlay != nil else { return screenFrame } // 全缺省：零开销直返原 buffer（layoutSwapped 在位恒合成——对调态全源缺省 = 诚实黑画布）
         // 画布尺寸以 screenFrame 实测为准（修复轮 Minor #2）：与 init pixelSize 失配时按
         // 实测求交、换算与出图——不得误判越界直通，也不得输出错误尺寸。
         let bounds = CGRect(
@@ -319,15 +328,33 @@ final class PiPCompositor {
         if let zoomTransform {
             composed = (composed ?? base).transformed(by: zoomTransform)
         }
-        // 键帽层（P4，视口锚定层）：底部居中圆角键帽，缩放之上、PiP 之下。快照 nil/文本空/
-        // 位图失败本路直通；文本不变逐帧直取位图单槽缓存（零栅格化零排版）。
-        if let keyboardOverlay, let keycap = placeKeyboardOverlay(keyboardOverlay, in: bounds) {
-            composed = keycap.composited(over: composed ?? base)
-        }
-        // PiP（视口锚定层最上，v2）：键帽后的画面为底。rect 空 / 不相交 / 源异常任一失败即
-        // 本路零渲染直通。
-        if let pip, let pipFrame {
-            composed = placePip(pip, pipFrame: pipFrame, in: bounds, over: composed ?? base)
+        if layoutSwapped {
+            // 对调态（T2，spec §3.2）：屏幕层（环/笔画/缩放已施加）先存，画布铺纯黑底，
+            // 摄像头 contain 主画面（直角）与小图（圆角）按对调布局摆放，键帽分支内最后
+            //（视口锚定最上）。任一路失败保下层直通（黑画布/主画面不被吞）。
+            let screenWithEffects = composed ?? base
+            composed = CIImage(color: .black).cropped(to: bounds) // 黑边底色纯黑
+            if let pip, let withCamera = placeCameraMain(pip, in: bounds, over: composed ?? base) {
+                composed = withCamera // 摄像头路失败（源异常）：保黑画布，本帧不合成摄像头
+            }
+            if let pipFrame, let withInset = placeScreenInset(screenWithEffects, pipFrame: pipFrame, in: bounds, over: composed ?? base) {
+                composed = withInset // 小图路失败（rect 空/不相交）：保下层，本帧不合成小图
+            }
+            // 键帽（视口锚定层）：画布底部居中不受对调影响，置于小图之后（分支最上）。
+            if let keyboardOverlay, let keycap = placeKeyboardOverlay(keyboardOverlay, in: bounds) {
+                composed = keycap.composited(over: composed ?? base)
+            }
+        } else {
+            // 键帽层（P4，视口锚定层）：底部居中圆角键帽，缩放之上、PiP 之下。快照 nil/文本空/
+            // 位图失败本路直通；文本不变逐帧直取位图单槽缓存（零栅格化零排版）。
+            if let keyboardOverlay, let keycap = placeKeyboardOverlay(keyboardOverlay, in: bounds) {
+                composed = keycap.composited(over: composed ?? base)
+            }
+            // PiP（视口锚定层最上，v2）：键帽后的画面为底。rect 空 / 不相交 / 源异常任一失败即
+            // 本路零渲染直通。
+            if let pip, let pipFrame {
+                composed = placePip(pip, pipFrame: pipFrame, in: bounds, over: composed ?? base)
+            }
         }
 
         guard let composed, let output = dequeueOutputBuffer(size: bounds.size) else {
@@ -335,6 +362,21 @@ final class PiPCompositor {
         }
         context.render(composed, to: output)
         return output
+    }
+
+    /// 屏幕帧缩略图（对调态浮窗预览数据源，T4 消费；video 队列调用）：等比缩到最长边 ≤
+    /// `maxEdgeLength`（默认 320），`self.context` 单实例渲染 createCGImage。最长边不超限
+    /// 时 scale=1 原尺寸直出。源异常（零尺寸/非有限/超限参数）返回 nil = 本拍不产缩略图。
+    func makeScreenThumbnail(from buffer: CVPixelBuffer, maxEdgeLength: CGFloat = 320) -> CGImage? {
+        let width = CGFloat(CVPixelBufferGetWidth(buffer))
+        let height = CGFloat(CVPixelBufferGetHeight(buffer))
+        guard width > 0, height > 0, width.isFinite, height.isFinite,
+              maxEdgeLength > 0, maxEdgeLength.isFinite else { return nil }
+        let scale = min(CGFloat(1), maxEdgeLength / max(width, height))
+        guard scale > 0, scale.isFinite else { return nil }
+        let image = CIImage(cvPixelBuffer: buffer)
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return context.createCGImage(image, from: image.extent)
     }
 
     /// 标记笔画层（P2）：全部笔画栅格化为一张**彩色** RGBA 位图——每笔画自带
@@ -461,6 +503,68 @@ final class PiPCompositor {
         // sourceOver：PiP 在上（self=placedPip），屏幕帧为底。屏幕帧全不透明，参数顺序
         // 反了会把 PiP 完全盖住（本用例已由测试钉死）。
         return placedPip.composited(over: base)
+    }
+
+    /// 摄像头 contain 主画面（对调态，T2）：`SwappedLayout.cameraContainRect` 等比居中贴入
+    /// 画布——直角、无裁剪、无圆角（主画面语义：人脸完整不裁）。contain rect 非法 / 源异常
+    /// 返回 nil = 本帧不合成摄像头路（保下层黑画布）。CI 坐标换算与 placePip 同口径
+    /// （ciY = bounds.height − 缓冲 y）。contain 恰好贴合时双线性采样会读到源 extent 外
+    /// （透明黑掺入边列）——源先钳位到自身 extent（边缘延伸），输出再裁剪到 contain rect
+    ///（防钳位延伸外溢出 rect），黑边保持纯黑。
+    private func placeCameraMain(_ pip: CVPixelBuffer, in bounds: CGRect, over base: CIImage) -> CIImage? {
+        let cameraSize = CGSize(width: CVPixelBufferGetWidth(pip), height: CVPixelBufferGetHeight(pip))
+        guard let containRect = SwappedLayout.cameraContainRect(canvasSize: bounds.size, cameraSize: cameraSize) else {
+            return nil
+        }
+        let rawCamera = CIImage(cvPixelBuffer: pip)
+        guard rawCamera.extent.width > 0, rawCamera.extent.height > 0, containRect.width > 0 else { return nil }
+        let scale = containRect.width / rawCamera.extent.width
+        guard scale > 0, scale.isFinite else { return nil }
+        let ciContainRect = CGRect(
+            x: containRect.minX,
+            y: bounds.height - containRect.maxY,
+            width: containRect.width,
+            height: containRect.height)
+        let placed = rawCamera
+            .clamped(to: rawCamera.extent)
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            .transformed(by: CGAffineTransform(
+                translationX: containRect.minX,
+                y: bounds.height - containRect.maxY))
+            .cropped(to: ciContainRect)
+        return placed.composited(over: base)
+    }
+
+    /// 屏幕层缩进小图（对调态，T2）：aspect-fill（scale 取宽高比**大者** + 中心裁剪，
+    /// placePip 同数学同坐标换算）→ `applyRoundedCornerMask(radius: pipFrame.cornerRadius)`
+    /// → 平移到位。rect 空/不相交/源异常返回 nil = 本帧不合成小图路（拖出采集区 = 小图
+    /// 消失的诚实语义）。
+    private func placeScreenInset(_ screen: CIImage, pipFrame: PiPFrame, in bounds: CGRect, over base: CIImage) -> CIImage? {
+        let targetRect = pipFrame.rectInCapturePixels
+        guard !targetRect.isEmpty, bounds.intersection(targetRect) != .null else { return nil }
+        // 屏幕层先裁回画布域：点击环/笔画的掩图层 extent 可能伸出画布（环掩图域以点击点
+        // 为心外扩），union extent 会把下方中心裁剪窗口整体带偏（小图内容错位、露底色）。
+        // 画布外内容在 unswapped 输出中本就不可见，裁齐后两种布局同一画布域。
+        let screenLayer = screen.cropped(to: bounds)
+        guard screenLayer.extent.width > 0, screenLayer.extent.height > 0, targetRect.width > 0, targetRect.height > 0 else { return nil }
+
+        let scale = max(targetRect.width / screenLayer.extent.width,
+                        targetRect.height / screenLayer.extent.height)
+        guard scale > 0, scale.isFinite else { return nil }
+        let scaled = screenLayer.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        // 中心裁剪到 rect 尺寸：origin 归零后打圆角（圆角 mask 与图像须同 origin-0 对齐），
+        // 最后统一平移到摆放位（与 placePip 逐行同构）。
+        let cropOrigin = CGPoint(
+            x: scaled.extent.midX - targetRect.width / 2,
+            y: scaled.extent.midY - targetRect.height / 2)
+        var placedInset = scaled
+            .cropped(to: CGRect(origin: cropOrigin, size: targetRect.size))
+            .transformed(by: CGAffineTransform(translationX: -cropOrigin.x, y: -cropOrigin.y))
+        placedInset = applyRoundedCornerMask(to: placedInset, radius: pipFrame.cornerRadius)
+        // CI 坐标系 y 向上；目标 rect 是缓冲区坐标（左上原点）。换算平移量：CI y = 画布高 - rect 底。
+        let ciOrigin = CGPoint(x: targetRect.minX, y: bounds.height - targetRect.maxY)
+        placedInset = placedInset.transformed(by: CGAffineTransform(translationX: ciOrigin.x, y: ciOrigin.y))
+        return placedInset.composited(over: base)
     }
 
     /// 点击高亮圈（T16）：黄描边半透明圆，描边中心恰在 `radiusInPixels`，整体不透明度按
