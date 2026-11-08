@@ -506,19 +506,24 @@ final class PiPCompositor {
     }
 
     /// 摄像头 contain 主画面（对调态，T2）：`SwappedLayout.cameraContainRect` 等比居中贴入
-    /// 画布——直角、无裁剪、无圆角（主画面语义：人脸完整不裁）。contain rect 非法 / 源异常
-    /// 返回 nil = 本帧不合成摄像头路（保下层黑画布）。CI 坐标换算与 placePip 同口径
-    /// （ciY = bounds.height − 缓冲 y）。contain 恰好贴合时双线性采样会读到源 extent 外
-    /// （透明黑掺入边列）——源先钳位到自身 extent（边缘延伸），输出再裁剪到 contain rect
-    ///（防钳位延伸外溢出 rect），黑边保持纯黑。
+    /// 画布——直角、无裁剪、无圆角（主画面语义：人脸完整不裁）。缩放比取宽高比**小者**
+    ///（与 cameraContainRect 同式，修复轮 1）：rect 尺寸含 ceil 舍入松弛（每维 ≤ +1px），
+    /// 单取宽比会把松弛放大成竖比源的超高（如 101×200 → 41.58 vs rect 高 40，上端 1.58px
+    /// 伸出画布被裁 = 源顶 7.6 行内容永不显示，违反「绝不裁剪」）；取小者后 scaled 两维
+    /// ≤ rect，裁剪只剩舍入松弛。contain rect 非法 / 源异常返回 nil = 本帧不合成摄像头路
+    ///（保下层黑画布）。CI 坐标换算与 placePip 同口径（ciY = bounds.height − 缓冲 y）。
+    /// contain 恰好贴合时双线性采样会读到源 extent 外（透明黑掺入边列）——源先钳位到
+    /// 自身 extent（边缘延伸），输出再裁剪到 contain rect（防钳位延伸外溢出 rect），
+    /// 黑边保持纯黑。
     private func placeCameraMain(_ pip: CVPixelBuffer, in bounds: CGRect, over base: CIImage) -> CIImage? {
         let cameraSize = CGSize(width: CVPixelBufferGetWidth(pip), height: CVPixelBufferGetHeight(pip))
         guard let containRect = SwappedLayout.cameraContainRect(canvasSize: bounds.size, cameraSize: cameraSize) else {
             return nil
         }
         let rawCamera = CIImage(cvPixelBuffer: pip)
-        guard rawCamera.extent.width > 0, rawCamera.extent.height > 0, containRect.width > 0 else { return nil }
-        let scale = containRect.width / rawCamera.extent.width
+        guard rawCamera.extent.width > 0, rawCamera.extent.height > 0, containRect.width > 0, containRect.height > 0 else { return nil }
+        let scale = min(containRect.width / rawCamera.extent.width,
+                        containRect.height / rawCamera.extent.height)
         guard scale > 0, scale.isFinite else { return nil }
         let ciContainRect = CGRect(
             x: containRect.minX,

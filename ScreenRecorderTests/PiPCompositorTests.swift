@@ -1051,6 +1051,7 @@ final class PiPCompositorSwappedTests: XCTestCase {
     private let canvasSize = CGSize(width: 64, height: 40)
     private let screenBlue = BGRAColor(blue: 255, green: 0, red: 0, alpha: 255) // 纯蓝（屏幕）
     private let cameraRed = BGRAColor(blue: 0, green: 0, red: 255, alpha: 255)  // 纯红（摄像头）
+    private let markerBlue = BGRAColor(blue: 255, green: 0, red: 0, alpha: 255) // 削切标记带（纯蓝）
     private let pureBlack = BGRAColor(blue: 0, green: 0, red: 0, alpha: 255)
     private let insetFrame = PiPFrame(rectInCapturePixels: CGRect(x: 40, y: 24, width: 20, height: 12),
                                       cornerRadius: 3)
@@ -1065,6 +1066,27 @@ final class PiPCompositorSwappedTests: XCTestCase {
 
     private func makeCamera() -> CVPixelBuffer {
         makeColorBuffer(width: 32, height: 32, color: cameraRed)!
+    }
+
+    /// 竖比摄像头夹具（101×200 红底 + 顶部 10 源行蓝标记带）：纯红均匀源下「顶部削切」
+    /// 像素不可见（可见 rect 仍满铺红——削掉的是源内容而非 rect 覆盖），标记带把削切显影。
+    private func makePortraitCamera() -> CVPixelBuffer {
+        let buffer = makeColorBuffer(width: 101, height: 200, color: cameraRed)!
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return buffer }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+        for row in 0..<10 {
+            let rowBase = base.advanced(by: row * bytesPerRow)
+            for column in 0..<CVPixelBufferGetWidth(buffer) {
+                let pixel = rowBase.advanced(by: column * 4).assumingMemoryBound(to: UInt8.self)
+                pixel[0] = markerBlue.blue
+                pixel[1] = markerBlue.green
+                pixel[2] = markerBlue.red
+                pixel[3] = markerBlue.alpha
+            }
+        }
+        return buffer
     }
 
     private func keycap(text: String = "A", fontSize: Int = 6) -> KeyboardOverlaySnapshot {
@@ -1296,5 +1318,52 @@ final class PiPCompositorSwappedTests: XCTestCase {
         let smallThumb = compositor.makeScreenThumbnail(from: small)
         XCTAssertEqual(smallThumb?.width, 100, "100×50 最长边 ≤ 320：scale=1 原尺寸")
         XCTAssertEqual(smallThumb?.height, 50, "原尺寸直出")
+    }
+
+    // MARK: 竖比摄像头（修复轮 1：缩放比必须取两维比值小者，源内容绝不削切）
+
+    /// 竖比钉测（修复轮 1 真 RED）：101×200 入 64×40，contain rect = (21,0,21,40)
+    /// （cameraContainRect 实际读数：s = min(64/101, 40/200) = 0.2；宽 ⌈20.2⌉ = 21、
+    /// 高 ⌈40.0⌉ = 40（Double 200×0.2 精确舍入到 40.0），x = ⌊(64−21)/2⌋ = 21）。
+    /// 顶部 10 源行（5%）刷蓝标记带：修复后 s 取两维小者（0.2），scaled 高恰 40 →
+    /// 全部源行可见，标记带 = 缓冲顶两行纯蓝（10×0.2 = 2.0，整数对齐无 AA 掺行）；
+    /// 修复前 s 只取宽比（21/101 ≈ 0.2079），scaled 高 41.58 超 rect 1.58px、下端锚在
+    /// 画布底（CI y=0），上端伸出画布被裁 → 源顶 7.62 行（200 − 40×101/21）永不显示，
+    /// 带尾 2.4 源行茬进首行（半蓝半红，B ≈ 127）、次行已纯红——两断言即红。
+    /// 采样列 x=31 = rect 横向中心（21 + 21/2 = 31.5）。
+    func testSwappedCompositePortraitCameraNeverShavesTopBand() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let output = swapped(compositor, canvas: canvas, camera: makePortraitCamera())
+
+        // 首行在带内深处（源 0…5 行）→ 纯蓝；带缘（源行 10 → 缓冲 y=2.0）受 5× 缩小
+        // 采样核的 AA 过渡跨行 1/2 对称掺色（实测 B233/R120 | B120/R233），钉「蓝主导/
+        // 红主导」带而非逐点纯色。修复前（宽单比 21/101 ≈ 0.2079）：源顶 7.62 行被削、
+        // 带尾仅 ~0.5 行进画布 → 行 1 = 纯红（B=0/R=255）→ 本用例 RED。
+        assertColor(samplePixel(output, x: 31, y: 0), equals: markerBlue, "标记带首行（源 0…5 行，带内深处）应纯蓝")
+        let upperEdge = samplePixel(output, x: 31, y: 1)
+        XCTAssertGreaterThanOrEqual(Int(upperEdge.blue), 200, "行 1 应蓝主导（修复前被削成红，B=0）")
+        XCTAssertLessThanOrEqual(Int(upperEdge.red), 150, "行 1 不得红主导（修复前 R=255）")
+        let lowerEdge = samplePixel(output, x: 31, y: 2)
+        XCTAssertGreaterThanOrEqual(Int(lowerEdge.red), 200, "行 2 应红主导（带缘 AA 过渡的下侧）")
+        XCTAssertLessThanOrEqual(Int(lowerEdge.blue), 150, "行 2 不得蓝主导（带不得蔓延过 2 行）")
+        assertColor(samplePixel(output, x: 31, y: 3), equals: cameraRed, "行 3 起恢复纯红（过渡带收敛，钉带总高 ≈ 2 行 = scale 0.2）")
+        assertColor(samplePixel(output, x: 31, y: 39), equals: cameraRed, "末行（源 195…200 行）红——底缘不削")
+    }
+
+    /// 竖比 rect 首末行满铺钉测（纯红夹具）：contain rect (21,0,21,40) 首行、末行与中带在
+    /// rect 横向中心列处必须满铺摄像头红（R ≥ 200）——钉「裁剪窗口错位使 rect 行露底色」
+    /// 类回归（如中心对齐裁剪：两行各削 0.79px → ~21% 覆盖 → R ≈ 54；origin 对齐裁剪：
+    /// 行近纯黑）。注：修复前缺陷形态为「源内容削切」（可见 rect 仍满铺红），本用例修复
+    /// 前后均绿；修复前行为的真 RED 由标记带钉测（testSwappedCompositePortraitCameraNeverShavesTopBand）承担。
+    func testSwappedCompositePortraitCameraRectRowsFullyCovered() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let camera = makeColorBuffer(width: 101, height: 200, color: cameraRed)!
+        let output = swapped(compositor, canvas: canvas, camera: camera)
+
+        XCTAssertGreaterThanOrEqual(Int(samplePixel(output, x: 31, y: 0).red), 200, "rect 首行中心列应满铺摄像头红")
+        XCTAssertGreaterThanOrEqual(Int(samplePixel(output, x: 31, y: 20).red), 200, "rect 中带中心列应满铺摄像头红")
+        XCTAssertGreaterThanOrEqual(Int(samplePixel(output, x: 31, y: 39).red), 200, "rect 末行中心列应满铺摄像头红")
     }
 }
