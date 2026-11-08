@@ -32,6 +32,10 @@ struct MenuBarView: View {
     /// 仅摄像头录制（P7b）：录制源是前置摄像头，落盘 mp4 视频文件（编排归 AppAssembly，
     /// 同其他入口）。
     let onStartCameraOnly: () -> Void
+    /// 区域截图（Q1）：RegionSelector 拖框后裁剪落盘 PNG（编排归 AppAssembly，同区域录制）。
+    let onTakeRegionScreenshot: () -> Void
+    /// 全屏截图指定显示器（Q1，「全屏截图」子菜单的显示器列表项，编排归 AppAssembly）。
+    let onTakeFullScreenScreenshot: (CGDirectDisplayID) -> Void
     /// 打开文件列表窗口（T18，窗口与控制器归 AppAssembly，见 T17 装配红线）。
     let onOpenRecordingList: () -> Void
     /// 打开定时录制面板（P6b，窗口归 AppAssembly，见 openScheduledRecordingPanel）。
@@ -71,6 +75,19 @@ struct MenuBarView: View {
                 onStartCameraOnly()
             }
             .accessibilityLabel("仅摄像头录制：只录前置摄像头画面与麦克风，输出 mp4 视频文件")
+        }
+        .disabled(controller.state != .idle)
+        // 截图（Q1）：区域拖框 / 整屏两种；idle 态才可用（同「开始录制」置灰模式——
+        // 截图不与录制会话并发，装配层入口另有同款守卫双保险）。
+        Menu("截图") {
+            Button("区域截图…") {
+                onTakeRegionScreenshot()
+            }
+            Menu("全屏截图") {
+                ForEach(displayOptions) { option in
+                    displayItem(option) { onTakeFullScreenScreenshot($0) }
+                }
+            }
         }
         .disabled(controller.state != .idle)
         Button(pauseResumeTitle, systemImage: pauseResumeIcon) {
@@ -154,10 +171,19 @@ struct MenuBarView: View {
     private var fullScreenSubmenu: some View {
         Menu("全屏") {
             ForEach(displayOptions) { option in
-                Button(option.isMain ? "\(option.name)（主）" : option.name) {
-                    onStartDisplay(option.displayID)
-                }
+                displayItem(option) { onStartDisplay($0) }
             }
+        }
+    }
+
+    /// 显示器列表项（「开始录制 → 全屏」与「截图 → 全屏截图」共用同一数据源与命名：
+    /// 本地化屏名 + points 尺寸，主屏追加「（主）」——同一 `displayOptions`，命名零复制）。
+    private func displayItem(
+        _ option: DisplayOption,
+        action: @escaping (CGDirectDisplayID) -> Void
+    ) -> some View {
+        Button(option.isMain ? "\(option.name)（主）" : option.name) {
+            action(option.displayID)
         }
     }
 

@@ -30,6 +30,9 @@ protocol RecordingNotifying: AnyObject {
     func notifySaved(fileURL: URL)
     func notifyFailure(message: String)
     func notifyDiskSpaceWarning()
+    /// 截图已保存（Q1）：区域/整屏截图落盘后的成功通知——仅成功发（失败静默，
+    /// 同既有通知纪律）。
+    func notifyScreenshotSaved(fileURL: URL)
 }
 
 /// 点击音效调度缝（P1b，spec「事件→调度抽缝」）：生产实现 `SCStreamRecorder`（转发当前

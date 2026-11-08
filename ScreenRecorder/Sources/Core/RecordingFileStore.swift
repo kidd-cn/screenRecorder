@@ -61,20 +61,23 @@ struct RecordingFileStore {
         try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
     }
 
-    /// 固定格式 `录屏_yyyy-MM-dd_HH-mm-ss.<ext>`，本地时区/日历下与 DateComponents 构造可往返。
-    static func fileName(for date: Date, extension ext: String = "mp4") -> String {
+    /// 固定格式 `<prefix>_yyyy-MM-dd_HH-mm-ss.<ext>`，本地时区/日历下与 DateComponents
+    /// 构造可往返。`prefix` 缺省「录屏」（既有调用方零改动）；截图（Q1）传「截图」产出
+    /// `截图_….png` 名。
+    static func fileName(for date: Date, extension ext: String = "mp4", prefix: String = "录屏") -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.calendar = .current
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        return "录屏_\(formatter.string(from: date)).\(ext)"
+        return "\(prefix)_\(formatter.string(from: date)).\(ext)"
     }
 
     /// 返回当前不存在的文件 URL；同名冲突时追加 " (2)" 并递增（后缀保持参数扩展名）。
     /// 不创建目录或文件。`extension` 缺省 "mp4"（既有调用方零改动）；仅声音录制（P7a）
-    /// 传 "m4a" 产出 `.m4a` 名。
-    func nextFileURL(now: Date = Date(), extension ext: String = "mp4") -> URL {
-        let baseName = Self.fileName(for: now, extension: ext)
+    /// 传 "m4a" 产出 `.m4a` 名。`prefix` 缺省「录屏」（Q1）：截图传「截图」产出
+    /// `截图_….png` 名，同名冲突同样 " (2)" 递增。
+    func nextFileURL(now: Date = Date(), extension ext: String = "mp4", prefix: String = "录屏") -> URL {
+        let baseName = Self.fileName(for: now, extension: ext, prefix: prefix)
         let stem = (baseName as NSString).deletingPathExtension
         let ext = (baseName as NSString).pathExtension
 

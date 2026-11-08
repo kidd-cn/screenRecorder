@@ -92,10 +92,13 @@ private final class SpyNotifier: RecordingNotifying {
     var savedURLs: [URL] = []
     var failureMessages: [String] = []
     var warningCount = 0
+    /// Q1 截图通知 stub：仅记录调用使套件可编译（截图编排无头不可钉，本文件不断言）。
+    var screenshotURLs: [URL] = []
 
     func notifySaved(fileURL: URL) { savedURLs.append(fileURL) }
     func notifyFailure(message: String) { failureMessages.append(message) }
     func notifyDiskSpaceWarning() { warningCount += 1 }
+    func notifyScreenshotSaved(fileURL: URL) { screenshotURLs.append(fileURL) }
 }
 
 // MARK: - 状态机测试（brief Step 1 场景逐条 + 生命周期边界）

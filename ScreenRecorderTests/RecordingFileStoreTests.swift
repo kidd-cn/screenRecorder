@@ -135,6 +135,22 @@ final class RecordingFileStoreTests: XCTestCase {
                        "冲突递增后缀保持参数扩展名")
     }
 
+    // MARK: - Q1 截图命名（prefix 参数）
+
+    /// Q1：`fileName` prefix 参数——截图传 "截图" 产出 `截图_…png`；缺省 prefix 行为
+    /// 不变（既有用例回归，此处同断言钉住）。
+    func testFileNameSupportsPrefix() {
+        XCTAssertEqual(
+            RecordingFileStore.fileName(for: Self.fixedDate, extension: "png", prefix: "截图"),
+            "截图_2026-10-25_14-30-05.png",
+            "截图 prefix 产出「截图_…」名")
+
+        XCTAssertEqual(
+            RecordingFileStore.fileName(for: Self.fixedDate),
+            "录屏_2026-10-25_14-30-05.mp4",
+            "缺省 prefix 行为不变（既有调用方零改动）")
+    }
+
     // MARK: - Q4 移出列表（记账不删文件）
 
     /// 内存版 RemovedListStore 夹具：集合存内存盒，write 收到的集合逐次留痕

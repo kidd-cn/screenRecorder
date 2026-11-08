@@ -329,6 +329,88 @@ final class AppAssembly: ObservableObject {
         startRecording(mode: .cameraOnly)
     }
 
+    // MARK: 截图（Q1：区域拖框 / 整屏，PNG 落输出目录+通知，不入列表）
+
+    /// 菜单「截图 → 区域截图…」入口：屏解析与选区交互照抄区域录制入口（遮罩落在当前
+    /// 鼠标所在显示器、回退主屏；RegionSelector 产出显示器全局 points rect 或 nil）。
+    /// nil（ESC / 点击无拖动 / 目标屏不在位）= 静默放弃——无文件、无通知。
+    func takeRegionScreenshot() {
+        Task { @MainActor in
+            // 菜单项已按状态置灰，此 guard 兜非菜单路径：选区遮罩不得在录制中途弹出
+            //（同 startRegionRecording 纪律）。
+            guard controller.state == .idle else {
+                NSLog("ScreenshotMenu: 忽略区域截图入口（当前状态非 idle：\(controller.state)）")
+                return
+            }
+            let displayID = Self.regionAnchorDisplayID() ?? CGMainDisplayID()
+            guard let rect = await RegionSelector.selectRegion(on: displayID) else { return }
+            await takeScreenshot(displayID: displayID, regionInGlobalPoints: rect)
+        }
+    }
+
+    /// 菜单「截图 → 全屏截图」入口（显示器列表子菜单项，数据源与命名同「开始录制 → 全屏」）。
+    func takeFullScreenScreenshot(on displayID: CGDirectDisplayID) {
+        Task { @MainActor in
+            await takeScreenshot(displayID: displayID, regionInGlobalPoints: nil)
+        }
+    }
+
+    /// 截图编排（Q1 Produces）：CGDisplayCreateImage 取帧 → ScreenshotCore 裁剪 → PNG
+    /// 写盘（`截图_yyyy-MM-dd_HH-mm-ss.png`，冲突 " (2)"；截图不入文件列表——contents()
+    /// 只列 mp4/m4a，无需改动）→ 成功通知。`regionInGlobalPoints` nil = 整屏（显示器
+    /// bounds 作 region，经同一裁剪路径零特判）。
+    /// 失败纪律：取帧/裁剪/编码/写盘任何一步失败只 NSLog 静默（截图是尽力而为副通道，
+    /// 不弹窗不打断），仅成功发通知。取帧时机：`selectRegion` 返回时覆盖层已 orderOut
+    ///（session finish 先摘窗再回调），此处再留一次短暂让步（brief 认可的工程缓解）——
+    /// 防窗口服务器合成滞后把遮罩残影拍进整屏图（全屏路径无遮罩，让步无害）。
+    func takeScreenshot(displayID: CGDirectDisplayID, regionInGlobalPoints: CGRect?) async {
+        // 菜单项已按状态置灰，此 guard 兜非菜单路径：截图不与录制会话并发。
+        guard controller.state == .idle else {
+            NSLog("Screenshot: 忽略截图入口（当前状态非 idle：\(controller.state)）")
+            return
+        }
+        let bounds = CGDisplayBounds(displayID)
+        guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else {
+            NSLog("Screenshot: 显示器 %u bounds 不可得，放弃截图", displayID)
+            return
+        }
+        let region = regionInGlobalPoints ?? bounds
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        // 审查 Minor#2（fail-safe 一行）：settle 等待窗口内用户可能经全局热键/定时起录
+        //——取帧前复检状态，截图绝不与录制会话并发（菜单置灰 + 入口守卫之外第三道闸）。
+        guard controller.state == .idle else {
+            NSLog("Screenshot: settle 后状态已非 idle（被并发起录抢先），放弃截图")
+            return
+        }
+        guard let frame = CGDisplayCreateImage(displayID) else {
+            NSLog("Screenshot: 显示器 %u 取帧失败，放弃截图", displayID)
+            return
+        }
+        guard let cropped = ScreenshotCore.crop(
+            frame,
+            displayOrigin: bounds.origin,
+            displayPointSize: bounds.size,
+            regionInGlobalPoints: region)
+        else {
+            NSLog("Screenshot: 裁剪失败（region=\(String(describing: regionInGlobalPoints)) bounds=\(bounds)），放弃截图")
+            return
+        }
+        guard let png = ScreenshotCore.pngData(cropped) else {
+            NSLog("Screenshot: PNG 编码失败，放弃截图")
+            return
+        }
+        try? fileStore.ensureDirectory()
+        let url = fileStore.nextFileURL(extension: "png", prefix: "截图")
+        do {
+            try png.write(to: url)
+        } catch {
+            NSLog("Screenshot: 截图写盘失败（\(url.path)）：\(error)")
+            return
+        }
+        NSLog("Screenshot: 截图已保存 \(url.lastPathComponent)")
+        notifier.notifyScreenshotSaved(fileURL: url)
+    }
+
     /// 唯一的开始装配点：持久化「上次使用的模式」（裁定 2：每次开始都记）→ 建输出目录 →
     /// 从 SettingsStore 快照装配 config → 进入控制器状态机（快照语义：录制中途改设置
     /// 不影响进行中的录制）。控制器自守卫（非 `.idle` 一律 no-op），此处不重复判态。
@@ -1194,6 +1276,8 @@ struct ScreenRecorderApp: App {
                 onStartWindowRegion: { assembly.startWindowRegionRecording() },
                 onStartAudioOnly: { assembly.startAudioOnlyRecording() },
                 onStartCameraOnly: { assembly.startCameraOnlyRecording() },
+                onTakeRegionScreenshot: { assembly.takeRegionScreenshot() },
+                onTakeFullScreenScreenshot: { assembly.takeFullScreenScreenshot(on: $0) },
                 onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenScheduledPanel: { assembly.openScheduledRecordingPanel() },
                 onCancelScheduled: { assembly.scheduler.cancel() },

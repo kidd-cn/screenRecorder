@@ -11,6 +11,12 @@ final class UNRecordingNotifier: RecordingNotifying {
         post(title: "录制完成", body: "已保存：\(fileURL.lastPathComponent)")
     }
 
+    /// Q1：截图已保存通知（「截图已保存 / 已保存：<文件名>」）——同 notifySaved 纪律的
+    /// 尽力而为副通道；仅成功路径调用（失败静默 NSLog，装配层自理）。
+    func notifyScreenshotSaved(fileURL: URL) {
+        post(title: "截图已保存", body: "已保存：\(fileURL.lastPathComponent)")
+    }
+
     func notifyFailure(message: String) {
         post(title: "录制出现问题", body: message)
     }
