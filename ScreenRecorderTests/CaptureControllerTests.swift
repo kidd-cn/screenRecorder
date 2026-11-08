@@ -913,6 +913,23 @@ final class CaptureControllerTests: XCTestCase {
         XCTAssertFalse(monitor.isActive, "收尾钩子已摘除监视器")
     }
 
+    // MARK: - Task 3 摄像头断源（用户裁决 (a)：失败文案归类钉死）
+
+    /// failureMessage 既有渲染链直接消费 LocalizedError——CameraSourceLostError 必须归类为
+    /// 「录制中断」语义（非权限族引导）+「已自动保存」（savedFile 非 nil）+ errorDescription
+    /// 原文入「原因」段。归类错位（如误入权限重启引导文案）在此钉死。
+    func testFailureMessageForCameraSourceLostMentionsAutoSave() {
+        let controller = makeController(countdownSeconds: 0)
+        let url = tempDirectory.appendingPathComponent("camera-sourceloss.mp4")
+
+        let message = controller.failureMessage(for: CameraSourceLostError(), savedFile: url)
+
+        XCTAssertTrue(message.contains("录制中断"), "断源属会话中断语义（非权限引导），实际：\(message)")
+        XCTAssertTrue(message.contains("已自动保存"), "自动保存语义必须入文案（用户裁决 (a)），实际：\(message)")
+        XCTAssertTrue(message.contains("前置摄像头已断开或停止出帧"),
+                      "errorDescription 必须原样进入原因段，实际：\(message)")
+    }
+
     // MARK: - T18 麦克风路由观察器（录制期观察 / 收尾摘除）
 
     func testRouteWatcherLifecycleTiedToRecording() async {

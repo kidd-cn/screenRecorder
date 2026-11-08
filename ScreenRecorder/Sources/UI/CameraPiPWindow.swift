@@ -120,6 +120,11 @@ final class CameraPiPWindowController {
     /// 浮条避让锚点数据源（装配层喂数；nil = 无浮条信息，不做避让）。
     var controlBarFrameProvider: (() -> CGRect?)?
 
+    /// 摄像头断源接线缝（Task 3，用户裁决 (a)；装配层 init 注入一次）：beginRecording
+    /// 成功装配后转发给 `camera.onSourceLost`，endRecording 置 nil——会话边界与会话闸
+    /// 一致；stop 后控制器侧 armed 闸已摘，在途投递经 nil 吸收，不越过会话边界。
+    var onCameraSourceLost: (() -> Void)?
+
     private let camera: CameraPiPController
     private let windowFactory: () -> CameraPiPWindow
     private let startCamera: (CameraPiPController) throws -> Void
@@ -163,6 +168,16 @@ final class CameraPiPWindowController {
             NSLog("CameraPiP: \(error.localizedDescription)")
             return
         }
+        // 断源转发缝接线（Task 3）：camera.onSourceLost → 装配层 onCameraSourceLost。
+        // 控制器侧投递契约保证主线程，`MainActor.assumeIsolated` 直进主 actor 读缝
+        //（CaptureController click tracker 回调同款桥接）；start 失败降级路径不接线
+        //（无会话无断源），下一场 begin 重挂。
+        camera.onSourceLost = { [weak self] in
+            guard let self else { return }
+            MainActor.assumeIsolated {
+                self.onCameraSourceLost?()
+            }
+        }
         frameStore.setGeometry(geometry)
         // 每场开始复位屏幕为主（spec §3.1 会话级布尔）：上一场遗留的对调态不得带进新场。
         frameStore.setLayoutSwapped(false)
@@ -183,6 +198,7 @@ final class CameraPiPWindowController {
     /// 停摄像头 + 清拖动锚点（video 队列侧立即回到纯屏幕直通）。
     func endRecording() {
         isRecordingActive = false
+        onCameraSourceLost = nil // 断源接线缝随会话收起（会话闸一致；在途投递被 nil 吸收）
         camera.previewFramePresenter = nil
         window?.setPreviewOverlayVisible(false)
         window?.updatePreviewOverlayImage(nil)

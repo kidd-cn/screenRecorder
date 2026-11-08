@@ -36,6 +36,12 @@ struct AppSourceLostError: LocalizedError {
     }
 }
 
+/// 摄像头源丢失错误（pip-swap 批，用户裁决 (a)）：录制中摄像头断源 → 会话级失败
+/// 自动保存（同屏幕丢源收场语义）。
+struct CameraSourceLostError: LocalizedError {
+    var errorDescription: String? { "前置摄像头已断开或停止出帧" }
+}
+
 /// 源丢失监视器（Task 18）：录制期监听显示器断连，被采集显示器消失时经 `onSourceLost`
 /// 通知装配层走 `CaptureController.handleSessionFailure` 自动保存路径（成片保留 + 「录制
 /// 已自动保存」通知）。匹配语义（裁定 2）：display/region 模式按被采集 displayID 精确匹配；

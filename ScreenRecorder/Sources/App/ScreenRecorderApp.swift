@@ -222,6 +222,13 @@ final class AppAssembly: ObservableObject {
         cameraPiP.controlBarFrameProvider = { [weak floatingBarPanel] in
             floatingBarPanel.map { $0.screenFrame }
         }
+        // 摄像头断源（Task 3，用户裁决 (a)）：命中 → 会话失败自动保存（同屏幕丢源收场
+        // 语义：成片保留 +「录制中断」通知）。控制器侧保证主线程投递，闭包内跳主 actor
+        //（同文件 SourceLossMonitor 闭包同风格）；[weak controller] 防 controller → session
+        //（coordinator）→ cameraPiP → 闭包保留环（终审 F4 同款纪律）。
+        cameraPiP.onCameraSourceLost = { [weak controller] in
+            Task { @MainActor in controller?.handleSessionFailure(CameraSourceLostError()) }
+        }
         // 倒计时覆盖层：ESC/点击出口接 cancelAndDiscard（回 idle 且不 begin）——覆盖层不自行改状态，
         // hide 由状态离开 .countdown 收束。
         self.countdownOverlay = CountdownOverlayController(

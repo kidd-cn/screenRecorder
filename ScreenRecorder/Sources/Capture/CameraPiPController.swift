@@ -119,6 +119,46 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private var pendingFrameSlot: CVPixelBuffer?
     private var pendingTicketSlot: ProcessingTicket?
 
+    // MARK: 断源看门狗（Task 3，spec §3.4 用户裁决 (a)：摄像头断源 → 会话级失败自动保存）
+
+    /// 断源检测（spec §3.4 用户裁决 (a)）：帧新鲜度看门狗——最后帧到达后 `sourceLossThreshold`
+    /// 秒（3s，宁晚报不误杀）仍无新帧即判定断源，fire-once 闩 + 主线程投递（SourceLossMonitor
+    /// deliverOnSourceLost 同型契约）。看门狗 1s 节拍（utility 队列 DispatchSourceTimer，
+    /// SourceLossMonitor appPollTimer 同款）；start 成功武装、stop 摘除并复位。
+    /// 暂停期摄像头会话照常出帧（SCStreamRecorder 暂停门在其下游），看门狗不误发。
+    /// 误差声明：断开与触发之间 ≤ threshold + 1s 节拍的成片持最后帧，属检测延迟非设计冻结。
+    static let sourceLossThreshold: TimeInterval = 3
+    static let sourceLossWatchdogInterval: TimeInterval = 1
+
+    /// 决策纯函数（internal 无头钉测缝）。
+    static func shouldFireCameraSourceLost(secondsSinceLastFrame: TimeInterval,
+                                           threshold: TimeInterval,
+                                           alreadyFired: Bool) -> Bool {
+        !alreadyFired && secondsSinceLastFrame >= threshold
+    }
+
+    /// 测试缝：看门狗时钟（生产 = 系统运行时长）。测试注入可推进的假时钟做帧停判定
+    ///（frontCameraProvider 等测试缝同风格；读点在 video/节拍/lifecycle 队列）。
+    var nowProvider: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+
+    /// 断源回调（frameLock 保护；装配层经 window controller 注入；主线程投递契约同
+    /// SourceLossMonitor.deliverOnSourceLost——主线程内联 / 非主线程主队列跳转）。
+    var onSourceLost: (() -> Void)? {
+        get { frameLock.withStateLock { onSourceLostStorage } }
+        set { frameLock.withStateLock { onSourceLostStorage = newValue } }
+    }
+    private var onSourceLostStorage: (() -> Void)?
+
+    /// 看门狗状态（frameLock 保护，与 latestFrame 同锁无竞态）：最后帧到达时刻 /
+    /// 武装时刻（武装后从未出帧的判定基点）/ fire-once 闩 / 1s 节拍 timer。
+    private var lastFrameArrival: TimeInterval?
+    private var watchdogArmedAt: TimeInterval?
+    private var watchdogFired = false
+    private var watchdogTimer: DispatchSourceTimer?
+    /// 看门狗节拍队列（utility，SourceLossMonitor appPollQueue 同款）。
+    private let watchdogQueue = DispatchQueue(
+        label: "screenRecorder.CameraPiP.watchdog", qos: .utility)
+
     /// 预览层（`start()` 成功后非 nil；浮窗安装，浮窗负责 frame 与圆角裁切）。
     private(set) var previewLayer: AVCaptureVideoPreviewLayer?
 
@@ -206,6 +246,8 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
         guard session.isRunning else {
             throw CameraPiPError.sessionDidNotStart
         }
+        // 断源看门狗武装（Task 3）：仅成功路径（降级抛错路径无会话无可监视的帧流）。
+        armSourceLossWatchdog()
     }
 
     /// 装配决策（internal 供无头测试钉住半装配修复，修复轮 Minor #1）：按会话现状缺哪部分
@@ -268,8 +310,78 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
             pendingFrameSlot = nil
             pendingTicketSlot = nil
             processingInFlight = false
+            // 断源看门狗摘除（Task 3，会话边界复位三状态 + 摘 timer）：cancel 线程安全
+            //（SourceLossMonitor.stop 同款，不内联进本锁），在途节拍由 armed 闸吸收；
+            // `onSourceLost` 不动——由 window controller 管理会话边界。
+            watchdogTimer?.cancel()
+            watchdogTimer = nil
+            watchdogArmedAt = nil
+            watchdogFired = false
+            lastFrameArrival = nil
         }
         previewLayer = nil // 浮窗已由装配层收起；下次录制重新安装
+    }
+
+    // MARK: 断源看门狗运行（Task 3：帧新鲜度判定 + fire-once + 主线程投递）
+
+    /// 看门狗武装（lifecycle 队列；`startOnLifecycleQueue` 成功路径 startRunning 之后调用）。
+    /// internal：无头测试进程不得触真摄像头会话（`start()` 走不到 startRunning 成功点），
+    /// 生命周期钉测直接驱动本生产入口——与 start 成功路径共用同一方法（CameraPiPTests
+    /// 断源看门狗组）；stop 侧摘除走真实 `stop()` 路径钉住（测试内 FIFO 排序技巧）。
+    func armSourceLossWatchdog() {
+        let timer = DispatchSource.makeTimerSource(queue: watchdogQueue)
+        timer.setEventHandler { [weak self] in self?.handleWatchdogTick() }
+        timer.schedule(deadline: .now() + Self.sourceLossWatchdogInterval,
+                       repeating: Self.sourceLossWatchdogInterval)
+        let now = nowProvider()
+        frameLock.withStateLock {
+            watchdogTimer?.cancel() // 防御性重武装（正常时序 stop 先摘）；cancel 线程安全
+            watchdogArmedAt = now   // 武装后从未出帧 = 从武装时刻起算（判定基点）
+            watchdogFired = false
+            lastFrameArrival = nil
+            watchdogTimer = timer
+        }
+        timer.resume() // 状态就位后再放行——首拍必见完整武装态
+    }
+
+    /// 看门狗节拍（watchdog 队列）→ 与测试缝同一判定路径。
+    private func handleWatchdogTick() {
+        evaluateWatchdogTick()
+    }
+
+    /// 测试缝（simulateDisplayRemoved 同型）：同步跑与生产节拍完全相同的判定与投递路径。
+    func watchdogTickForTesting() {
+        evaluateWatchdogTick()
+    }
+
+    /// 判定 + fire-once 闩（锁内裁决）：有效最近帧时刻 = `lastFrameArrival ?? watchdogArmedAt`
+    ///（武装后从未出帧 = 从武装时刻起算）→ 纯决策命中 → 锁内置闩 → 主线程投递。
+    /// armed 闸吸收 stop 摘除后仍在途的节拍（SourceLossMonitor armed 闸同款）。
+    private func evaluateWatchdogTick() {
+        let now = nowProvider()
+        let shouldFire: Bool = frameLock.withStateLock { () -> Bool in
+            guard let armedAt = watchdogArmedAt else { return false } // armed 闸
+            guard Self.shouldFireCameraSourceLost(
+                secondsSinceLastFrame: now - (lastFrameArrival ?? armedAt),
+                threshold: Self.sourceLossThreshold,
+                alreadyFired: watchdogFired) else { return false }
+            watchdogFired = true
+            return true
+        }
+        guard shouldFire else { return }
+        deliverOnSourceLost()
+    }
+
+    /// 投递契约（SourceLossMonitor.deliverOnSourceLost 同型）：主线程内联同步执行，非主
+    /// 线程主队列跳转，保证 `onSourceLost` 固定主线程（装配层闭包内再跳主 actor 进控制器）。
+    private func deliverOnSourceLost() {
+        let handler = frameLock.withStateLock { onSourceLostStorage }
+        guard let handler else { return }
+        if Thread.isMainThread {
+            handler()
+        } else {
+            DispatchQueue.main.async(execute: handler)
+        }
     }
 
     // MARK: AVCaptureVideoDataOutputSampleBufferDelegate
@@ -283,9 +395,15 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     }
 
     /// 帧入口收敛点（internal 供无头测试直接驱动——AVCaptureOutput/Connection 形参无法在
-    /// 无头测试进程构造）：按处理器在位与否分流旁路/处理流水线。
+    /// 无头测试进程构造）：按处理器在位与否分流旁路/处理流水线。断源看门狗的帧新鲜度
+    /// 在本入口统一记（Task 3：两条路径——旁路/处理流水线——共用本入口，一次锁段完成
+    /// 记时刻 + 读处理器，锁段数与 BASE 持平）。
     func handleDeliveredFrame(_ sampleBuffer: CMSampleBuffer) {
-        guard let processor = backgroundProcessor else {
+        let processor: CameraBackgroundProcessor? = frameLock.withStateLock {
+            lastFrameArrival = nowProvider()
+            return backgroundProcessorStorage
+        }
+        guard let processor else {
             recordFrameIfNeeded(sampleBuffer)
             return
         }

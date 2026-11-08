@@ -215,6 +215,113 @@ final class CameraPiPControllerTests: XCTestCase {
         wait(for: [expectation], timeout: 10)
     }
 
+    // MARK: 断源看门狗（Task 3，用户裁决 (a)：帧停超阈值 → onSourceLost → 会话失败自动保存）
+
+    /// 决策纯函数矩阵（无头钉测）：超阈值且未闩 → true；<阈值 → false；已闩 → false
+    ///（fire-once）；阈值边界取等即触发（宁晚报不误杀的收敛点）。
+    func testShouldFireCameraSourceLostDecisionMatrix() {
+        XCTAssertTrue(CameraPiPController.shouldFireCameraSourceLost(
+            secondsSinceLastFrame: 3.1, threshold: 3, alreadyFired: false),
+            "超阈值且未闩必须触发")
+        XCTAssertTrue(CameraPiPController.shouldFireCameraSourceLost(
+            secondsSinceLastFrame: 3, threshold: 3, alreadyFired: false),
+            "阈值边界取等即触发")
+        XCTAssertFalse(CameraPiPController.shouldFireCameraSourceLost(
+            secondsSinceLastFrame: 2.9, threshold: 3, alreadyFired: false),
+            "未到阈值不得触发")
+        XCTAssertFalse(CameraPiPController.shouldFireCameraSourceLost(
+            secondsSinceLastFrame: 30, threshold: 3, alreadyFired: true),
+            "fire-once 闩：已上报不得重复触发")
+    }
+
+    /// 看门狗生命周期（武装经生产武装入口驱动——无头测试进程不得触真摄像头会话，
+    /// `start()` 走不到 startRunning 成功点；`armSourceLossWatchdog` 与 startOnLifecycleQueue
+    /// 成功路径共用同一方法，tick 缝与生产 1s 节拍跑同一判定，见实现侧注释）：
+    /// 最后一帧到达后 4s 无新帧 → tick 恰回调一次；再 tick 不重复（fire-once 闩）。
+    func testWatchdogFiresAfterFrameStall() throws {
+        let controller = CameraPiPController()
+        var now: TimeInterval = 1000
+        controller.nowProvider = { now }
+        var fireCount = 0
+        controller.onSourceLost = { fireCount += 1 }
+        controller.armSourceLossWatchdog()
+        // 最后一帧到达（与武装同时刻），随后推进 4s 无新帧：超 3s 阈值
+        controller.handleDeliveredFrame(try XCTUnwrap(
+            makeSampleBuffer(try XCTUnwrap(
+                makeColorBuffer(width: 8, height: 8, blue: 1, green: 2, red: 3, alpha: 4)))))
+        now += 4
+        controller.watchdogTickForTesting()
+        XCTAssertEqual(fireCount, 1, "断源超阈值必须恰回调一次")
+        controller.watchdogTickForTesting()
+        XCTAssertEqual(fireCount, 1, "fire-once 闩：重复 tick 不得重复回调")
+    }
+
+    /// 持续出帧期间多次 tick 必须保持沉默——帧新鲜度随到帧不断刷新，永不超阈值
+    ///（`handleDeliveredFrame` 路径喂帧，仿 testLatestPixelBufferTracksLastDeliveredFrame 构造）。
+    func testWatchdogStaysSilentWhileFramesArrive() throws {
+        let controller = CameraPiPController()
+        var now: TimeInterval = 1000
+        controller.nowProvider = { now }
+        var fireCount = 0
+        controller.onSourceLost = { fireCount += 1 }
+        controller.armSourceLossWatchdog()
+        for _ in 0..<10 {
+            now += 1 // 与看门狗 1s 节拍同速推进；每秒一帧，远快于 3s 阈值
+            controller.handleDeliveredFrame(try XCTUnwrap(
+                makeSampleBuffer(try XCTUnwrap(
+                    makeColorBuffer(width: 8, height: 8, blue: 1, green: 1, red: 1, alpha: 255)))))
+            controller.watchdogTickForTesting()
+        }
+        XCTAssertEqual(fireCount, 0, "持续出帧期间看门狗必须保持沉默")
+    }
+
+    /// stop 摘除武装并复位三状态：stop 后 tick 不回调（armed 闸吸收在途节拍）；重新武装
+    ///（= 重新 start 成功路径）后旧闩已复位，新会话可再次触发。
+    func testWatchdogResetsOnStop() throws {
+        let controller = CameraPiPController()
+        // FIFO 排序缝（testStartObservesTeardownOfPreviouslySubmittedStop 同款）：显式降级的
+        // start 既不触碰看门狗（武装只在 startRunning 成功路径），又以 lifecycle 队列同步
+        // 返回保证此前提交的 stop 清理必已完成。
+        controller.authorizationStatus = { _ in .authorized }
+        controller.isFrontCameraConnected = { false }
+        var now: TimeInterval = 1000
+        controller.nowProvider = { now }
+        var fireCount = 0
+        controller.onSourceLost = { fireCount += 1 }
+        controller.armSourceLossWatchdog()
+        now += 4
+        controller.watchdogTickForTesting()
+        XCTAssertEqual(fireCount, 1)
+
+        controller.stop() // 摘除在 lifecycle 串行队列异步完成
+        XCTAssertThrowsError(try controller.start(), "无前置摄像头应显式降级（排序缝）")
+        controller.watchdogTickForTesting()
+        XCTAssertEqual(fireCount, 1, "stop 摘除武装：armed 闸吸收在途节拍，不得回调")
+
+        controller.armSourceLossWatchdog()
+        now += 4
+        controller.watchdogTickForTesting()
+        XCTAssertEqual(fireCount, 2, "stop 复位三状态：旧闩不得阻断新会话再触发")
+    }
+
+    /// 投递契约（SourceLossMonitor.deliverOnSourceLost 同型）：非主线程 tick → 回调固定
+    /// 主线程（生产 = utility 节拍队列 tick）。
+    func testSourceLostDeliversOnMainThread() throws {
+        let controller = CameraPiPController()
+        var now: TimeInterval = 1000
+        controller.nowProvider = { now }
+        let deliveredOnMain = expectation(description: "onSourceLost 主线程投递")
+        controller.onSourceLost = {
+            XCTAssertTrue(Thread.isMainThread, "断源回调必须固定主线程投递")
+            deliveredOnMain.fulfill()
+        }
+        controller.armSourceLossWatchdog()
+        now += 4
+        let tickQueue = DispatchQueue(label: "pip.watchdog.tick.test") // 非主线程（生产同型）
+        tickQueue.async { controller.watchdogTickForTesting() }
+        wait(for: [deliveredOnMain], timeout: 10)
+    }
+
     // MARK: 夹具（无摄像头/无会话的样本缓冲）
 
     private func makeColorBuffer(width: Int, height: Int, blue: UInt8, green: UInt8, red: UInt8, alpha: UInt8) -> CVPixelBuffer? {
