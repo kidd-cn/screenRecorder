@@ -196,6 +196,27 @@ final class SettingsStore: ObservableObject {
         }
     }
 
+    /// 编辑导出后打开所在目录（Q6，opt-in 默认关）：**仅**缩放分段编辑器导出完成后，
+    /// 在 Finder 中定位并选中新成片。导出事件语义（VM 在导出完成时刻经缝读当前值——
+    /// 两次导出之间改偏好即时生效），非开录快照。
+    @Published var editorPostExportRevealInFinder: Bool {
+        didSet {
+            defaults.set(editorPostExportRevealInFinder,
+                         forKey: Self.editorPostExportRevealInFinderKey)
+        }
+    }
+
+    /// 编辑导出后删除原始文件（Q6，opt-in 默认关）：**仅**缩放分段编辑器导出完成后，
+    /// 删除被编辑的原始成片（草稿随删）。删除有三重校验（开关开 + 新成片在盘 + 字节
+    /// > 0——`PostExportActions.plan` 与生产删除缝两道独立闸，反目标「校验不过误删
+    /// 原始文件」），完成通知向用户注明已删。导出事件语义同上。
+    @Published var editorPostExportDeleteOriginal: Bool {
+        didSet {
+            defaults.set(editorPostExportDeleteOriginal,
+                         forKey: Self.editorPostExportDeleteOriginalKey)
+        }
+    }
+
     private let defaults: UserDefaults
 
     init(userDefaults: UserDefaults = .standard) {
@@ -263,6 +284,11 @@ final class SettingsStore: ObservableObject {
         // 落库野值原样保留、不回写，与 fps/countdown 同纪律）。
         self.recordingReminderIntervalHours = Self.normalizedRecordingReminderInterval(
             userDefaults.object(forKey: Self.recordingReminderIntervalHoursKey) as? Int)
+        // Q6：编辑导出后动作两开关（opt-in 默认关——绝不主动删用户文件；布尔无野值档位）。
+        self.editorPostExportRevealInFinder =
+            userDefaults.object(forKey: Self.editorPostExportRevealInFinderKey) as? Bool ?? false
+        self.editorPostExportDeleteOriginal =
+            userDefaults.object(forKey: Self.editorPostExportDeleteOriginalKey) as? Bool ?? false
     }
 
     private static let fpsKey = "fps"
@@ -288,6 +314,8 @@ final class SettingsStore: ObservableObject {
     private static let launchAtLoginKey = "launchAtLogin"
     private static let captureMouseCursorKey = "captureMouseCursor"
     private static let recordingReminderIntervalHoursKey = "recordingReminderIntervalHours"
+    private static let editorPostExportRevealInFinderKey = "editorPostExportRevealInFinder"
+    private static let editorPostExportDeleteOriginalKey = "editorPostExportDeleteOriginal"
 
     /// 合法帧率档位 30/60；越界/缺失回退 30（审查修复轮 1）。
     private static func normalizedFps(_ raw: Int?) -> Int {

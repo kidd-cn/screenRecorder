@@ -250,6 +250,97 @@ final class RecordingListViewModelTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: target.url.path),
                       "文件保留原地（记账不删文件）")
     }
+
+    // MARK: - Q6 编辑导出后动作（reveal / 删除原始文件，三重校验防误删；仅缩放渲染编排挂钩）
+
+    /// Q6 夹具：恒返回固定输出 URL 的假渲染缝，返回前落一个**非空**真实文件——VM 的
+    /// 输出现状取数（存在性/字节数，喂给纯函数 `PostExportActions.plan`）走生产同款
+    /// FileManager，测试以真实文件驱动（同 writeFakeRecordings 纪律，不另设统计缝）。
+    private final class NonEmptyFileZoomRenderer: ZoomRendering {
+        let outputURL: URL
+        init(outputURL: URL) { self.outputURL = outputURL }
+
+        func render(
+            sourceURL: URL, segments: [ZoomSegment], options: ExportVideoOptions,
+            progress: @escaping (Double) -> Void
+        ) async throws -> URL {
+            try Data("zoomed".utf8).write(to: outputURL)
+            return outputURL
+        }
+    }
+
+    /// prefs 双开 + 删除缝删成（返回 true）→ 执行顺序钉定（reveal 先于 delete，
+    /// Finder 焦点不被删除动作抢走）+ reveal 恒指向新成片 + delete 作用于原始成片
+    /// 且搭载草稿（`<成片>.zoomdraft.json`）+ 完成通知带 originalDeleted=true。
+    func testRenderZoomNotifiesOriginalDeletedTrue() async throws {
+        let originalName = "录屏_2026-11-08_09-00-00.mp4"
+        let originalURL = directory.appendingPathComponent(originalName)
+        try Data("raw".utf8).write(to: originalURL)
+        let outputURL = directory.appendingPathComponent("录屏_2026-11-08_09-00-00_缩放.mp4")
+
+        var eventLog: [String] = []
+        var revealCalls: [URL] = []
+        var deleteCalls: [(original: URL, draft: URL?)] = []
+        let spy = SpyExportNotifier()
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 42.0 },
+            notifier: spy,
+            zoomRenderer: NonEmptyFileZoomRenderer(outputURL: outputURL),
+            postExportPrefs: { (true, true) },
+            revealInFinder: { revealCalls.append($0); eventLog.append("reveal") },
+            deleteOriginalAndDraft: { original, draft in
+                deleteCalls.append((original, draft))
+                eventLog.append("delete")
+                return true
+            })
+        let item = makeItem(named: originalName)
+
+        await vm.renderZoom(
+            item, segments: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
+
+        XCTAssertEqual(eventLog, ["reveal", "delete"], "顺序钉定：reveal 在前执行")
+        XCTAssertEqual(revealCalls, [outputURL], "reveal 恒指向新成片")
+        XCTAssertEqual(deleteCalls.map(\.original), [originalURL], "delete 作用于原始成片")
+        XCTAssertEqual(
+            deleteCalls.first?.draft, RecordingListViewModel.draftURL(for: originalURL),
+            "草稿随 delete 搭载")
+        XCTAssertEqual(spy.completedURLs, [outputURL], "完成通知指向新成片")
+        XCTAssertEqual(
+            spy.completedOriginalDeleted, [true], "删除缝删成 → 通知载荷 originalDeleted=true")
+    }
+
+    /// 删除缝删败（返回 false——生产闭包校验不过/删除抛错的真实形态）→ 通知载荷
+    /// originalDeleted=false（不谎报已删），reveal 照常先行，完成通知照发。
+    func testRenderZoomNotifiesOriginalDeletedFalseWhenDeleteFails() async throws {
+        let originalName = "录屏_2026-11-08_10-00-00.mp4"
+        let originalURL = directory.appendingPathComponent(originalName)
+        try Data("raw".utf8).write(to: originalURL)
+        let outputURL = directory.appendingPathComponent("录屏_2026-11-08_10-00-00_缩放.mp4")
+
+        var deleteCallCount = 0
+        let spy = SpyExportNotifier()
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 42.0 },
+            notifier: spy,
+            zoomRenderer: NonEmptyFileZoomRenderer(outputURL: outputURL),
+            postExportPrefs: { (true, true) },
+            revealInFinder: { _ in },
+            deleteOriginalAndDraft: { _, _ in
+                deleteCallCount += 1
+                return false
+            })
+        let item = makeItem(named: originalName)
+
+        await vm.renderZoom(
+            item, segments: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
+
+        XCTAssertEqual(deleteCallCount, 1, "删除动作被计划并执行（校验在缝内失败）")
+        XCTAssertEqual(spy.completedURLs, [outputURL], "删除失败不吞完成通知")
+        XCTAssertEqual(
+            spy.completedOriginalDeleted, [false], "删除缝删败 → 通知载荷 originalDeleted=false")
+    }
 }
 
 // MARK: - P8 导出编排测试替身（T16）：ExportCore 为 enum 静态面不可替换，经缝注入假实现
@@ -299,8 +390,13 @@ private struct ThrowingExporter: ExportServing {
 @MainActor
 private final class SpyExportNotifier: ExportNotifying {
     var completedURLs: [URL] = []
+    /// 与 completedURLs 同序：每次完成通知的 originalDeleted 载荷（Q6）。
+    var completedOriginalDeleted: [Bool] = []
     var failureMessages: [String] = []
 
-    func notifyExportCompleted(fileURL: URL) { completedURLs.append(fileURL) }
+    func notifyExportCompleted(fileURL: URL, originalDeleted: Bool) {
+        completedURLs.append(fileURL)
+        completedOriginalDeleted.append(originalDeleted)
+    }
     func notifyExportFailed(message: String) { failureMessages.append(message) }
 }

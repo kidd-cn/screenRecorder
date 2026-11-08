@@ -133,6 +133,29 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(never.recordingReminderIntervalHours, 0)
     }
 
+    /// Q6：编辑导出后动作两开关默认关（opt-in——绝不主动删用户文件），翻转跨实例
+    /// 持久化、落库写回 false 再构造往返（UserDefaults，key =
+    /// editorPostExportRevealInFinder / editorPostExportDeleteOriginal；布尔无野值档位）。
+    func testEditorPostExportSwitchesDefaultOffAndPersist() {
+        let store = SettingsStore(userDefaults: defaults)
+        XCTAssertFalse(store.editorPostExportRevealInFinder, "默认不打开 Finder")
+        XCTAssertFalse(store.editorPostExportDeleteOriginal, "默认不删原始文件")
+
+        // 翻转为 true → 重新用同一 suite 构造 → 仍为 true（持久化）
+        store.editorPostExportRevealInFinder = true
+        store.editorPostExportDeleteOriginal = true
+        let reloaded = SettingsStore(userDefaults: defaults)
+        XCTAssertTrue(reloaded.editorPostExportRevealInFinder)
+        XCTAssertTrue(reloaded.editorPostExportDeleteOriginal)
+
+        // defaults 写回 false → 再构造 → false（往返）
+        defaults.set(false, forKey: "editorPostExportRevealInFinder")
+        defaults.set(false, forKey: "editorPostExportDeleteOriginal")
+        let roundTripped = SettingsStore(userDefaults: defaults)
+        XCTAssertFalse(roundTripped.editorPostExportRevealInFinder)
+        XCTAssertFalse(roundTripped.editorPostExportDeleteOriginal)
+    }
+
     /// 终审 F2：「录制中静音麦克风」持久化默认关，翻转跨实例往返。
     func testMicMutedDefaultsToFalseAndPersistsAcrossInstances() {
         let store = SettingsStore(userDefaults: defaults)

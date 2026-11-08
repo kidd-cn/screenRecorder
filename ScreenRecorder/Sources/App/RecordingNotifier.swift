@@ -61,9 +61,12 @@ final class UNRecordingNotifier: RecordingNotifying {
 
 extension UNRecordingNotifier: ExportNotifying {
     /// 导出完成（`notifySaved` 对称文案：「录制完成/已保存」→「导出完成/已保存」）——
-    /// 尽力而为副通道，同 post 纪律。
-    func notifyExportCompleted(fileURL: URL) {
-        post(title: "导出完成", body: "已保存：\(fileURL.lastPathComponent)")
+    /// 尽力而为副通道，同 post 纪律。Q6 文案钉定：`originalDeleted == true`（编辑导出
+    /// 后动作真删了原始文件）→ 正文追加「（原始文件已删除）」——删除必须向用户显名
+    ///（spec 安全纪律：用户不该在通知之后才发现原始文件没了）。
+    func notifyExportCompleted(fileURL: URL, originalDeleted: Bool) {
+        let suffix = originalDeleted ? "（原始文件已删除）" : ""
+        post(title: "导出完成", body: "已保存：\(fileURL.lastPathComponent)\(suffix)")
     }
 
     /// 导出失败（`notifyFailure` 对称：标题 Severity 类别「导出出现问题」，正文透传

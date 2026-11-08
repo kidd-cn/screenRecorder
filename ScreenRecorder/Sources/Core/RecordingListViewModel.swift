@@ -56,10 +56,12 @@ struct ExportCoreService: ExportServing {
 /// 导出通知缝（P8/T16）：完成/失败通知出口。生产实现接 `UNRecordingNotifier`（App 层
 /// extension，T11 新通知类型进 notifier 先例）；测试注入 spy——UNUserNotificationCenter
 /// 在无头测试进程不可用，必须可替换（同 `RecordingNotifying` 缝纪律）。通知是尽力而为
-/// 的副通道，成片落盘才是主契约。
+/// 的副通道，成片落盘才是主契约。Q6：完成通知携带 `originalDeleted`（编辑导出后动作
+/// 是否真的删了原始文件）——文案钉定 true 时正文追加「（原始文件已删除）」，删除必须
+/// 向用户显名（spec 安全纪律）。
 @MainActor
 protocol ExportNotifying: AnyObject {
-    func notifyExportCompleted(fileURL: URL)
+    func notifyExportCompleted(fileURL: URL, originalDeleted: Bool)
     func notifyExportFailed(message: String)
 }
 
@@ -94,6 +96,18 @@ final class RecordingListViewModel: ObservableObject {
     /// ——既有用例零改动。生产装配与 fileStore 注入**同一实例**（过滤在 store.contents()
     /// 读同一账本，记账与列表一致）。
     private let removedList: RemovedListStore
+    /// 编辑导出后动作三缝（Q6，均带缺省——既有用例零改动；仅 `renderZoom` 成功路径
+    /// 消费，GIF/压缩导出不挂钩）：
+    /// - `postExportPrefs`：**导出完成时刻**读偏好（导出事件语义，非开录快照——两次
+    ///   导出之间改偏好即时生效），返回（reveal 开关，删除原始开关）；
+    /// - `revealAction`：Finder 定位缝（生产 = NSWorkspace.activateFileViewerSelecting，
+    ///   恒指向新成片）；
+    /// - `deleteOriginalAndDraft`：删除缝——生产闭包在删除前**再做一道**存在 + 字节
+    ///   > 0 校验（纵深防御第二道，第一道在 `PostExportActions.plan`），删原始后草稿
+    ///   尽力而为随删；返回是否真的删了原始（完成通知 `originalDeleted` 载荷的真源）。
+    private let postExportPrefs: () -> (reveal: Bool, deleteOriginal: Bool)
+    private let revealAction: (URL) -> Void
+    private let deleteOriginalAndDraft: (URL, URL?) -> Bool
 
     /// 进行中导出代际（非 Published，主 actor 独占）：**单调递增、不复用**——进度 hop
     /// 的代际校验（见 `runExport`）；`defer` 出场即换代，本代结束后晚到的 hop 不得穿
@@ -120,7 +134,10 @@ final class RecordingListViewModel: ObservableObject {
         exportService: ExportServing = ExportCoreService(),
         notifier: ExportNotifying? = nil,
         zoomRenderer: ZoomRendering = OfflineZoomRendererService(),
-        removedList: RemovedListStore = RemovedListStore(read: { [] }, write: { _ in })
+        removedList: RemovedListStore = RemovedListStore(read: { [] }, write: { _ in }),
+        postExportPrefs: @escaping () -> (reveal: Bool, deleteOriginal: Bool) = { (false, false) },
+        revealInFinder: @escaping (URL) -> Void = { _ in },
+        deleteOriginalAndDraft: @escaping (URL, URL?) -> Bool = { _, _ in false }
     ) {
         self.storeProvider = storeProvider
         self.durationProvider = durationProvider
@@ -128,6 +145,9 @@ final class RecordingListViewModel: ObservableObject {
         self.notifier = notifier
         self.zoomRenderer = zoomRenderer
         self.removedList = removedList
+        self.postExportPrefs = postExportPrefs
+        self.revealAction = revealInFinder
+        self.deleteOriginalAndDraft = deleteOriginalAndDraft
     }
 
     /// 固定 store 便捷构造（既有测试与一次性场景）：取数缝恒返回该 store。
@@ -137,12 +157,16 @@ final class RecordingListViewModel: ObservableObject {
         exportService: ExportServing = ExportCoreService(),
         notifier: ExportNotifying? = nil,
         zoomRenderer: ZoomRendering = OfflineZoomRendererService(),
-        removedList: RemovedListStore = RemovedListStore(read: { [] }, write: { _ in })
+        removedList: RemovedListStore = RemovedListStore(read: { [] }, write: { _ in }),
+        postExportPrefs: @escaping () -> (reveal: Bool, deleteOriginal: Bool) = { (false, false) },
+        revealInFinder: @escaping (URL) -> Void = { _ in },
+        deleteOriginalAndDraft: @escaping (URL, URL?) -> Bool = { _, _ in false }
     ) {
         self.init(
             storeProvider: { store }, durationProvider: durationProvider,
             exportService: exportService, notifier: notifier, zoomRenderer: zoomRenderer,
-            removedList: removedList)
+            removedList: removedList, postExportPrefs: postExportPrefs,
+            revealInFinder: revealInFinder, deleteOriginalAndDraft: deleteOriginalAndDraft)
     }
 
     /// 重新扫描目录并补齐每条时长；读取失败按 nil 处理。store 在调用时刻经缝取当前值
@@ -268,7 +292,9 @@ final class RecordingListViewModel: ObservableObject {
         }
         do {
             let outputURL = try await plan.run(exportService, progress: forward)
-            notifier?.notifyExportCompleted(fileURL: outputURL)
+            // Q6 范围钉定：编辑导出后动作**仅挂缩放分段编辑器导出**（renderZoom）——
+            // GIF/压缩导出无原始文件删除语义（输出即唯一产物），originalDeleted 恒 false。
+            notifier?.notifyExportCompleted(fileURL: outputURL, originalDeleted: false)
         } catch {
             notifier?.notifyExportFailed(
                 message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
@@ -316,7 +342,11 @@ final class RecordingListViewModel: ObservableObject {
     ///   「**用**」前置闸不依赖调用方自律；
     /// - 进度 hop：T17 回调主线程外且严格递增——`@Sendable` 缝闭包内 `Task { @MainActor }`
     ///   写 `zoomRenderProgress`，代际校验丢晚到 hop，`max` 护 hop 重排（runExport 同款）；
-    /// - 成功：先 refresh（自动入列——按 `_压缩.mp4` 先例，T18 默认裁定）再完成通知；
+    /// - 成功：先 refresh（自动入列——按 `_压缩.mp4` 先例，T18 默认裁定）→ 编辑导出后
+    ///   动作（Q6：`PostExportActions.plan` 纯函数计划 → 按序执行 reveal → delete →
+    ///   完成通知携带 `originalDeleted`）→ 完成通知；输出现状（存在性/字节数）以生产
+    ///   同款 FileManager 现场取数喂 plan（计划面纯函数不做 IO）；删除动作的真删结果
+    ///   （delete 缝返回值）即通知载荷——谎报「已删」与「误删」同罪；
     ///   失败：errorDescription 透传通知缝（runExport 同纪律）。GIF/压缩导出进行中
     ///   （`exportInFlight`）时本入口直接忽略（互门——原「并发无害」停放项收口）；
     /// - 出场：defer 内 `zoomRenderRunID += 1` 换代——本代结束后晚到的 hop 被代际
@@ -345,7 +375,32 @@ final class RecordingListViewModel: ObservableObject {
                 sourceURL: item.url, segments: ZoomSegment.validate(segments),
                 options: options, progress: forward)
             await refresh() // 自动入列（成功产物立即可见；_压缩.mp4 先例）
-            notifier?.notifyExportCompleted(fileURL: outputURL)
+            // Q6 编辑导出后动作（仅本编排挂钩）：偏好**导出完成时刻**读缝（两次导出间
+            // 改偏好即时生效）→ 输出现状现场取数（存在性/字节数）→ 纯函数 plan（顺序
+            // 钉定 reveal 在前；delete 三重校验：开关开 && 在盘 && 字节 > 0）→ 按序执行
+            // → 完成通知携带 originalDeleted（= delete 缝是否真删了原始）。缺动作时
+            // 载荷恒 false，不谎报。
+            let prefs = postExportPrefs()
+            let fm = FileManager.default
+            let outputExists = fm.fileExists(atPath: outputURL.path)
+            let outputBytes = (try? fm.attributesOfItem(atPath: outputURL.path))
+                .flatMap { $0[.size] as? Int64 } ?? 0
+            let actions = PostExportActions.plan(
+                revealEnabled: prefs.reveal, deleteEnabled: prefs.deleteOriginal,
+                outputURL: outputURL, outputExists: outputExists, outputBytes: outputBytes,
+                originalURL: item.url, draftURL: Self.draftURL(for: item.url))
+            var originalDeleted = false
+            for action in actions {
+                switch action {
+                case .revealInFinder(let url):
+                    revealAction(url)
+                case .deleteOriginal(let original, let draft):
+                    if deleteOriginalAndDraft(original, draft) {
+                        originalDeleted = true
+                    }
+                }
+            }
+            notifier?.notifyExportCompleted(fileURL: outputURL, originalDeleted: originalDeleted)
         } catch {
             notifier?.notifyExportFailed(
                 message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)

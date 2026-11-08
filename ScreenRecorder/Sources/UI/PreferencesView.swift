@@ -89,7 +89,8 @@ struct PreferencesView: View {
 }
 
 /// 通用页：输出目录（NSOpenPanel 选择）、倒计时 0/3/5/10、帧率 30/60、编码 H.264/HEVC
-/// （HEVC 硬件编码器不可用时禁用并标注「需硬件编码器」）、长录提醒间隔 1/2/3 小时/从不（Q5）。
+/// （HEVC 硬件编码器不可用时禁用并标注「需硬件编码器」）、长录提醒间隔 1/2/3 小时/从不（Q5）、
+/// 编辑导出完成后动作组（Q6：Finder 定位 / 删除原始文件，均默认关，仅缩放分段编辑器导出挂钩）。
 private struct GeneralTab: View {
     @ObservedObject var settings: SettingsStore
     var onOutputDirectoryChange: (URL) -> Void
@@ -119,6 +120,13 @@ private struct GeneralTab: View {
             // P6a 开机自启：只有开关本身——副作用（SMAppService 注册/注销、失败回翻
             // + 失败通知）在装配层 sink（LaunchAtLoginCoordinator），视图不做装配副作用。
             Toggle("开机自启", isOn: $settings.launchAtLogin)
+            // Q6 编辑导出后动作（opt-in 默认关，仅缩放分段编辑器导出挂钩）：完成通知
+            // 之外的自动动作——Finder 定位新成片 / 删除原始文件（删除带三重校验：开关
+            // 开 + 新成片在盘 + 字节 > 0，防误删；删除会在完成通知中向用户注明）。
+            Section("编辑导出完成后（缩放分段编辑器）") {
+                Toggle("打开文件所在目录", isOn: $settings.editorPostExportRevealInFinder)
+                Toggle("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
+            }
         }
     }
 

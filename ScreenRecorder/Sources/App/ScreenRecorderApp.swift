@@ -737,7 +737,40 @@ final class AppAssembly: ObservableObject {
             //（viewModel 归列表窗口控制器，先于容器释放）。
             notifier: notifier,
             // Q4：移出记账缝与 fileStore 共用同一只账本实例（过滤/自愈与记账读同一账本）。
-            removedList: removedListStore)
+            removedList: removedListStore,
+            // Q6 编辑导出后动作三缝（仅编辑器导出挂钩，均在导出完成时刻执行）：
+            postExportPrefs: { [weak self] in
+                // 偏好**导出事件时刻**live 读（非开录快照——两次导出之间改偏好即时生效）。
+                (self?.settings.editorPostExportRevealInFinder ?? false,
+                 self?.settings.editorPostExportDeleteOriginal ?? false)
+            },
+            revealInFinder: { url in
+                // Finder 定位并选中（reveal 恒指向新成片；顺序钉定 reveal 先于删除执行
+                // ——Finder 焦点绝不被删除动作抢走）。
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            },
+            deleteOriginalAndDraft: { original, draft in
+                // 删除缝 = 纵深防御第二道闸（第一道在 PostExportActions.plan）：存在 +
+                // 字节 > 0 校验过了才动手删——反目标「任何校验不通过场景误删原始文件」
+                // 在执行侧独立成立。返回是否真删了原始（完成通知 originalDeleted 真源）。
+                let fm = FileManager.default
+                guard fm.fileExists(atPath: original.path) else { return false }
+                guard let attributes = try? fm.attributesOfItem(atPath: original.path),
+                      let size = attributes[.size] as? Int64, size > 0 else { return false }
+                do {
+                    try fm.removeItem(at: original)
+                } catch {
+                    NSLog("PostExport: 原始文件删除失败（\(original.path)）：\(error)")
+                    return false
+                }
+                // 草稿尽力而为随删（原始的派生物，不留孤儿草稿；删除失败绝不影响
+                // originalDeleted 语义——已删的原始是既成事实，草稿残留无害且下次编辑
+                // 会覆写）。
+                if let draft {
+                    try? fm.removeItem(at: draft)
+                }
+                return true
+            })
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 720, height: 420),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],

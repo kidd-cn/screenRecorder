@@ -509,13 +509,19 @@ private final class HopCaptureZoomRenderer: ZoomRendering, @unchecked Sendable {
         return forwardStorage
     }
 
+    /// 同步收拢加锁（NSLock.lock 在 async 函数体内直接调用为不可用诊断——
+    /// GatedZoomRenderer 同纪律；本文件重编译时零告警红线）。
+    private func captureForward(_ progress: @escaping (Double) -> Void) {
+        lock.lock()
+        forwardStorage = progress
+        lock.unlock()
+    }
+
     func render(
         sourceURL: URL, segments: [ZoomSegment], options: ExportVideoOptions,
         progress: @escaping (Double) -> Void
     ) async throws -> URL {
-        lock.lock()
-        forwardStorage = progress
-        lock.unlock()
+        captureForward(progress)
         return outputURL
     }
 }
@@ -525,6 +531,8 @@ private final class HopCaptureZoomRenderer: ZoomRendering, @unchecked Sendable {
 private final class SpyExportNotifier: ExportNotifying {
     private let lock = NSLock()
     private var completedURLsStorage: [URL] = []
+    /// 与 completedURLs 同序：每次完成通知的 originalDeleted 载荷（Q6）。
+    private var completedOriginalDeletedStorage: [Bool] = []
     private var failureMessagesStorage: [String] = []
 
     var completedURLs: [URL] {
@@ -533,15 +541,22 @@ private final class SpyExportNotifier: ExportNotifying {
         return completedURLsStorage
     }
 
+    var completedOriginalDeleted: [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return completedOriginalDeletedStorage
+    }
+
     var failureMessages: [String] {
         lock.lock()
         defer { lock.unlock() }
         return failureMessagesStorage
     }
 
-    func notifyExportCompleted(fileURL: URL) {
+    func notifyExportCompleted(fileURL: URL, originalDeleted: Bool) {
         lock.lock()
         completedURLsStorage.append(fileURL)
+        completedOriginalDeletedStorage.append(originalDeleted)
         lock.unlock()
     }
 
