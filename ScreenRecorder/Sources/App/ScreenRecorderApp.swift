@@ -459,6 +459,8 @@ final class AppAssembly: ObservableObject {
     /// 一个无源混音器）；麦克风照常（用户偏好，经 recorder 内部 AVAudioEngine mixer 可混）。
     /// 录制源摄像头不经 includeCamera——那是画中画叠加开关。Q2：鼠标光标显示开关
     /// 同为快照字段（SCStreamRecorder 据此设 showsCursor，仅 SCStream 视频路径消费）。
+    /// Q5：长录提醒间隔同为快照字段（控制器 start 消费，录制中改偏好不影响本场；
+    /// 全模式透传不门控——净录时长与画面模式无关，audioOnly/cameraOnly 同样提醒）。
     static func makeConfiguration(settings: SettingsStore, mode: CaptureMode, outputURL: URL) -> RecordingConfiguration {
         let audioOnly: Bool = if case .audioOnly = mode { true } else { false }
         let cameraOnly: Bool = if case .cameraOnly = mode { true } else { false }
@@ -478,7 +480,8 @@ final class AppAssembly: ObservableObject {
             autoZoomEnabled: !cameraOnly && settings.autoZoomEnabled,
             autoZoomLevel: settings.autoZoomLevel,
             clickSoundEnabled: !cameraOnly && settings.clickSoundEnabled,
-            captureMouseCursor: settings.captureMouseCursor // Q2：开录快照（SCStream 视频路径消费，audioOnly/cameraOnly 分支不设该键）
+            captureMouseCursor: settings.captureMouseCursor, // Q2：开录快照（SCStream 视频路径消费，audioOnly/cameraOnly 分支不设该键）
+            recordingReminderIntervalHours: settings.recordingReminderIntervalHours // Q5：开录快照（全模式透传，elapsed 模式无关）
         )
     }
 

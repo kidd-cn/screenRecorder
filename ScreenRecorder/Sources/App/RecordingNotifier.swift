@@ -25,6 +25,12 @@ final class UNRecordingNotifier: RecordingNotifying {
         post(title: "磁盘空间不足", body: "剩余空间偏低，录制可能即将中断并自动保存。")
     }
 
+    /// Q5：长录时长提醒（净录时长跨间隔整数倍恰一条，1/2/3h/从不）——同 notifySaved
+    /// 纪律的尽力而为副通道，授权被拒/投递失败静默跳过。
+    func notifyRecordingDurationReached(hours: Int) {
+        post(title: "长录提醒", body: "已录制 \(hours) 小时，请注意磁盘剩余容量。")
+    }
+
     /// P6a：开机自启注册/注销失败通知（开关已回翻，真实态优先于 UI 态）——同
     /// notifySaved 纪律的尽力而为副通道，授权被拒/投递失败静默跳过。
     func notifyLaunchAtLoginFailure(message: String) {

@@ -186,6 +186,16 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(captureMouseCursor, forKey: Self.captureMouseCursorKey) }
     }
 
+    /// 长录提醒间隔（Q5，单位小时；合法档位 0=从不/1/2/3，默认 1）：净录时长（不含暂停）
+    /// 跨设定间隔整数倍时提醒一条（每倍数恰一条）。开录快照语义（同诸开关——录制中改
+    /// 设置不影响进行中的录制，控制器 start 消费 config 快照）。
+    @Published var recordingReminderIntervalHours: Int {
+        didSet {
+            defaults.set(recordingReminderIntervalHours,
+                         forKey: Self.recordingReminderIntervalHoursKey)
+        }
+    }
+
     private let defaults: UserDefaults
 
     init(userDefaults: UserDefaults = .standard) {
@@ -249,6 +259,10 @@ final class SettingsStore: ObservableObject {
         }
         // Q2：录制鼠标光标显示（默认开 = 既有行为；布尔无野值档位）。
         self.captureMouseCursor = userDefaults.object(forKey: Self.captureMouseCursorKey) as? Bool ?? true
+        // Q5：长录提醒间隔（默认 1 小时）；档位载入野值钳回 1（init 内赋值不触发 didSet，
+        // 落库野值原样保留、不回写，与 fps/countdown 同纪律）。
+        self.recordingReminderIntervalHours = Self.normalizedRecordingReminderInterval(
+            userDefaults.object(forKey: Self.recordingReminderIntervalHoursKey) as? Int)
     }
 
     private static let fpsKey = "fps"
@@ -273,6 +287,7 @@ final class SettingsStore: ObservableObject {
     private static let windowCaptureTargetKey = "windowCaptureTarget"
     private static let launchAtLoginKey = "launchAtLogin"
     private static let captureMouseCursorKey = "captureMouseCursor"
+    private static let recordingReminderIntervalHoursKey = "recordingReminderIntervalHours"
 
     /// 合法帧率档位 30/60；越界/缺失回退 30（审查修复轮 1）。
     private static func normalizedFps(_ raw: Int?) -> Int {
@@ -301,6 +316,12 @@ final class SettingsStore: ObservableObject {
     /// 合法键帽停留时长档位 1/2/3 秒；越界/缺失回退 2（P4）。
     private static func normalizedKeyboardOverlayLingerSeconds(_ raw: Double?) -> Double {
         guard let raw, raw == 1 || raw == 2 || raw == 3 else { return 2 }
+        return raw
+    }
+
+    /// 合法长录提醒间隔档位 0（从不）/1/2/3 小时；越界/缺失回退 1（Q5）。
+    private static func normalizedRecordingReminderInterval(_ raw: Int?) -> Int {
+        guard let raw, [0, 1, 2, 3].contains(raw) else { return 1 }
         return raw
     }
 }

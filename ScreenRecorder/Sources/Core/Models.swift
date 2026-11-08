@@ -112,4 +112,8 @@ struct RecordingConfiguration {
     /// showsCursor，仅 SCStream 视频路径消费（audioOnly/cameraOnly 分支不设该键）。
     /// 缺省 true = 保持既有行为（光标默认入画）。
     var captureMouseCursor: Bool = true
+    /// 长录提醒间隔（Q5 开录快照语义，单位小时）：0 = 从不；1/2/3 = 净录时长（不含暂停）
+    /// 每满 N 小时提醒一条（每整数倍恰一条）。缺省 0——程序化构造（测试/未来后台路径）
+    /// 安全缺省，只有经 `makeConfiguration` 的设置侧路径才按用户偏好启用。
+    var recordingReminderIntervalHours: Int = 0
 }

@@ -22,6 +22,7 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 - **Countdown**: 0 / 3 / 5 / 10 s with an on-screen overlay, cancellable
 - **Scheduled recording**: start automatically at a chosen time (or in N minutes) with the last-used mode, with an optional duration cap that stops on time; a missed schedule (sleep) sends a follow-up notification with a "Start recording" action, and busy/locked sessions are skipped with a notice
 - **Screenshots**: a "Screenshots" menu in the menu bar — region rubber-band or full-screen (per-display), saved as PNG to the output directory (`截图_*.png`, never listed among recordings), with a system notification on success
+- **Long-recording reminder**: for every full interval of net recording time (pauses excluded) — 1 / 2 / 3 hours, or "never" — one notification fires; each integer multiple reminds exactly once per recording
 - **Launch at login**: one-click login item (SMAppService); a failed registration reverts the toggle and notifies
 - **Encoding**: H.264 / HEVC (hardware), 30 or 60 fps
 - **Interruption protection**: captured window closed or display unplugged → auto-save; recording survives lock; low disk space → auto-finalize the take

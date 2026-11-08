@@ -116,6 +116,23 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(roundTripped.captureMouseCursor)
     }
 
+    /// Q5：长录时长提醒间隔默认 1（小时），翻转落库跨实例持久化、「从不」档落库写回
+    /// 再构造往返（UserDefaults，key = recordingReminderIntervalHours；合法档位 0/1/2/3）。
+    func testRecordingReminderIntervalDefaultsOneAndPersists() {
+        let store = SettingsStore(userDefaults: defaults)
+        XCTAssertEqual(store.recordingReminderIntervalHours, 1, "默认 1 小时提醒一次")
+
+        // 翻转为 3 → 重新用同一 suite 构造 → 仍为 3（持久化）
+        store.recordingReminderIntervalHours = 3
+        let reloaded = SettingsStore(userDefaults: defaults)
+        XCTAssertEqual(reloaded.recordingReminderIntervalHours, 3)
+
+        // defaults 写回 0（从不）→ 再构造 → 0（往返）
+        defaults.set(0, forKey: "recordingReminderIntervalHours")
+        let never = SettingsStore(userDefaults: defaults)
+        XCTAssertEqual(never.recordingReminderIntervalHours, 0)
+    }
+
     /// 终审 F2：「录制中静音麦克风」持久化默认关，翻转跨实例往返。
     func testMicMutedDefaultsToFalseAndPersistsAcrossInstances() {
         let store = SettingsStore(userDefaults: defaults)

@@ -94,11 +94,14 @@ private final class SpyNotifier: RecordingNotifying {
     var warningCount = 0
     /// Q1 截图通知 stub：仅记录调用使套件可编译（截图编排无头不可钉，本文件不断言）。
     var screenshotURLs: [URL] = []
+    /// Q5 长录提醒 stub：按序记录每条提醒的小时数（恰一条语义按序列内容断言）。
+    var durationReachedHours: [Int] = []
 
     func notifySaved(fileURL: URL) { savedURLs.append(fileURL) }
     func notifyFailure(message: String) { failureMessages.append(message) }
     func notifyDiskSpaceWarning() { warningCount += 1 }
     func notifyScreenshotSaved(fileURL: URL) { screenshotURLs.append(fileURL) }
+    func notifyRecordingDurationReached(hours: Int) { durationReachedHours.append(hours) }
 }
 
 // MARK: - 状态机测试（brief Step 1 场景逐条 + 生命周期边界）
@@ -690,6 +693,106 @@ final class CaptureControllerTests: XCTestCase {
 
         XCTAssertTrue(intervals.snapshot.contains(0.5), "录制期 elapsed 计时器节拍应为 0.5s，实际：\(intervals.snapshot)")
         XCTAssertFalse(intervals.snapshot.contains(1.0), "elapsed 计时器不得复用倒计时节拍")
+    }
+
+    // MARK: - Q5 长录时长提醒（dueHour 纯函数钉测 + 会话挂点）
+
+    /// 纯函数钉测：intervalHours ≤ 0（从不）→ nil，任意 elapsed 不提醒。
+    func testDueHourNilForNeverInterval() {
+        XCTAssertNil(CaptureController.dueHour(elapsed: 0, intervalHours: 0, alreadyNotified: []))
+        XCTAssertNil(CaptureController.dueHour(elapsed: 3600, intervalHours: 0, alreadyNotified: []))
+        XCTAssertNil(CaptureController.dueHour(elapsed: 10_800, intervalHours: -1, alreadyNotified: [1, 2, 3]))
+    }
+
+    /// 纯函数钉测：1h 档阈值恰跨（3599 未跨 / 3600 跨 1 / 7200 跨 2）；已提醒倍数不重发，
+    /// 2.5h 会话内经 alreadyNotified 逐倍推进——1h 与 2h 各恰一条。
+    func testDueHourAtExactMultiples() {
+        XCTAssertNil(CaptureController.dueHour(elapsed: 3599, intervalHours: 1, alreadyNotified: []))
+        XCTAssertEqual(CaptureController.dueHour(elapsed: 3600, intervalHours: 1, alreadyNotified: []), 1)
+        XCTAssertEqual(CaptureController.dueHour(elapsed: 7200, intervalHours: 1, alreadyNotified: []), 2)
+        XCTAssertNil(CaptureController.dueHour(elapsed: 3600, intervalHours: 1, alreadyNotified: [1]))
+        XCTAssertEqual(CaptureController.dueHour(elapsed: 9000, intervalHours: 1, alreadyNotified: [1]), 2)
+        XCTAssertNil(CaptureController.dueHour(elapsed: 9000, intervalHours: 1, alreadyNotified: [1, 2]))
+    }
+
+    /// 纯函数钉测：2h 档阈值恰跨（3600 未跨 / 7200 跨 1）。
+    func testDueHourTwoHourInterval() {
+        XCTAssertNil(CaptureController.dueHour(elapsed: 3600, intervalHours: 2, alreadyNotified: []))
+        XCTAssertEqual(CaptureController.dueHour(elapsed: 7200, intervalHours: 2, alreadyNotified: []), 1)
+    }
+
+    /// 控制器钉测（夹具同 elapsed 假时钟用例）：跨 1h 恰一条；继续走再跨 2h 再恰一条。
+    func testReminderNotifiesExactlyOncePerMultiple() async {
+        let controller = makeController(countdownSeconds: 0)
+        var config = makeConfig()
+        config.recordingReminderIntervalHours = 1
+        uptime.value = 0
+        await controller.start(mode: .display(1), config: config)
+
+        uptime.value = 3599
+        controller.pause() // 未跨 1h：不提醒
+        XCTAssertEqual(notifier.durationReachedHours, [])
+        controller.resume()
+
+        uptime.value = 3600
+        controller.pause() // 恰跨 1h：恰一条
+        XCTAssertEqual(notifier.durationReachedHours, [1])
+        controller.resume()
+
+        uptime.value = 7200
+        controller.pause() // 再跨 2h：再恰一条（hour 1 不重发）
+        XCTAssertEqual(notifier.durationReachedHours, [1, 2])
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+    }
+
+    /// 控制器钉测：暂停期墙钟前进不产生新提醒——elapsed 冻结（暂停段不累计），
+    /// 恢复后按冻结值继续判定（净录语义，同 elapsed 用例的 pause/resume 驱动方式）。
+    func testReminderFrozenDuringPause() async {
+        let controller = makeController(countdownSeconds: 0)
+        var config = makeConfig()
+        config.recordingReminderIntervalHours = 1
+        uptime.value = 0
+        await controller.start(mode: .display(1), config: config)
+
+        uptime.value = 3600
+        controller.pause() // 恰跨 1h：恰一条
+        XCTAssertEqual(notifier.durationReachedHours, [1])
+
+        uptime.value = 18_000 // 暂停期墙钟前进 4h
+        controller.resume() // 段起点重置为当前 uptime（冻结段不进累计）
+        controller.pause() // 净录 elapsed 仍 3600：不得产生新提醒
+        XCTAssertEqual(notifier.durationReachedHours, [1])
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
+    }
+
+    /// 控制器钉测：stop→start 新会话 notifiedHours 复位——同净录时长重新提醒 1h 档的 1。
+    func testReminderStateResetsOnNewSession() async {
+        let controller = makeController(countdownSeconds: 0)
+        var config = makeConfig()
+        config.recordingReminderIntervalHours = 1
+        uptime.value = 0
+        await controller.start(mode: .display(1), config: config)
+
+        uptime.value = 3600
+        controller.pause()
+        XCTAssertEqual(notifier.durationReachedHours, [1])
+        controller.stop()
+        await waitForState(.idle, of: controller)
+
+        notifier.durationReachedHours = []
+        uptime.value = 100_000
+        await controller.start(mode: .display(1), config: config)
+        XCTAssertEqual(controller.elapsed, 0, accuracy: 0.001)
+        uptime.value = 100_000 + 3600
+        controller.pause() // 新会话同净录时长：重新提醒 hour 1（复位生效）
+        XCTAssertEqual(notifier.durationReachedHours, [1])
+
+        controller.stop()
+        await waitForState(.idle, of: controller)
     }
 
     // MARK: - 磁盘警告（stop-supersedes-warn）

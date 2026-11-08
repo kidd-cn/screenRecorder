@@ -89,7 +89,7 @@ struct PreferencesView: View {
 }
 
 /// 通用页：输出目录（NSOpenPanel 选择）、倒计时 0/3/5/10、帧率 30/60、编码 H.264/HEVC
-/// （HEVC 硬件编码器不可用时禁用并标注「需硬件编码器」）。
+/// （HEVC 硬件编码器不可用时禁用并标注「需硬件编码器」）、长录提醒间隔 1/2/3 小时/从不（Q5）。
 private struct GeneralTab: View {
     @ObservedObject var settings: SettingsStore
     var onOutputDirectoryChange: (URL) -> Void
@@ -108,6 +108,14 @@ private struct GeneralTab: View {
                 Text("60 fps").tag(60)
             }
             codecPicker
+            // Q5 长录时长提醒：净录时长（不含暂停）跨设定间隔整数倍时系统提醒一条
+            //（每倍数恰一条）；「从不」关闭。开录快照语义（同诸开关——下一场录制生效）。
+            Picker("录制提醒间隔", selection: $settings.recordingReminderIntervalHours) {
+                Text("1 小时（默认）").tag(1)
+                Text("2 小时").tag(2)
+                Text("3 小时").tag(3)
+                Text("从不").tag(0)
+            }
             // P6a 开机自启：只有开关本身——副作用（SMAppService 注册/注销、失败回翻
             // + 失败通知）在装配层 sink（LaunchAtLoginCoordinator），视图不做装配副作用。
             Toggle("开机自启", isOn: $settings.launchAtLogin)

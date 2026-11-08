@@ -33,6 +33,9 @@ protocol RecordingNotifying: AnyObject {
     /// 截图已保存（Q1）：区域/整屏截图落盘后的成功通知——仅成功发（失败静默，
     /// 同既有通知纪律）。
     func notifyScreenshotSaved(fileURL: URL)
+    /// 长录时长提醒（Q5）：净录时长跨设定间隔整数倍时发一条（每倍数恰一条）——
+    /// 尽力而为副通道，同既有通知纪律。
+    func notifyRecordingDurationReached(hours: Int)
 }
 
 /// 点击音效调度缝（P1b，spec「事件→调度抽缝」）：生产实现 `SCStreamRecorder`（转发当前
@@ -550,6 +553,10 @@ final class CaptureController: ObservableObject {
         // P1b：点击音效骑同一点击源——只开音效时 tracker 仍需监听（音效无渲染缝，
         // 经协调器暂停门直接调度混音器）。
         clickHighlightTracker?.setEnabled(config.clickHighlightEnabled || config.autoZoomEnabled || config.clickSoundEnabled)
+        // Q5：长录提醒间隔随开录快照取值，已提醒倍数集合随新会话复位（stop→start 后同
+        // 净录时长重新提醒；begin 失败回 idle 无会话，复位无害）。
+        reminderIntervalHours = config.recordingReminderIntervalHours
+        notifiedHours = []
         // T18：源丢失匹配目标随捕获模式确定（裁定 2；P3a 起 App 模式另记 bundle id）。
         // P7a/P7b：无屏幕源（audioOnly/cameraOnly，共享判定 hasVideoCanvas）会话整体不
         // 武装源丢失监视（nil 在这些模式是「无源可失」，不是窗口模式的「采集全台」——
@@ -773,6 +780,36 @@ final class CaptureController: ObservableObject {
     private func refreshElapsed() {
         let value = computedElapsed
         if elapsed != value { elapsed = value } // 等值守卫：暂停期间不空发 objectWillChange
+        checkRecordingReminder() // Q5：每 tick 钉一次整数倍判定（见下——暂停期 elapsed 冻结自然免提醒）
+    }
+
+    // MARK: 长录时长提醒（Q5）
+
+    /// 阈值判定纯函数（语义钉定）：`intervalHours ≤ 0`（从不）→ nil；否则
+    /// `n = Int(elapsed / (intervalHours·3600))`，`n ≥ 1` 且本会话未提醒过该倍数 → n。
+    /// 同一会话每个整数倍恰发一条（1h 档、2.5h 会话 → 1h 与 2h 各一条）。
+    static func dueHour(elapsed: TimeInterval, intervalHours: Int, alreadyNotified: Set<Int>) -> Int? {
+        guard intervalHours > 0 else { return nil }
+        let n = Int(elapsed / (Double(intervalHours) * 3600))
+        guard n >= 1, !alreadyNotified.contains(n) else { return nil }
+        return n
+    }
+
+    /// 本会话已提醒的整数倍集合：start 消费 config 时随间隔快照一并复位（新会话从零计数）。
+    private var notifiedHours: Set<Int> = []
+    /// 长录提醒间隔快照（小时；0 = 从不）：start 消费 config 时取值，录制中改偏好不影响本场
+    ///（开录快照语义，同 clickHighlightEnabled 族）。
+    private var reminderIntervalHours: Int = 0
+
+    /// refreshElapsed 挂点（每 0.5s tick 与 pause 冻结刷新都过此处）：跨过新的整数倍即插入
+    /// 集合并通知一条。暂停期 elapsed 冻结 → 重复 tick 得同一判定，`notifiedHours` 去重使
+    /// 暂停期间不可能产生新提醒——无需暂停专项门。通知尽力而为（spy/未装配静默）。
+    private func checkRecordingReminder() {
+        guard let hour = Self.dueHour(elapsed: computedElapsed,
+                                      intervalHours: reminderIntervalHours,
+                                      alreadyNotified: notifiedHours) else { return }
+        notifiedHours.insert(hour)
+        notifier?.notifyRecordingDurationReached(hours: hour)
     }
 
     private func resetElapsed() {
