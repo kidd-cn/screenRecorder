@@ -17,7 +17,7 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 - **Live markup**: draw on the screen while recording or paused — strokes render live as you draw, black/red ink, two widths, undo/clear; annotations burn into the take and stay anchored to content through auto-zoom; `⇧⌘M` toggles the markup toolbar (rebindable)
 - **Keystroke visualization**: key presses render as keycaps bottom-center of the take (two colors, three font sizes, adjustable linger); requires Input Monitoring permission, degrades to own-app keys only without it; display pauses automatically while Secure Input (password fields) is detected
 - **Pause / resume**: pause durations are excluded from the output timeline
-- **Floating control bar**: draggable, non-activating, breathing red dot; discard requires a two-click confirm
+- **Floating control bar**: draggable, non-activating, breathing red dot; discard requires a two-click confirm; restart (discards what's recorded and immediately starts over in the same mode — two-click confirm, skips the countdown)
 - **Global hotkeys**: `⇧⌘R` start/stop (remembers last mode), `⇧⌘P` pause/resume, `⇧⌘W` record a chosen window — rebindable in preferences, no Accessibility permission needed
 - **Countdown**: 0 / 3 / 5 / 10 s with an on-screen overlay, cancellable
 - **Scheduled recording**: start automatically at a chosen time (or in N minutes) with the last-used mode, with an optional duration cap that stops on time; a missed schedule (sleep) sends a follow-up notification with a "Start recording" action, and busy/locked sessions are skipped with a notice

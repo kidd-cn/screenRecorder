@@ -3,21 +3,30 @@ import Combine
 import SwiftUI
 
 /// 浮动控制条（T11 Step 5）：红点（录制中呼吸动画）、elapsed（mm:ss）、暂停/恢复、停止、
-/// 丢弃（二次点击确认，tooltip 与 OmniRecorder 一致）。仅承载语义与交互，窗口挂载见
-/// `FloatingControlBarPanel`；数据直接读 `CaptureController`（elapsed 已排除暂停时长）。
+/// 丢弃（二次点击确认，tooltip 与 OmniRecorder 一致）、重新录制（Q3：丢弃已录内容并立即
+/// 重开同模式——独立两击确认）。仅承载语义与交互，窗口挂载见 `FloatingControlBarPanel`；
+/// 数据直接读 `CaptureController`（elapsed 已排除暂停时长）。
 /// 验收修复（2026-10）：丢弃武装逻辑抽出为 `DiscardConfirmation`（本文件，headless 可测）；
 /// 武装视觉改红底胶囊白字「再次点击确认丢弃」、disarm 窗口 5s；拖动与位置保留见面板层。
+/// Q3：重录复用同一 `DiscardConfirmation` 类的**第二实例**（武装互不干扰丢弃确认），
+/// 武装胶囊「再次点击确认重录」，可见态照抄丢弃按钮 recording/paused 纪律（含离场解除）。
 struct FloatingControlBar: View {
     @ObservedObject var controller: CaptureController
     /// 丢弃两击确认唯一真源（抽出的可观察逻辑）：armed 视觉与面板尺寸跟随都订阅它。
     @ObservedObject var discardConfirmation: DiscardConfirmation
+    /// 重录两击确认真源（Q3，第二实例）：与丢弃独立武装/独立 5s 窗口；类复用不改名。
+    @ObservedObject var restartConfirmation: DiscardConfirmation
     /// 交互热区登记簿（拖拽分流裁定 1）：按钮 frame 上报，宿主视图 mouseDown 据此分流。
     let regionRegistry: InteractiveRegionRegistry
     /// P2 边录边标记：画笔按钮的开关态与切换出口。由 `FloatingControlBarPanel.attachMarkingToggle`
     /// 在装配层接线（rootView 整只换装驱动换装），缺省关闭态/空出口（面板尺寸探测同构）。
     var isMarkingEnabled: Bool = false
     var onToggleMarking: () -> Void = {}
+    /// Q3 重录出口：由 `FloatingControlBarPanel.attachRestartRecording` 在装配层接线
+    ///（attachMarkingToggle 同款缝），缺省空出口（面板尺寸探测同构）。
+    var onRestartRecording: () -> Void = {}
     @State private var autoDisarmTask: Task<Void, Never>?
+    @State private var restartAutoDisarmTask: Task<Void, Never>?
     @State private var breathing = false
 
     var body: some View {
@@ -64,6 +73,26 @@ struct FloatingControlBar: View {
             .help("停止并保存录制")
             .accessibilityLabel("停止并保存录制")
             .reportingInteractiveRegion(to: regionRegistry)
+            // Q3 重新录制：武装视觉照抄丢弃按钮（红底胶囊白字，文案「再次点击确认重录」），
+            // 面板尺寸随武装态跟随（FloatingControlBarPanel.updatePanelSize 同订双重确认源）。
+            Button {
+                handleRestartTap()
+            } label: {
+                if restartConfirmation.isArmed {
+                    Text("再次点击确认重录")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.red))
+                } else {
+                    Image(systemName: "arrow.counterclockwise")
+                        .frame(width: 18, height: 18)
+                }
+            }
+            .help("重新录制会丢弃已录制的内容，再次点击确认")
+            .accessibilityLabel("重新录制")
+            .reportingInteractiveRegion(to: regionRegistry)
             Button {
                 handleDiscardTap()
             } label: {
@@ -102,6 +131,11 @@ struct FloatingControlBar: View {
                 discardConfirmation.disarm()
                 autoDisarmTask?.cancel()
                 autoDisarmTask = nil
+                // Q3 重录确认同纪律（可见态照抄丢弃按钮）：重录武装一并解除——武装后
+                // 浮条隐藏再重现时，首击必须重新武装而非直接重录。
+                restartConfirmation.disarm()
+                restartAutoDisarmTask?.cancel()
+                restartAutoDisarmTask = nil
             }
         }
     }
@@ -129,6 +163,31 @@ struct FloatingControlBar: View {
             try? await Task.sleep(nanoseconds: UInt64(DiscardConfirmation.disarmWindow * 1_000_000_000))
             guard !Task.isCancelled else { return }
             discardConfirmation.tick(at: ProcessInfo.processInfo.systemUptime)
+        }
+    }
+
+    /// Q3 重录两击确认（handleDiscardTap 同构，出口换成 onRestartRecording——确认后由
+    /// 装配层编排 cancelAndDiscard → 有界等待 idle → 绕倒计时重开）。
+    private func handleRestartTap() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if restartConfirmation.tap(at: now) {
+            NSLog("FloatingBar restart: confirmed")
+            restartAutoDisarmTask?.cancel()
+            restartAutoDisarmTask = nil
+            onRestartRecording()
+        } else {
+            NSLog("FloatingBar restart: armed")
+            scheduleRestartAutoDisarm()
+        }
+    }
+
+    /// 重录武装的 5s 自动解除驱动源（scheduleAutoDisarm 同构，喂第二实例）。
+    private func scheduleRestartAutoDisarm() {
+        restartAutoDisarmTask?.cancel()
+        restartAutoDisarmTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(DiscardConfirmation.disarmWindow * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            restartConfirmation.tick(at: ProcessInfo.processInfo.systemUptime)
         }
     }
 
@@ -305,12 +364,19 @@ final class FloatingControlBarPanel {
     private let hostingView: FloatingBarHostingView
     /// 丢弃两击确认真源（视图与面板共享订阅：视图换装、本层跟随尺寸）。
     private let discardConfirmation = DiscardConfirmation()
+    /// 重录两击确认真源（Q3，第二实例——复用同一类不改名，与丢弃独立武装互不干扰）。
+    private let restartConfirmation = DiscardConfirmation()
     private let regionRegistry = InteractiveRegionRegistry()
     private var stateObservation: AnyCancellable?
     private var armedObservation: AnyCancellable?
+    /// 重录武装态尺寸跟随订阅（Q3：「再次点击确认重录」胶囊比图标宽，同丢弃武装的
+    /// 尺寸跟随纪律）。
+    private var restartArmedObservation: AnyCancellable?
     /// P2 标记开关接线（attachMarkingToggle 注入；nil = 未接线，按钮呈现关闭态/空出口）。
     private var markingEnabledProvider: (() -> Bool)?
     private var onToggleMarkingAction: (() -> Void)?
+    /// Q3 重录出口接线（attachRestartRecording 注入；nil = 未接线，按钮空出口）。
+    private var onRestartRecordingAction: (() -> Void)?
     private var isShowing = false
     /// 裁定 3（缺陷①）：位置会话内保留——首次显示定位，此后显示不重置。
     private var hasShownThisSession = false
@@ -323,6 +389,7 @@ final class FloatingControlBarPanel {
         let hostingView = FloatingBarHostingView(rootView: FloatingControlBar(
             controller: controller,
             discardConfirmation: discardConfirmation,
+            restartConfirmation: restartConfirmation,
             regionRegistry: regionRegistry))
         self.hostingView = hostingView
         hostingView.regionRegistry = regionRegistry
@@ -355,6 +422,10 @@ final class FloatingControlBarPanel {
         armedObservation = discardConfirmation.$phase.sink { [weak self] _ in
             Task { @MainActor in self?.updatePanelSize() }
         }
+        // Q3：重录武装态尺寸跟随（第二确认源同一纪律——胶囊换装即离屏重测）。
+        restartArmedObservation = restartConfirmation.$phase.sink { [weak self] _ in
+            Task { @MainActor in self?.updatePanelSize() }
+        }
     }
 
     // MARK: 边录边标记开关接线（P2，AppAssembly 在装配完成后调用）
@@ -375,13 +446,26 @@ final class FloatingControlBarPanel {
         refreshRootView(enabled: enabled)
     }
 
+    // MARK: 重新录制按钮接线（Q3，attachMarkingToggle 先例同款）
+
+    /// 注入重录按钮的出口并立即换装（装配期一次性挂载，无订阅副作用）。重录按钮无独立
+    /// 开关态——可见性随浮条显隐（recording/paused，照抄丢弃按钮），出口由 AppAssembly
+    /// 提供（restartRecording 编排归装配层）。标记开关未接线时按关闭态换装（init 段
+    /// attach 时序无关性）。
+    func attachRestartRecording(action: @escaping () -> Void) {
+        onRestartRecordingAction = action
+        refreshRootView(enabled: markingEnabledProvider.map { $0() } ?? false)
+    }
+
     private func refreshRootView(enabled: Bool) {
         hostingView.rootView = FloatingControlBar(
             controller: controller,
             discardConfirmation: discardConfirmation,
+            restartConfirmation: restartConfirmation,
             regionRegistry: regionRegistry,
             isMarkingEnabled: enabled,
-            onToggleMarking: { [weak self] in self?.onToggleMarkingAction?() })
+            onToggleMarking: { [weak self] in self?.onToggleMarkingAction?() },
+            onRestartRecording: { [weak self] in self?.onRestartRecordingAction?() })
     }
 
     private func apply(_ state: CaptureState) {
@@ -423,6 +507,7 @@ final class FloatingControlBarPanel {
         let probe = NSHostingView(rootView: FloatingControlBar(
             controller: controller,
             discardConfirmation: discardConfirmation,
+            restartConfirmation: restartConfirmation,
             regionRegistry: regionRegistry))
         let newSize = probe.fittingSize
         guard newSize.width > 0, newSize != panel.frame.size else { return }

@@ -281,6 +281,9 @@ final class AppAssembly: ObservableObject {
             .store(in: &liveBackgroundCancellables)
         mountMarkingIfNeeded()
         mountGlobalShortcutsIfNeeded()
+        // Q3 重录按钮接线（attachMarkingToggle 先例同款装配缝）：两击确认后走 restartRecording
+        // 编排（丢弃 + 有界等待 idle + 绕倒计时重开，全在装配层）。
+        floatingBarPanel.attachRestartRecording { [weak self] in self?.restartRecording() }
     }
 
     // MARK: 录制入口（T17：菜单与全局快捷键共用，配置装配单点化）
@@ -514,6 +517,39 @@ final class AppAssembly: ObservableObject {
         let newStore = RecordingFileStore(baseDirectory: url, removedList: removedListStore)
         fileStore = newStore
         controller.updateStore(newStore)
+    }
+
+    // MARK: 重新录制（Q3：丢弃已录内容 + 立即重开同模式，两击确认 + 绕过倒计时）
+
+    /// 浮条重录按钮 / 菜单「重新录制」编排（Q3 Produces）：guard 录制/暂停 →
+    /// `cancelAndDiscard()`（既有丢弃语义：收尾删片、不回调 onFinishedFile——重录绝不把
+    /// 旧场写盘）→ `RestartOrchestrator` 有界等待 idle（50 × 0.1s = 5s；收尾落盘是异步
+    /// Task，`.finishing` → `.idle` 到达时机不定）→ `startRecording(lastCaptureMode,
+    /// bypassCountdown: true)`（定时到点起录同一接线形状）。
+    /// 配置语义钉定：重录 = **新一轮设置快照**（走既有起录入口，`startRecording` 起录时刻
+    /// 重照 SettingsStore——非上一场 runtime 配置的逐字拷贝）。超时纪律：预算耗尽 → 不重开、
+    /// 不通知、不循环（仅 NSLog 留排查痕，截图副通道同款静默精神）。定时会话内手动重录无
+    /// 新调度器机制——既有调度器语义照旧（排程/停录等待不受影响）。
+    /// 0.1s 让步收在本装配 poll 闭包内（「含等待」归 poll，编排本身零时钟依赖、无头可测）；
+    /// 主 actor 全程（Task 继承 AppAssembly 隔离，poll 读 state 免跳转）。
+    func restartRecording() {
+        guard controller.state == .recording || controller.state == .paused else { return }
+        controller.cancelAndDiscard()
+        Task { @MainActor in
+            let started = await RestartOrchestrator.run(
+                poll: { [weak self] in
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    return self?.controller.state == .idle
+                },
+                start: { [weak self] in
+                    guard let self else { return }
+                    NSLog("RestartRecording: idle 已回，重开模式 \(self.settings.lastCaptureMode)")
+                    self.startRecording(mode: self.settings.lastCaptureMode, bypassCountdown: true)
+                })
+            if !started {
+                NSLog("RestartRecording: 5s 预算内未回 idle（收尾未完成），放弃重开")
+            }
+        }
     }
 
     // MARK: 定时录制（P6b：调度器缝接线 / 面板 / 错过补通知）
@@ -1276,6 +1312,7 @@ struct ScreenRecorderApp: App {
                 onStartWindowRegion: { assembly.startWindowRegionRecording() },
                 onStartAudioOnly: { assembly.startAudioOnlyRecording() },
                 onStartCameraOnly: { assembly.startCameraOnlyRecording() },
+                onRestartRecording: { assembly.restartRecording() },
                 onTakeRegionScreenshot: { assembly.takeRegionScreenshot() },
                 onTakeFullScreenScreenshot: { assembly.takeFullScreenScreenshot(on: $0) },
                 onOpenRecordingList: { assembly.openRecordingList() },

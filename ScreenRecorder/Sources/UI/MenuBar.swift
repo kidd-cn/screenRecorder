@@ -4,7 +4,7 @@ import SwiftUI
 
 /// 菜单栏菜单最终形态（T19）：开始录制子菜单（全屏=显示器列表 / 窗口… / App…（P3a）/ 区域… /
 /// 窗口区域…（P3b）/ 仅声音（P7a）/ 仅摄像头（P7b））、
-/// 暂停/恢复、停止、摄像头画中画开关、文件列表…、偏好设置…、关于、退出。
+/// 暂停/恢复、停止、重新录制（Q3）、摄像头画中画开关、文件列表…、偏好设置…、关于、退出。
 /// 全部动作走 AppAssembly 闭包缝（T17 装配纪律：配置装配与窗口所有权归装配层）；
 /// 菜单项可用性由 `CaptureController.state` 状态机驱动（裁定 2）：开始子菜单仅 `.idle` 可用，
 /// 暂停/恢复与停止仅在 `.recording`/`.paused` 可用（控制器侧另有同款自守卫，双保险）。
@@ -32,6 +32,9 @@ struct MenuBarView: View {
     /// 仅摄像头录制（P7b）：录制源是前置摄像头，落盘 mp4 视频文件（编排归 AppAssembly，
     /// 同其他入口）。
     let onStartCameraOnly: () -> Void
+    /// 重新录制（Q3）：丢弃当前录制并立即重开同模式（编排归 AppAssembly，浮条按钮同出口；
+    /// 可用窗口同暂停/停止——仅 recording/paused）。
+    let onRestartRecording: () -> Void
     /// 区域截图（Q1）：RegionSelector 拖框后裁剪落盘 PNG（编排归 AppAssembly，同区域录制）。
     let onTakeRegionScreenshot: () -> Void
     /// 全屏截图指定显示器（Q1，「全屏截图」子菜单的显示器列表项，编排归 AppAssembly）。
@@ -100,6 +103,12 @@ struct MenuBarView: View {
         .disabled(!isSessionActive)
         Button("停止录制", systemImage: "stop.fill") {
             controller.stop()
+        }
+        .disabled(!isSessionActive)
+        // 重新录制（Q3）：编排归 AppAssembly（丢弃 + 有界等待 idle + 绕倒计时重开）；
+        // 可用窗口同停止（recording/paused），控制器侧 restartRecording 另有同款守卫双保险。
+        Button("重新录制", systemImage: "arrow.counterclockwise") {
+            onRestartRecording()
         }
         .disabled(!isSessionActive)
         Divider()
