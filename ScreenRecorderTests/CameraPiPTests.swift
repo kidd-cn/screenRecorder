@@ -675,6 +675,28 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         XCTAssertFalse(panel.isScreenThumbnailActive, "下一场 begin 必须复位屏幕为主（会话复位全链）")
     }
 
+    /// endRecording 清缩略图 contents（Ruling 16① 收口，真 RED 钉测）：对调态喂缩略图后
+    /// endRecording 必须经既有更新路径清 nil——`setScreenThumbnailMode(false)` 仅隐藏层
+    /// 不清 contents 时，最后一张缩略图 CGImage（~230KB）随浮窗跨场滞留，同场换回
+    /// （对调 → 换回 → 再对调）还会闪 ≤0.5s 陈旧预览。
+    func testEndRecordingClearsThumbnailContents() async throws {
+        let controller = makeControllerCapturingWindow()
+        controller.beginRecording(geometry: geometry)
+        let panel = try XCTUnwrap(capturedWindow, "windowFactory 缝必须捕获到装配的浮窗")
+        controller.setLayoutSwapped(true)
+
+        let cg = try XCTUnwrap(Self.makeSolidImage(), "夹具缩略图创建失败")
+        controller.updateScreenThumbnail(cg)
+        for _ in 0..<100 {
+            if panel.windowThumbnailImage != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms 让出主 actor（贴图 Task 落地）
+        }
+        XCTAssertNotNil(panel.windowThumbnailImage, "夹具自检：对调态缩略图必须已贴层")
+
+        controller.endRecording()
+        XCTAssertNil(panel.windowThumbnailImage, "endRecording 必须清空缩略图 contents（跨场滞留 / 闪旧图防御）")
+    }
+
     /// 夹具：纯色 CGImage（贴层断言只需非 nil 图，不验像素）。
     private static func makeSolidImage() -> CGImage? {
         let context = CGContext(

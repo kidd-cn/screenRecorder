@@ -259,18 +259,8 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // 原 buffer，与直通路径等价。
         recorder.pipPixelBufferProvider = cameraPiP?.latestPixelBuffer
         recorder.pipFrameProvider = cameraPiP?.currentPiPFrame
-        // pip-swap 接线（T5 清偿 Ruling 1 的 T4 遗留四行，评审点名验证）：对调态逐帧取数
-        // 缝（video 队列直读 `isLayoutSwapped` nonisolated——PiPFrameStore 锁保护快照；
-        // 弱引防跨场滞留，cameraPiP 归装配层所有）+ 对调态屏幕缩略图消费缝（浮窗 nonisolated
-        // 缩略图入口，内部跳主 actor）。缩略图缝仅 wantsPiP 场装配——无 PiP（含
-        // includeCamera=false / cameraPiP=nil）不产缩略图（recorder 侧节流块同样要求
-        // pipCompositor 在位），热路径零渲染。
-        recorder.layoutSwappedProvider = { [weak cameraPiP] in cameraPiP?.isLayoutSwapped ?? false }
-        if wantsPiP {
-            recorder.screenThumbnailConsumer = { [weak cameraPiP] cg in
-                cameraPiP?.updateScreenThumbnail(cg)
-            }
-        }
+        // pip-swap 接线（T5）：单点方法化（Fix A 钉测缝，见 wirePipSwapSeams 注释）。
+        wirePipSwapSeams(on: recorder, wantsPiP: wantsPiP)
         // 点击高亮 + 自动缩放 + 点击音效取数缝（T16 / P1a / P1b）：高亮与缩放共用一次几何
         // 解析与主屏翻转高度；转换器按当次几何与主屏翻转入口一次性组装；tracker 未启动/
         // 未衰减窗口内 currentState 返回 nil，合成器按无高亮直通。几何解析失败（nil）不装
@@ -347,6 +337,25 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
             self.monitor = nil
             keeper.deactivate()
             throw error
+        }
+    }
+
+    /// pip-swap 双缝接线（T5 清偿 Ruling 1 的 T4 遗留四行，评审点名验证）：对调态逐帧取数
+    /// 缝（video 队列直读 `isLayoutSwapped` nonisolated——PiPFrameStore 锁保护快照；弱引防
+    /// 跨场滞留，cameraPiP 归装配层所有）+ 对调态屏幕缩略图消费缝（浮窗 nonisolated 缩略图
+    /// 入口，内部跳主 actor）。缩略图缝仅 wantsPiP 场装配——无 PiP（含 includeCamera=false /
+    /// cameraPiP=nil）不产缩略图（recorder 侧节流块同样要求 pipCompositor 在位），热路径零渲染。
+    ///
+    /// Fix A 钉测缝：begin 成功路径依赖 ScreenCaptureKit TCC（无头环境不可确定性驱动），
+    /// 接线断言无法走 begin 全程——本方法从 begin 单点抽出（行为逐字不变，唯一调用点在
+    /// begin），钉测直接驱动它断言双缝落位（T4 `armForTesting` 同款最小 internal 缝先例）。
+    /// 只写不读：生产仅 begin 调用；测试可重复调用（缝为单槽覆盖语义，与 begin 同形）。
+    func wirePipSwapSeams(on recorder: SCStreamRecorder, wantsPiP: Bool) {
+        recorder.layoutSwappedProvider = { [weak cameraPiP] in cameraPiP?.isLayoutSwapped ?? false }
+        if wantsPiP {
+            recorder.screenThumbnailConsumer = { [weak cameraPiP] cg in
+                cameraPiP?.updateScreenThumbnail(cg)
+            }
         }
     }
 

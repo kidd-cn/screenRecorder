@@ -930,6 +930,51 @@ final class CaptureControllerTests: XCTestCase {
                       "errorDescription 必须原样进入原因段，实际：\(message)")
     }
 
+    /// Fix A 装配级断源失败钉测（spec §5 缺口）：摄像头断源全链真驱动——CameraPiPController
+    /// 看门狗真判定路径（armSourceLossWatchdog + watchdogTickForTesting，越 3s 阈值 fire-once）
+    /// → window 侧会话级转发（beginRecording 接线 camera.onSourceLost）→ 装配层
+    /// `onCameraSourceLost` 闭包（ScreenRecorderApp.swift 同款复刻）→
+    /// `handleSessionFailure(CameraSourceLostError())` → 失败收场自动保存。镜像
+    /// `testDisplayLossDuringRecordingAutoSavesAndNotifies` 模式（装配层闭包无头不可经
+    /// AppAssembly 构造，测试内复刻同款接线——披露于报告）。
+    func testCameraSourceLostDuringRecordingAutoSavesAndNotifies() async throws {
+        let controller = makeController(countdownSeconds: 0)
+        let url = tempDirectory.appendingPathComponent("camera-sourceloss-chain.mp4")
+        try Data("x".utf8).write(to: url)
+        session.finishedURL = url
+        var capturedCamera: CameraPiPController?
+        let pipController = CameraPiPWindowController(
+            windowFactory: { CameraPiPWindow.makeDefault() },
+            startCamera: { capturedCamera = $0 },
+            stopCamera: { _ in })
+        // 装配层接线复刻（ScreenRecorderApp.swift:229 同款）：window 侧断源 → 失败收场。
+        pipController.onCameraSourceLost = { [weak controller] in
+            Task { @MainActor in controller?.handleSessionFailure(CameraSourceLostError()) }
+        }
+        pipController.beginRecording(geometry: PiPCaptureGeometry(
+            captureOriginInCGPoints: .zero,
+            scale: 2,
+            capturePixelSize: CGSize(width: 2880, height: 1800)))
+        let camera = try XCTUnwrap(capturedCamera, "startCamera 缝必须捕获控制器侧摄像头实例")
+        // 进入 .recording（handleSessionFailure 仅在活动会话态收场——idle 直通 no-op）。
+        await controller.start(mode: .display(1), config: makeConfig())
+        camera.nowProvider = { 100.0 }
+        camera.armSourceLossWatchdog() // 无头驱动真武装（CameraPiPTests 看门狗组同款）
+        camera.nowProvider = { 104.0 } // 越过 3s 断源阈值
+
+        camera.watchdogTickForTesting()
+        await waitForState(.idle, of: controller)
+
+        XCTAssertEqual(session.finishCount, 1, "摄像头断源必须走 stop 保存路径")
+        XCTAssertEqual(finishedFiles, [url], "断源自动保存：成片保留")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
+        XCTAssertEqual(notifier.failureMessages.count, 1)
+        XCTAssertTrue(notifier.failureMessages[0].contains("已自动保存"),
+                      "实际：\(notifier.failureMessages[0])")
+        XCTAssertTrue(notifier.failureMessages[0].contains("前置摄像头"),
+                      "失败原因应指明摄像头断源，实际：\(notifier.failureMessages[0])")
+    }
+
     // MARK: - T18 麦克风路由观察器（录制期观察 / 收尾摘除）
 
     func testRouteWatcherLifecycleTiedToRecording() async {

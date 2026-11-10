@@ -286,17 +286,20 @@ final class SCStreamRecorderSwapSeamTests: XCTestCase {
 
     /// 对调夹具 recorder：includeCamera + PiP 双取数缝在位（合成器必装配）；swapped /
     /// 缩略图消费 / 节拍时钟缝按参注入，真实 writer 会话（64×40 画布）经装配缝落位。
+    /// `includeCamera: false`（Fix B 计数钉用）= 直通路径夹具：合成器不装配（PiP 源缝照常
+    /// 在位，同生产接线——producer 侧缝无条件装配、装配判定在 makeCompositorIfActive）。
     private func makeHarness(
         swapped: (() -> Bool)?,
         outputName: String,
         thumbnailConsumer: ((CGImage) -> Void)? = nil,
-        clock: (() -> TimeInterval)? = nil
+        clock: (() -> TimeInterval)? = nil,
+        includeCamera: Bool = true
     ) throws -> SCStreamRecorder {
         let config = RecordingConfiguration(
             mode: .display(1),
             captureSystemAudio: false,
             captureMicrophone: false,
-            includeCamera: true,
+            includeCamera: includeCamera,
             fps: 30,
             codec: .h264,
             outputURL: directory.appendingPathComponent(outputName),
@@ -429,5 +432,47 @@ final class SCStreamRecorderSwapSeamTests: XCTestCase {
         await nilProviderRecorder.stop()
         XCTAssertNotNil(falseRecorder.finishedFileURL, "false 场帧须真实成片（断言非空转）")
         XCTAssertNotNil(nilProviderRecorder.finishedFileURL, "nil 场帧须真实成片（断言非空转）")
+    }
+
+    // MARK: Fix B 计数钉（Ruling 14①②：provider 每帧至多一次；consumer 为 nil 不读 provider）
+
+    /// 单次读形钉测（合成器在场）：对调态连喂 5 帧，计数 provider 恰 ≤ 5 次（每帧至多一次，
+    /// 有合成器时恰一次——composite 实参与缩略图门共用单次读局部）。旧双调形态下同场
+    /// 计 10 次（composite 实参 + 缩略图门各一次）必破此钉。缩略图恰 1 张佐证单次读出的
+    /// `true` 同时供给合成与缩略图门（共享局部在场）。
+    func testSwappedFrameCallsProviderAtMostOncePerFrame() async throws {
+        var clock: TimeInterval = 100.0
+        var providerCalls = 0
+        var thumbnails: [CGImage] = []
+        let recorder = try makeHarness(
+            swapped: { providerCalls += 1; return true },
+            outputName: "录屏_provider_count.mp4",
+            thumbnailConsumer: { thumbnails.append($0) },
+            clock: { clock })
+        try deliverFrames(recorder, count: 5) { clock = 100.0 + Double($0) * 0.1 }
+        XCTAssertLessThanOrEqual(
+            providerCalls, 5,
+            "provider 每帧至多一次：5 帧计 \(providerCalls) 次越界（疑似双调形态回归）")
+        XCTAssertEqual(thumbnails.count, 1, "单次读出的 true 须同帧供给缩略图门（共享局部在场）")
+        await recorder.stop()
+        XCTAssertNotNil(recorder.finishedFileURL, "帧须真实成片（断言非空转）")
+    }
+
+    /// 直通钉测（合成器 nil，consumer nil）：provider 整帧不被调用——门序先判 consumer-nil
+    /// （Minor 4 减法），非 PiP 场逐帧零锁读。旧门序（provider 在 consumer 判空之前求值）
+    /// 同场计 5 次必破此钉。
+    func testPassthroughFrameNeverCallsProvider() async throws {
+        var providerCalls = 0
+        let recorder = try makeHarness(
+            swapped: { providerCalls += 1; return true },
+            outputName: "录屏_passthrough_count.mp4",
+            thumbnailConsumer: nil,
+            includeCamera: false)
+        try deliverFrames(recorder, count: 5)
+        XCTAssertEqual(
+            providerCalls, 0,
+            "直通路径（合成器 nil）整帧不读 provider：5 帧计 \(providerCalls) 次（疑似旧门序回归）")
+        await recorder.stop()
+        XCTAssertNotNil(recorder.finishedFileURL, "帧须真实成片（断言非空转）")
     }
 }

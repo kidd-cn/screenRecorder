@@ -1268,6 +1268,43 @@ final class PiPCompositorSwappedTests: XCTestCase {
         assertColor(samplePixel(plainFrame, x: 54, y: 6), equals: screenBlue, "键帽右界外两帧一致（原样帧蓝）")
     }
 
+    /// Fix D 键帽压小图重叠 z 序钉测（spec §3.2 次序：黑画布→摄像头→屏幕小图→键帽）：
+    /// 既有夹具键帽区（x 25-39 / y 3-16）与小图位 (40,24,20,12) 不相交——层序只被位置
+    /// 钉定、未被覆盖钉定。本用例把小图挪进键帽区（重叠小图 (24,4,20,12) 圆角 3），重叠
+    /// 带像素必须读「键帽压小图」的半透明带（65% 黑压小图蓝 → 主分量带 40-220）：键帽若
+    /// 画到小图之下（次序颠倒）或缺失，重叠带读全亮小图蓝（255）即红；键帽若压在主画面
+    /// 红上（小图缺席），红/绿通道不会同步压低。四层颜色互异同帧钉定：黑画布边角纯黑、
+    /// 摄像头主画面纯红、重叠带基线纯蓝（小图在场）、键帽重叠带压暗蓝带。
+    /// 采样点避字形墨迹（"A" 字号 6：墨迹 y ≥ 9）与小图圆角切割（距角心 > 3 或在角方格外）。
+    func testSwappedCompositeKeycapRendersAboveScreenInsetWhenOverlapping() {
+        let compositor = makeCompositor()
+        let canvas = makeCanvas()
+        let overlapInset = PiPFrame(rectInCapturePixels: CGRect(x: 24, y: 4, width: 20, height: 12),
+                                    cornerRadius: 3)
+
+        // 基线（无键帽）：重叠带两采样点 = 小图屏幕蓝（小图确实盖住键帽区）。
+        let baseline = swapped(compositor, canvas: canvas, camera: makeCamera(), pipFrame: overlapInset)
+        assertColor(samplePixel(baseline, x: 32, y: 6), equals: screenBlue,
+                    "重叠带 (32,6) 基线 = 小图屏幕蓝（夹具自检：重叠在场）")
+        assertColor(samplePixel(baseline, x: 30, y: 7), equals: screenBlue,
+                    "重叠带 (30,7) 基线 = 小图屏幕蓝（夹具自检：重叠在场）")
+
+        // 键帽同帧：重叠带 = 键帽压小图的半透明带（层序：小图在下、键帽最上）。
+        let output = swapped(compositor, canvas: canvas, camera: makeCamera(), pipFrame: overlapInset,
+                             keyboardOverlay: keycap())
+        assertColor(samplePixel(output, x: 0, y: 0), equals: pureBlack, "黑画布边角纯黑（黑画布最底）")
+        assertColor(samplePixel(output, x: 32, y: 20), equals: cameraRed,
+                    "摄像头主画面纯红（contain 在黑边之上、小图/键帽之下）")
+        let overInsetTop = samplePixel(output, x: 32, y: 6)
+        assertDimmedKeycap(overInsetTop, "重叠带 (32,6) 应为键帽压小图的半透明带")
+        XCTAssertLessThanOrEqual(Int(overInsetTop.red), 100, "(32,6) 红通道应被压低（下层是小图蓝非主画面红）")
+        XCTAssertLessThanOrEqual(Int(overInsetTop.green), 100, "(32,6) 绿通道应被压低（下层是小图蓝非主画面红）")
+        let overInsetMid = samplePixel(output, x: 30, y: 7)
+        assertDimmedKeycap(overInsetMid, "重叠带 (30,7) 应为键帽压小图的半透明带")
+        XCTAssertLessThanOrEqual(Int(overInsetMid.red), 100, "(30,7) 红通道应被压低（下层是小图蓝非主画面红）")
+        XCTAssertLessThanOrEqual(Int(overInsetMid.green), 100, "(30,7) 绿通道应被压低（下层是小图蓝非主画面红）")
+    }
+
     /// 点击环施加于屏幕层、随缩放缩进小图：点击 (16,8)（CI (16,32)）经 aspect-fill
     /// scale=0.3125 + 中心裁剪 (0,0.25) → inset 内缓冲 (45,26.25)，描边半径 24×0.3125=7.5、
     /// 描边宽 4×0.3125=1.25 → 描边带 6.875…8.125；(52,26) 整像素落在带内 → 黄；环心 (45,26)

@@ -1,3 +1,4 @@
+import CoreGraphics
 import XCTest
 
 @testable import ScreenRecorder
@@ -11,6 +12,13 @@ private final class FakeFreeSpaceProvider: DiskFreeSpaceProviding {
 
 /// RecordingSessionCoordinator 无头可测面：begin 前置磁盘检查 / 无会话时的空操作语义。
 /// begin 成功路径依赖 ScreenCaptureKit TCC（无头环境不可确定性驱动），归批量真机轮验收。
+
+/// windowFactory 捕获盒（闭包不可捕获 inout 参数，转经引用盒；CameraPiPTests
+/// capturedWindow 同款语义）。
+private final class PiPWindowBox {
+    var panel: CameraPiPWindow?
+}
+
 @MainActor
 final class RecordingSessionCoordinatorTests: XCTestCase {
     private var tempDirectory: URL!
@@ -78,6 +86,92 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         coordinator.setMicMuted(true)
         coordinator.setMicMuted(false)
         coordinator.setMicVolume(0.5)
+    }
+
+    // MARK: - Fix A 接线钉测（spec §5 缺口：协调器 begin 的 T5 双缝）
+
+    private let pipGeometry = PiPCaptureGeometry(
+        captureOriginInCGPoints: .zero,
+        scale: 2,
+        capturePixelSize: CGSize(width: 2880, height: 1800))
+
+    /// 夹具缩略图（纯色 CGImage——只验投递落点，不验内容；CameraPiPTests 同款夹具）。
+    private static func makeSolidImage() -> CGImage? {
+        let context = CGContext(
+            data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        context?.setFillColor(CGColor(red: 0, green: 0.5, blue: 1, alpha: 1))
+        context?.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        return context?.makeImage()
+    }
+
+    private func makePipControllerCapturingWindow(
+        into box: PiPWindowBox
+    ) -> CameraPiPWindowController {
+        CameraPiPWindowController(
+            windowFactory: {
+                let made = CameraPiPWindow.makeDefault()
+                box.panel = made
+                return made
+            },
+            startCamera: { _ in },
+            stopCamera: { _ in })
+    }
+
+    /// 钉测 1（接线真值）：`layoutSwappedProvider` 非 nil 且真读 `isLayoutSwapped`——
+    /// 旗标翻转前后闭包取值跟随（video 队列逐帧直读语义）。begin 成功路径依赖
+    /// ScreenCaptureKit TCC（无头不可驱动），接线断言经 begin 单点抽出的
+    /// `wirePipSwapSeams` 直接驱动（Fix A 最小 internal 缝，armForTesting 同款先例）。
+    func testWirePipSwapSeamsProviderReadsLiveSwapFlag() throws {
+        let pipController = CameraPiPWindowController(
+            windowFactory: { CameraPiPWindow.makeDefault() },
+            startCamera: { _ in },
+            stopCamera: { _ in })
+        let coordinator = RecordingSessionCoordinator(cameraPiP: pipController)
+        let recorder = SCStreamRecorder(config: makeConfig())
+
+        coordinator.wirePipSwapSeams(on: recorder, wantsPiP: true)
+
+        let provider = try XCTUnwrap(
+            recorder.layoutSwappedProvider, "对调取数缝必须已装配（recorder 可逐帧问询对调态）")
+        XCTAssertFalse(provider(), "初值恒屏幕为主（未对调）")
+        pipController.setLayoutSwapped(true)
+        XCTAssertTrue(provider(), "闭包必须真读 isLayoutSwapped（旗标翻转须穿透到取数缝）")
+        pipController.setLayoutSwapped(false)
+        XCTAssertFalse(provider(), "换回后取数缝回到屏幕为主")
+    }
+
+    /// 钉测 2（消费缝 wantsPiP 门控 + 端到端投递）：wantsPiP 为真时 `screenThumbnailConsumer`
+    /// 非 nil 且喂图真落浮窗缩略图层（updateScreenThumbnail 主 actor hop 后 contents 非 nil）；
+    /// wantsPiP 为假（含 cameraPiP 在位）时消费缝保持 nil（无 PiP 不产缩略图，热路径零渲染）。
+    func testWirePipSwapSeamsThumbnailConsumerGatedByWantsPiP() async throws {
+        let box = PiPWindowBox()
+        let pipController = makePipControllerCapturingWindow(into: box)
+        let coordinator = RecordingSessionCoordinator(cameraPiP: pipController)
+        let recorder = SCStreamRecorder(config: makeConfig())
+
+        coordinator.wirePipSwapSeams(on: recorder, wantsPiP: true)
+
+        let consumer = try XCTUnwrap(
+            recorder.screenThumbnailConsumer, "wantsPiP 场缩略图消费缝必须装配")
+        pipController.beginRecording(geometry: pipGeometry) // 浮窗落位（updateScreenThumbnail 落点）
+        let cg = try XCTUnwrap(Self.makeSolidImage(), "夹具缩略图创建失败")
+        consumer(cg)
+        for _ in 0..<100 {
+            if box.panel?.windowThumbnailImage != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms 让出主 actor（贴图 Task 落地）
+        }
+        XCTAssertNotNil(
+            box.panel?.windowThumbnailImage,
+            "喂图必须真落浮窗缩略图层（消费缝直通 updateScreenThumbnail 链）")
+
+        // wantsPiP = false：消费缝不得装配（cameraPiP 在位也不例外——门控在 wantsPiP）。
+        let plainRecorder = SCStreamRecorder(config: makeConfig())
+        coordinator.wirePipSwapSeams(on: plainRecorder, wantsPiP: false)
+        XCTAssertNil(
+            plainRecorder.screenThumbnailConsumer,
+            "无 PiP 场（含 cameraPiP 在位）缩略图消费缝必须保持 nil")
     }
 }
 

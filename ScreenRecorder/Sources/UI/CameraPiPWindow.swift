@@ -260,6 +260,10 @@ final class CameraPiPWindowController {
         frameStore.setScreenRect(nil, screenFrame: .zero, cgDisplayOrigin: .zero)
         frameStore.setGeometry(nil)
         frameStore.setLayoutSwapped(false) // 幂等复位（与 begin 复位互为双保险）
+        // 对调态缩略图 contents 清 nil（Ruling 16① 收口）：setScreenThumbnailMode(false)
+        // 仅隐藏层不清 contents——最后一张缩略图 CGImage（~230KB）随浮窗跨场滞留，同场
+        // 换回（对调 → 换回 → 再对调）还会闪 ≤0.5s 陈旧预览。经既有更新路径清（黑底占位）。
+        window?.updateScreenThumbnailImage(nil)
         window?.orderOut(nil)
         stopCamera(camera)
     }

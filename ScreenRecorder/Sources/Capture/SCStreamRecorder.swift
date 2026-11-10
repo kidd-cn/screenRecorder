@@ -94,7 +94,9 @@ final class SCStreamRecorder: NSObject {
     var keyboardOverlayProvider: (() -> KeyboardOverlaySnapshot?)?
     /// pip-swap 对调布局取数缝（T4）：video 队列逐帧读（PiPFrameStore 锁保护快照，T5 由
     /// 协调器以 `cameraPiP?.isLayoutSwapped` 满足）。nil/false = 屏幕为主——composite 的
-    /// `layoutSwapped` 恒 false，与今日行为逐字节一致（无缓存，逐帧闭包调用）。
+    /// `layoutSwapped` 恒 false，与今日行为逐字节一致（无缓存，逐帧闭包调用）。调用纪律
+    ///（Fix B）：有合成器时每帧恰一次（composite 实参与缩略图门共用单次读局部）；合成器
+    /// nil（直通路径）整帧不调——门序先判 consumer-nil 同款减法。
     var layoutSwappedProvider: (() -> Bool)?
     /// pip-swap 对调态屏幕缩略图消费缝（T4）：video 队列调用，≤ `thumbnailInterval`
     /// （0.5s）节流；CGImage 已渲染完成，消费方自行跳主线程。nil = 不产缩略图（零渲染
@@ -686,8 +688,14 @@ extension SCStreamRecorder: SCStreamOutput {
             // T15/T16/P1a：逐帧合成（任一效果开启时到达此处；合成器内部对缺省输入各自零渲染
             // 直通，全缺省直返原 buffer）——合成不改变时间轴，PTS 原样透传（append 仍用
             // shiftedPTS）；合成器 nil 时直通路径零开销（同 T8–T14 行为）。
+            // Fix B 单次读形：`layoutSwapped` provider 每帧**至多一次**（有合成器时恰一次），
+            // composite 实参与缩略图门共用该局部——原两处各调一次，理论上可跨越一次翻转；
+            // 合成器 nil（直通路径）整帧不读 provider（零锁读，原缩略图门在判 consumer 之前
+            // 先读 provider，非 PiP 场每帧一次多余锁读）。
+            let layoutSwapped: Bool
             let outputBuffer: CVPixelBuffer
             if let pipCompositor {
+                layoutSwapped = layoutSwappedProvider?() ?? false
                 outputBuffer = pipCompositor.composite(
                     screenFrame: pixelBuffer,
                     pip: pipPixelBufferProvider?(),
@@ -696,10 +704,11 @@ extension SCStreamRecorder: SCStreamOutput {
                     strokes: strokeOverlayProvider?(),
                     zoomTransform: zoomStateProvider?(),
                     keyboardOverlay: keyboardOverlayProvider?(),
-                    layoutSwapped: layoutSwappedProvider?() ?? false,
+                    layoutSwapped: layoutSwapped,
                     at: shiftedPTS,
                     into: pipCompositor.context)
             } else {
+                layoutSwapped = false // 直通路径：无合成即无对调可施
                 outputBuffer = pixelBuffer // 直通路径：零开销（同 T8–T14 行为）
             }
             try session.appendVideo(outputBuffer, at: shiftedPTS)
@@ -713,9 +722,9 @@ extension SCStreamRecorder: SCStreamOutput {
             // T4 对调态缩略图派发（composite/append 之后）：仅对调态产屏幕缩略图（不对调
             // 态零渲染——连缩略图都不产）；≤ 0.5s/张节流（首拍打点，窗口内静默），节拍时
             // 钟经 thumbnailNow 注入；lastThumbnailUptime 仅本队列触碰无锁。合成器 nil
-            //（直通路径）整段跳过；出图失败（源异常）本拍不回调消费方。
-            if let layoutSwappedProvider, layoutSwappedProvider(),
-               let screenThumbnailConsumer, let pipCompositor {
+            //（直通路径）整段跳过；出图失败（源异常）本拍不回调消费方。对调值复用 composite
+            // 前的单次读局部（Fix B：不再二次调 provider，同帧两读数恒一致）。
+            if layoutSwapped, let screenThumbnailConsumer, let pipCompositor {
                 let now = thumbnailNow()
                 if now - lastThumbnailUptime >= Self.thumbnailInterval {
                     lastThumbnailUptime = now
