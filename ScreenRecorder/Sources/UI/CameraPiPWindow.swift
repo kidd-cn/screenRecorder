@@ -100,13 +100,16 @@ final class CameraPiPWindow: NSPanel {
     /// 缩略图态（internal 只读，无头测试断言换装）。
     var isScreenThumbnailActive: Bool { screenThumbnailLayer?.isHidden == false }
 
-    /// 当前贴图层图像（internal 只读测试缝，无头测试断言贴图落地）。CGImage 是 CF 型，
-    /// `as?` 桥接恒成立会被编译器判错（conditional downcast to CoreFoundation type）——
-    /// contents 的唯一写入方是 `updateScreenThumbnailImage`（只喂 CGImage/nil），守卫后的
-    /// 强制桥接安全。
+    /// 当前贴图层图像（internal 只读测试缝，无头测试断言贴图落地）。CGImage 是 CF 型：
+    /// `as?` 恒成功被判错、`as!` 又被判恒非 nil 而告警、`as` 从 Any 不可转换——按
+    /// PreferencesView 同款纪律先 CFTypeID 显式判型，再 unsafeDowncast（无运行时检查
+    /// 强转，不产生 as! 告警）。contents 唯一写入方是 `updateScreenThumbnailImage`
+    /// （只喂 CGImage/nil），判型恒过；失配防御返回 nil。
     var windowThumbnailImage: CGImage? {
         guard let contents = screenThumbnailLayer?.contents else { return nil }
-        return contents as! CGImage
+        let cf = contents as CFTypeRef
+        guard CFGetTypeID(cf) == CGImage.typeID else { return nil }
+        return unsafeDowncast(cf, to: CGImage.self)
     }
 }
 
@@ -348,7 +351,7 @@ final class CameraPiPWindowController {
     /// 随呈现缝持有（end 置 nil 即释放——渲染上下文逐场一个，不逐帧）。
     private func installPreviewOverlay(_ panel: CameraPiPWindow,
                                        backgroundProcessor: CameraBackgroundProcessor?) {
-        if let backgroundProcessor {
+        if backgroundProcessor != nil {
             let presenter = PiPPreviewFramePresenter { [weak panel] cg in
                 DispatchQueue.main.async { panel?.updatePreviewOverlayImage(cg) }
             }
