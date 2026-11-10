@@ -259,6 +259,18 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
         // 原 buffer，与直通路径等价。
         recorder.pipPixelBufferProvider = cameraPiP?.latestPixelBuffer
         recorder.pipFrameProvider = cameraPiP?.currentPiPFrame
+        // pip-swap 接线（T5 清偿 Ruling 1 的 T4 遗留四行，评审点名验证）：对调态逐帧取数
+        // 缝（video 队列直读 `isLayoutSwapped` nonisolated——PiPFrameStore 锁保护快照；
+        // 弱引防跨场滞留，cameraPiP 归装配层所有）+ 对调态屏幕缩略图消费缝（浮窗 nonisolated
+        // 缩略图入口，内部跳主 actor）。缩略图缝仅 wantsPiP 场装配——无 PiP（含
+        // includeCamera=false / cameraPiP=nil）不产缩略图（recorder 侧节流块同样要求
+        // pipCompositor 在位），热路径零渲染。
+        recorder.layoutSwappedProvider = { [weak cameraPiP] in cameraPiP?.isLayoutSwapped ?? false }
+        if wantsPiP {
+            recorder.screenThumbnailConsumer = { [weak cameraPiP] cg in
+                cameraPiP?.updateScreenThumbnail(cg)
+            }
+        }
         // 点击高亮 + 自动缩放 + 点击音效取数缝（T16 / P1a / P1b）：高亮与缩放共用一次几何
         // 解析与主屏翻转高度；转换器按当次几何与主屏翻转入口一次性组装；tracker 未启动/
         // 未衰减窗口内 currentState 返回 nil，合成器按无高亮直通。几何解析失败（nil）不装

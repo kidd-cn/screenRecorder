@@ -291,6 +291,14 @@ final class AppAssembly: ObservableObject {
         // Q3 重录按钮接线（attachMarkingToggle 先例同款装配缝）：两击确认后走 restartRecording
         // 编排（丢弃 + 有界等待 idle + 绕倒计时重开，全在装配层）。
         floatingBarPanel.attachRestartRecording { [weak self] in self?.restartRecording() }
+        // T5 pip-swap 对调按钮接线（attachRestartRecording 装配行旁）：provider 供 attach
+        // 时刻初值（此后可见性/对调态一律 refreshPipSwapSurfaces 发射值直传）；toggle 翻转
+        // 对调态（旗标 + 浮窗换装一体）并全面重估。
+        floatingBarPanel.attachPipSwap(
+            provider: { [weak self] in
+                (self?.isPipSwapSurfaceAvailable ?? false, self?.cameraPiP.isLayoutSwapped ?? false)
+            },
+            toggle: { [weak self] in self?.togglePipSwap() })
     }
 
     // MARK: 录制入口（T17：菜单与全局快捷键共用，配置装配单点化）
@@ -828,10 +836,13 @@ final class AppAssembly: ObservableObject {
             .store(in: &markingCancellables)
         // 显隐重估（显隐条件：markingEnabled && recording/paused，见 MarkingOverlayController）：
         // 覆盖层拉取式重估 + 工具条显隐 + 开启时刻的几何现场解析。
+        // T5：sink 末尾附带对调面重估——state 变化即重估 ⇄ 按钮可见性（含 finishing/idle
+        // 收按钮），发射值直传（refreshPipSwapSurfaces(state:)）。
         Publishers.CombineLatest(controller.$state, $markingEnabled)
             .dropFirst()
             .sink { [weak self] state, enabled in
                 self?.refreshMarkingSurfaces(state: state, enabled: enabled)
+                self?.refreshPipSwapSurfaces(state: state)
             }
             .store(in: &markingCancellables)
         // 浮条画笔按钮（录制/暂停态工具条与浮条并存——按钮在浮条上）。
@@ -907,6 +918,40 @@ final class AppAssembly: ObservableObject {
         case .idle, .countdown, .finishing:
             NSLog("MarkingShortcut: 忽略 ⇧⌘M（当前状态非录制/暂停：\(controller.state)）")
         }
+    }
+
+    // MARK: pip-swap 对调（T5）
+
+    /// 对调按钮可见性（attach 初值 / toggle 闸的 live 读缝）：recording/paused × 本场 PiP
+    /// 会话闸（判定真源 `FloatingControlBar.isPipSwapVisible`）。**订阅路径不得用本缝**——
+    /// sink 在 @Published willSet 阶段同步执行，此处读 `controller.state` 是旧值（修复轮2
+    /// Critical 1 同款约束），订阅路径走 `refreshPipSwapSurfaces(state:)` 直传发射值。
+    private var isPipSwapSurfaceAvailable: Bool {
+        FloatingControlBar.isPipSwapVisible(
+            state: controller.state,
+            pipRecordingActive: cameraPiP.isPiPRecordingActive)
+    }
+
+    /// 对调唯一入口（浮条 ⇄ 按钮）：翻对调态（旗标 + 浮窗换装一体，见
+    /// `CameraPiPWindowController.setLayoutSwapped`——video 队列下一帧即按新布局合成）并
+    /// 全面重估（tooltip/a11y 文案随对调态翻转）。可见性闸兜非按钮直呼路径——非
+    /// recording/paused 一律 no-op。
+    func togglePipSwap() {
+        guard isPipSwapSurfaceAvailable else { return }
+        cameraPiP.setLayoutSwapped(!cameraPiP.isLayoutSwapped)
+        refreshPipSwapSurfaces(state: controller.state)
+    }
+
+    /// 对调面重估（发射值直传——state 用参数、不回拉 `controller.state`，willSet 旧值
+    /// 纪律见 refreshMarkingSurfaces 同款约束；togglePipSwap 路径传当前 state——已由可见
+    /// 性闸钉在 recording/paused）：panel.refreshPipSwap 幂等换装 + 面板尺寸重测（⇄ 按钮
+    /// 出现/消失改变面板宽）。
+    private func refreshPipSwapSurfaces(state: CaptureState) {
+        floatingBarPanel.refreshPipSwap(
+            available: FloatingControlBar.isPipSwapVisible(
+                state: state,
+                pipRecordingActive: cameraPiP.isPiPRecordingActive),
+            swapped: cameraPiP.isLayoutSwapped)
     }
 
     // MARK: 窗口捕获（T20：⇧⌘W + 选择器接线，T14 WindowPicker 组件接入）

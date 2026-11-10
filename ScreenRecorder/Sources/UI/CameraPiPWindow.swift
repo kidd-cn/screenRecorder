@@ -47,6 +47,18 @@ final class CameraPiPWindow: NSPanel {
         overlay.isHidden = true
         content.layer?.addSublayer(overlay)
         previewOverlayLayer = overlay
+        // T5 对调态屏幕缩略图层：**顶层**子层（最后添加 = 盖过预览层与背景覆盖层，免去其
+        // 显隐状态腾挪）；黑底占位（首帧缩略图未到即黑，不透出底下摄像头预览）；aspect-fill
+        // 与成片摆放同语义；圆角由 content 层既有 masksToBounds+cornerRadius 12 统一裁切。
+        // 跨场 begin 的 installPreviewLayer 重建 content——本层随之重建并复位隐藏（会话
+        // 复位全链的窗口侧机制，配合 beginRecording 显式 setScreenThumbnailMode(false)）。
+        let thumbnail = CALayer()
+        thumbnail.frame = content.bounds
+        thumbnail.contentsGravity = .resizeAspectFill
+        thumbnail.backgroundColor = NSColor.black.cgColor
+        thumbnail.isHidden = true
+        content.layer?.addSublayer(thumbnail)
+        screenThumbnailLayer = thumbnail
         contentView = content
     }
 
@@ -67,6 +79,35 @@ final class CameraPiPWindow: NSPanel {
 
     /// 覆盖层状态（internal 只读，无头测试断言装配/收起）。
     var isPreviewOverlayVisible: Bool { previewOverlayLayer?.isHidden == false }
+
+    // MARK: 对调态屏幕缩略图层（T5：浮窗换装 = 摄像头预览 ↔ 屏幕缩略图）
+
+    private var screenThumbnailLayer: CALayer?
+
+    /// 对调态浮窗内容切换（主线程）：true = 屏幕缩略图层置顶显示（黑底占位，首帧缩略图
+    /// 未到即黑）；false = 恢复摄像头预览。窗内所见即成片所得——contentsGravity 与成片
+    /// inset 同为 aspect-fill；圆角由 content 层既有 masksToBounds+cornerRadius 12 统一
+    /// 裁切。未装配层（无头测试/装配前）静默忽略，幂等。
+    func setScreenThumbnailMode(_ active: Bool) {
+        screenThumbnailLayer?.isHidden = !active
+    }
+
+    /// 贴屏幕缩略图（主线程调用；nil = 清空回黑底占位）。未装配层时静默忽略。
+    func updateScreenThumbnailImage(_ image: CGImage?) {
+        screenThumbnailLayer?.contents = image
+    }
+
+    /// 缩略图态（internal 只读，无头测试断言换装）。
+    var isScreenThumbnailActive: Bool { screenThumbnailLayer?.isHidden == false }
+
+    /// 当前贴图层图像（internal 只读测试缝，无头测试断言贴图落地）。CGImage 是 CF 型，
+    /// `as?` 桥接恒成立会被编译器判错（conditional downcast to CoreFoundation type）——
+    /// contents 的唯一写入方是 `updateScreenThumbnailImage`（只喂 CGImage/nil），守卫后的
+    /// 强制桥接安全。
+    var windowThumbnailImage: CGImage? {
+        guard let contents = screenThumbnailLayer?.contents else { return nil }
+        return contents as! CGImage
+    }
 }
 
 // MARK: - PiPPreviewFramePresenter（P5 预览跟背景：处理后帧 → 浮窗覆盖层）
@@ -194,6 +235,9 @@ final class CameraPiPWindowController {
             display: true)
         panel.installPreviewLayer(camera.previewLayer)
         installPreviewOverlay(panel, backgroundProcessor: backgroundProcessor)
+        // T5 跨场残留清零：对调态缩略图随场复位（installPreviewLayer 重建 content 时缩略
+        // 图层已随之重建并隐藏，此处显式复位为双保险——幂等）。
+        panel.setScreenThumbnailMode(false)
         publishFrame(panel)
         panel.orderFrontRegardless() // 不夺焦点（nonactivatingPanel）
         isRecordingActive = true
@@ -225,10 +269,28 @@ final class CameraPiPWindowController {
     // MARK: 对调状态桥（spec §3.1：会话级 layoutSwapped 布尔）
 
     /// 对调画面主入口（浮条按钮经装配层调用）：翻 PiPFrameStore 旗标 + 浮窗内容切换
-    ///（T5 装屏幕缩略图层；本任务先只翻旗标）。
-    func setLayoutSwapped(_ swapped: Bool) { frameStore.setLayoutSwapped(swapped) }
+    ///（**旗标写在前**——video 队列下一帧即按新布局合成；浮窗换装随后，屏幕缩略图层
+    /// ↔ 摄像头预览）。window nil（降级纯屏/装配前）时仅旗标生效。
+    func setLayoutSwapped(_ swapped: Bool) {
+        frameStore.setLayoutSwapped(swapped)
+        window?.setScreenThumbnailMode(swapped)
+    }
     /// 当前对调态（video 队列可读：`layoutSwappedProvider` 逐帧取数的取数缝）。
     nonisolated var isLayoutSwapped: Bool { frameStore.isLayoutSwapped }
+
+    /// 本场 PiP 会话闸（@MainActor 只读，T5 装配层可见性真源）：begin 成功装配才置位
+    ///——cameraOnly/audioOnly/纯屏幕场（含几何缺位/摄像头失败降级）恒 false，对调按钮
+    /// 自然不出现，无需另查捕获模式。
+    var isPiPRecordingActive: Bool { isRecordingActive }
+
+    /// 对调态屏幕缩略图入口（SCStreamRecorder `screenThumbnailConsumer` 缝，video 队列
+    /// 调用，nonisolated）：渲染完成的 CGImage 跳主 actor 贴浮窗缩略图层。window nil
+    ///（降级纯屏/场外残余投递）静默丢弃；≤0.5s/张节流在 recorder 侧。
+    nonisolated func updateScreenThumbnail(_ cg: CGImage) {
+        Task { @MainActor in
+            self.window?.updateScreenThumbnailImage(cg)
+        }
+    }
 
     // MARK: P5 实时换背景（验收裁定：录制中改动实时生效）
 

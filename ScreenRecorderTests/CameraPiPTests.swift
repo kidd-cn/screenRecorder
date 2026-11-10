@@ -610,6 +610,81 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         window.setPreviewOverlayVisible(false)
         XCTAssertFalse(window.isPreviewOverlayVisible)
     }
+
+    // MARK: T5 对调态浮窗换装（屏幕缩略图层 ↔ 摄像头预览）
+
+    /// 断源链钉测同款捕获缝（capturedCamera 先例）：windowFactory 在 beginRecording 的
+    /// ensureWindow 才懒运行——闭包必须写**类属性**（局部量快照在 factory 运行前读取恒 nil）。
+    private var capturedWindow: CameraPiPWindow?
+
+    /// windowFactory 测试缝变体：捕获装配的浮窗实例，直断窗口侧换装状态。
+    private func makeControllerCapturingWindow() -> CameraPiPWindowController {
+        capturedWindow = nil
+        return CameraPiPWindowController(
+            windowFactory: {
+                let panel = CameraPiPWindow.makeDefault()
+                self.capturedWindow = panel
+                return panel
+            },
+            startCamera: { _ in },
+            stopCamera: { _ in })
+    }
+
+    /// 对调主入口换装全链（T5 升级 `setLayoutSwapped`：旗标 + 浮窗换装一体）：begin 后
+    /// `setLayoutSwapped(true)` → 浮窗切屏幕缩略图态；false → 恢复摄像头预览。
+    func testSetLayoutSwappedSwitchesWindowToThumbnailMode() throws {
+        let controller = makeControllerCapturingWindow()
+        controller.beginRecording(geometry: geometry)
+        let panel = try XCTUnwrap(capturedWindow, "windowFactory 缝必须捕获到装配的浮窗")
+
+        XCTAssertFalse(panel.isScreenThumbnailActive, "begin 复位屏幕为主：缩略图态关闭")
+        controller.setLayoutSwapped(true)
+        XCTAssertTrue(panel.isScreenThumbnailActive, "对调 → 浮窗切屏幕缩略图层")
+        controller.setLayoutSwapped(false)
+        XCTAssertFalse(panel.isScreenThumbnailActive, "换回 → 恢复摄像头预览层")
+    }
+
+    /// 缩略图贴层落地（T5）：nonisolated 入口投递的图必须落到浮窗缩略图层
+    ///（`windowThumbnailImage` 只读测试缝读出）。主线程等待 async 落地：轮询间隙
+    /// `Task.sleep` 让出主 actor，给贴图 Task 落地窗口。
+    func testUpdateScreenThumbnailLandsOnWindowLayer() async throws {
+        let controller = makeControllerCapturingWindow()
+        controller.beginRecording(geometry: geometry)
+        let panel = try XCTUnwrap(capturedWindow)
+        controller.setLayoutSwapped(true)
+
+        let cg = try XCTUnwrap(Self.makeSolidImage(), "夹具缩略图创建失败")
+        controller.updateScreenThumbnail(cg)
+        for _ in 0..<100 {
+            if panel.windowThumbnailImage != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000) // 10ms 让出主 actor
+        }
+        XCTAssertNotNil(panel.windowThumbnailImage, "缩略图必须落到浮窗缩略图层（测试缝读出）")
+    }
+
+    /// 会话复位全链（T5）：对调态收场 → 下一场 begin 后缩略图态必须关闭
+    ///（跨场残留清零：installPreviewLayer 重建 + begin 显式复位双保险）。
+    func testThumbnailModeClearedByEndRecording() throws {
+        let controller = makeControllerCapturingWindow()
+        controller.beginRecording(geometry: geometry)
+        controller.setLayoutSwapped(true)
+        controller.endRecording()
+
+        controller.beginRecording(geometry: geometry) // 下一场（浮窗跨场复用）
+        let panel = try XCTUnwrap(capturedWindow)
+        XCTAssertFalse(panel.isScreenThumbnailActive, "下一场 begin 必须复位屏幕为主（会话复位全链）")
+    }
+
+    /// 夹具：纯色 CGImage（贴层断言只需非 nil 图，不验像素）。
+    private static func makeSolidImage() -> CGImage? {
+        let context = CGContext(
+            data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 32,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        context?.setFillColor(CGColor(red: 0, green: 0.5, blue: 1, alpha: 1))
+        context?.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        return context?.makeImage()
+    }
 }
 
 /// 覆盖层装配钉测用假分割缝（begin 路径只存处理器不调分割；真 Vision 请求不得进测试进程）。

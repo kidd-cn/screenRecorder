@@ -25,6 +25,12 @@ struct FloatingControlBar: View {
     /// Q3 重录出口：由 `FloatingControlBarPanel.attachRestartRecording` 在装配层接线
     ///（attachMarkingToggle 同款缝），缺省空出口（面板尺寸探测同构）。
     var onRestartRecording: () -> Void = {}
+    /// T5 pip-swap 对调按钮：可用性（录制/暂停 × 本场 PiP 会话闸，判定真源 =
+    /// `isPipSwapVisible`，装配层经 refreshPipSwap 直传换装）与对调态（tooltip/
+    /// accessibility 文案随其翻转）。缺省隐藏/未对调（面板尺寸探测同构，既有构造点不受影响）。
+    var isPipSwapAvailable: Bool = false
+    var pipSwapped: Bool = false
+    var onTogglePipSwap: () -> Void = {}
     @State private var autoDisarmTask: Task<Void, Never>?
     @State private var restartAutoDisarmTask: Task<Void, Never>?
     @State private var breathing = false
@@ -50,6 +56,19 @@ struct FloatingControlBar: View {
             .help(isMarkingEnabled ? "关闭边录边标记" : "边录边标记")
             .accessibilityLabel(isMarkingEnabled ? "关闭边录边标记" : "边录边标记")
             .reportingInteractiveRegion(to: regionRegistry)
+            // T5 pip-swap 对调按钮：标记按钮之后、暂停按钮之前（spec §3.1 槽位钉定）。
+            // 无武装/高亮态（裁定：当前布局是否对调，录制画面与浮窗自身所见即所得）；
+            // 出现条件 = isPipSwapVisible（recording/paused × 本场 PiP 激活），装配层直传。
+            if isPipSwapAvailable {
+                Button {
+                    onTogglePipSwap()
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right").frame(width: 18, height: 18)
+                }
+                .help(pipSwapped ? "换回屏幕为主" : "对调画面（摄像头为主）")
+                .accessibilityLabel(pipSwapped ? "换回屏幕为主" : "对调画面（摄像头为主）")
+                .reportingInteractiveRegion(to: regionRegistry)
+            }
             Button {
                 if controller.state == .paused {
                     controller.resume()
@@ -304,6 +323,18 @@ private extension View {
 
 // MARK: - PiP 小窗拖动锚点（T15，未改动）
 
+/// T5 pip-swap 对调按钮可见性纯函数（spec §3.1 出现条件钉定，无头可测——
+/// DiscardConfirmationTests 收矩阵钉测）。
+extension FloatingControlBar {
+    /// 对调按钮出现条件：录制中或暂停 **且** 本场摄像头画中画已激活（真源 =
+    /// `CameraPiPWindowController.isPiPRecordingActive`：仅视频画布模式 begin 成功才置位
+    /// ——cameraOnly/audioOnly/纯屏幕场自然 false，无需另查捕获模式）。其余状态
+    ///（idle/countdown/finishing）与无 PiP 场一律不出现；暂停中对调合法（恢复后新布局生效）。
+    static func isPipSwapVisible(state: CaptureState, pipRecordingActive: Bool) -> Bool {
+        pipRecordingActive && (state == .recording || state == .paused)
+    }
+}
+
 /// PiP 小窗拖动锚点（T15）：浮窗初始摆放与浮条的避让关系——浮条钉在可视区顶部居中，
 /// PiP 锚在右上角；若可视区窄到两者重叠，PiP 整体下移到浮条下方（不遮浮条）。拖动开始后
 /// 位置由浮窗自行汇报（frame 变化实时进合成器），本函数只管首次锚点（纯函数，无头钉测）。
@@ -377,6 +408,12 @@ final class FloatingControlBarPanel {
     private var onToggleMarkingAction: (() -> Void)?
     /// Q3 重录出口接线（attachRestartRecording 注入；nil = 未接线，按钮空出口）。
     private var onRestartRecordingAction: (() -> Void)?
+    /// T5 pip-swap 对调按钮态（refreshPipSwap 直传存值）：实视图与探测视图共用同值——
+    /// 探测漏字段即武装态面板宽错误（按钮出现/消失改变面板宽，字段保齐纪律）。缺省隐藏。
+    private var pipSwapAvailable = false
+    private var pipSwapped = false
+    /// T5 对调切换出口接线（attachPipSwap 注入；nil = 未接线，按钮空出口）。
+    private var onTogglePipSwapAction: (() -> Void)?
     private var isShowing = false
     /// 裁定 3（缺陷①）：位置会话内保留——首次显示定位，此后显示不重置。
     private var hasShownThisSession = false
@@ -465,7 +502,33 @@ final class FloatingControlBarPanel {
             regionRegistry: regionRegistry,
             isMarkingEnabled: enabled,
             onToggleMarking: { [weak self] in self?.onToggleMarkingAction?() },
-            onRestartRecording: { [weak self] in self?.onRestartRecordingAction?() })
+            onRestartRecording: { [weak self] in self?.onRestartRecordingAction?() },
+            isPipSwapAvailable: pipSwapAvailable,
+            pipSwapped: pipSwapped,
+            onTogglePipSwap: { [weak self] in self?.onTogglePipSwapAction?() })
+    }
+
+    // MARK: pip-swap 对调按钮接线（T5，attachRestartRecording / refreshMarkingToggle 先例同款）
+
+    /// 注入对调按钮的态取数与切换出口，并按当前值立即换装（装配期一次性挂载，无订阅
+    /// 副作用）。可用性/对调态由装配层后续经 `refreshPipSwap` **发射值直传**（本层不回拉
+    /// provider——sink 在 @Published willSet 阶段同步执行，回拉是旧值，修复轮2 Critical 1
+    /// 纪律），此处的 provider 只供 attach 时刻取初值。
+    func attachPipSwap(provider: @escaping () -> (available: Bool, swapped: Bool),
+                       toggle: @escaping () -> Void) {
+        onTogglePipSwapAction = toggle
+        let current = provider()
+        refreshPipSwap(available: current.available, swapped: current.swapped)
+    }
+
+    /// 对调按钮态换装（装配层 refreshPipSwapSurfaces 每次 state/对调变化时调；发射值直传，
+    /// 修复轮2 Critical 1 同款约束——不得回拉 provider）。幂等换装；按钮出现/消失改变面板
+    /// 宽，换装后重测尺寸（updatePanelSize 内尺寸未变为无操作）。
+    func refreshPipSwap(available: Bool, swapped: Bool) {
+        pipSwapAvailable = available
+        pipSwapped = swapped
+        refreshRootView(enabled: markingEnabledProvider.map { $0() } ?? false)
+        updatePanelSize()
     }
 
     private func apply(_ state: CaptureState) {
@@ -502,13 +565,21 @@ final class FloatingControlBarPanel {
     }
 
     /// 武装态尺寸跟随：离屏探测视图重测 fittingSize，保持 midX 与 maxY 居中扩缩（不跳位、
-    /// 不重置用户拖过的位置）。尺寸未变时为无操作（含订阅初始值投递）。
+    /// 不重置用户拖过的位置）。尺寸未变时为无操作（含订阅初始值投递）。T5：探测视图与
+    /// 实视图**字段保齐**（isMarkingEnabled + pip 三字段——⇄ 按钮出现/消失改变面板宽，
+    /// 探测漏字段即武装态尺寸错误）。
     private func updatePanelSize() {
         let probe = NSHostingView(rootView: FloatingControlBar(
             controller: controller,
             discardConfirmation: discardConfirmation,
             restartConfirmation: restartConfirmation,
-            regionRegistry: regionRegistry))
+            regionRegistry: regionRegistry,
+            isMarkingEnabled: markingEnabledProvider.map { $0() } ?? false,
+            onToggleMarking: { [weak self] in self?.onToggleMarkingAction?() },
+            onRestartRecording: { [weak self] in self?.onRestartRecordingAction?() },
+            isPipSwapAvailable: pipSwapAvailable,
+            pipSwapped: pipSwapped,
+            onTogglePipSwap: { [weak self] in self?.onTogglePipSwapAction?() }))
         let newSize = probe.fittingSize
         guard newSize.width > 0, newSize != panel.frame.size else { return }
         let old = panel.frame

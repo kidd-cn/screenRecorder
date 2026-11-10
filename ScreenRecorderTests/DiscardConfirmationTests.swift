@@ -182,3 +182,31 @@ final class DragSurfaceRouterTests: XCTestCase {
             point: CGPoint(x: 99, y: 0), interactiveRegions: Self.buttons))
     }
 }
+
+// MARK: - FloatingControlBar.isPipSwapVisible（T5 对调按钮可见性纯函数）
+
+/// 对调按钮出现条件矩阵（spec §3.1 钉定）：录制中或暂停 **且** 本场摄像头画中画已激活
+/// 才出现。浮条纯逻辑收本文件的既有惯例（DiscardConfirmation / DragSurfaceRouter 同段）；
+/// 纯函数无头可测，不触 SwiftUI 视图。
+final class PipSwapVisibilityTests: XCTestCase {
+
+    /// 出现矩阵：recording/paused × PiP 激活 → true；其余组合（无 PiP / idle /
+    /// countdown / finishing）一律 false——倒计时与收尾期浮条本不在录制面，对调入口随之缺席。
+    func testPipSwapVisibilityMatrix() {
+        XCTAssertTrue(FloatingControlBar.isPipSwapVisible(state: .recording, pipRecordingActive: true),
+                      "录制中 + PiP 激活 → 出现")
+        XCTAssertTrue(FloatingControlBar.isPipSwapVisible(state: .paused, pipRecordingActive: true),
+                      "暂停中 + PiP 激活 → 出现（暂停中对调合法，恢复后新布局生效）")
+        XCTAssertFalse(FloatingControlBar.isPipSwapVisible(state: .recording, pipRecordingActive: false),
+                       "录制中但本场无 PiP（未启用/降级纯屏）→ 不出现")
+        XCTAssertFalse(FloatingControlBar.isPipSwapVisible(state: .paused, pipRecordingActive: false),
+                       "暂停中但本场无 PiP → 不出现")
+        XCTAssertFalse(FloatingControlBar.isPipSwapVisible(state: .idle, pipRecordingActive: true),
+                       "idle → 不出现")
+        XCTAssertFalse(FloatingControlBar.isPipSwapVisible(
+            state: .countdown(secondsLeft: 3), pipRecordingActive: true),
+                       "倒计时 → 不出现")
+        XCTAssertFalse(FloatingControlBar.isPipSwapVisible(state: .finishing, pipRecordingActive: true),
+                       "收尾 → 不出现（含 finishing/idle 收按钮纪律）")
+    }
+}
