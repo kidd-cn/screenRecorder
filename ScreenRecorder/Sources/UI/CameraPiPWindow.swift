@@ -47,17 +47,14 @@ final class CameraPiPWindow: NSPanel {
         overlay.isHidden = true
         content.layer?.addSublayer(overlay)
         previewOverlayLayer = overlay
-        // T5 对调态缩略图层（spec §3.3 修订：内容 = 成片缩影）：**顶层**子层（最后添加 =
-        // 盖过预览层与背景覆盖层，免去其显隐状态腾挪）；黑底占位（首帧缩影未到即黑，不
-        // 透出底下摄像头预览）；contentsGravity **resizeAspect**——缩影是完整对调布局
-        //（黑底画布 + 摄像头主画面 + 小图同位角标），必须 aspect-fit **完整可见含黑边**
-        //（aspect-fill 会裁掉黑边与画布边缘，「整窗所见即整片所得」破功）；圆角由 content
-        // 层既有 masksToBounds+cornerRadius 12 统一裁切。跨场 begin 的 installPreviewLayer
-        // 重建 content——本层随之重建并复位隐藏（会话复位全链的窗口侧机制，配合
-        // beginRecording 显式 setScreenThumbnailMode(false)）。
+        // T5 对调态屏幕缩略图层：**顶层**子层（最后添加 = 盖过预览层与背景覆盖层，免去其
+        // 显隐状态腾挪）；黑底占位（首帧缩略图未到即黑，不透出底下摄像头预览）；aspect-fill
+        // 与成片摆放同语义；圆角由 content 层既有 masksToBounds+cornerRadius 12 统一裁切。
+        // 跨场 begin 的 installPreviewLayer 重建 content——本层随之重建并复位隐藏（会话
+        // 复位全链的窗口侧机制，配合 beginRecording 显式 setScreenThumbnailMode(false)）。
         let thumbnail = CALayer()
         thumbnail.frame = content.bounds
-        thumbnail.contentsGravity = .resizeAspect
+        thumbnail.contentsGravity = .resizeAspectFill
         thumbnail.backgroundColor = NSColor.black.cgColor
         thumbnail.isHidden = true
         content.layer?.addSublayer(thumbnail)
@@ -87,16 +84,15 @@ final class CameraPiPWindow: NSPanel {
 
     private var screenThumbnailLayer: CALayer?
 
-    /// 对调态浮窗内容切换（主线程）：true = 缩略图层置顶显示（黑底占位，首帧缩影未到
-    /// 即黑）；false = 恢复摄像头预览。窗内所见即成片所得——内容是成片缩影（黑底画布 +
-    /// 摄像头主画面 + 小图同位角标，spec §3.3 修订版），contentsGravity resizeAspect
-    /// **完整可见含黑边**；圆角由 content 层既有 masksToBounds+cornerRadius 12 统一
+    /// 对调态浮窗内容切换（主线程）：true = 屏幕缩略图层置顶显示（黑底占位，首帧缩略图
+    /// 未到即黑）；false = 恢复摄像头预览。窗内所见即成片所得——contentsGravity 与成片
+    /// inset 同为 aspect-fill；圆角由 content 层既有 masksToBounds+cornerRadius 12 统一
     /// 裁切。未装配层（无头测试/装配前）静默忽略，幂等。
     func setScreenThumbnailMode(_ active: Bool) {
         screenThumbnailLayer?.isHidden = !active
     }
 
-    /// 贴成片缩影（主线程调用；nil = 清空回黑底占位）。未装配层时静默忽略。
+    /// 贴屏幕缩略图（主线程调用；nil = 清空回黑底占位）。未装配层时静默忽略。
     func updateScreenThumbnailImage(_ image: CGImage?) {
         screenThumbnailLayer?.contents = image
     }
@@ -114,6 +110,82 @@ final class CameraPiPWindow: NSPanel {
         let cf = contents as CFTypeRef
         guard CFGetTypeID(cf) == CGImage.typeID else { return nil }
         return unsafeDowncast(cf, to: CGImage.self)
+    }
+}
+
+// MARK: - CameraFullscreenPreviewWindow（对调态全屏摄像头视图，spec §3.3 二次修订）
+
+/// 对调态全屏摄像头实时预览（NSPanel，2026-11-11 用户拍板）：盖住摄像头浮窗所在屏、
+/// 镜像自视图（预览特权，自拍观感——成片仍「他人视角」不镜像，P7b 同口径）、aspect-fill
+/// 铺满（预览特权——裁剪边界不入成片故无碍）。采集排除不入成片：`sharingType = .none`
+///（spec 钉定）+ ScreenCaptureKit 对采集进程自有窗口的隐式排除（浮窗/浮条不入成片的同一
+/// 机制，真机验收已证）。窗口纪律（浮窗 `CameraPiPWindow` 口径照抄）：
+/// - level = 浮窗（`.floating`）**下一档**——小浮窗与浮条（同 `.floating`）悬浮其上保持
+///   可点（换回/暂停/停止可达），正常窗在其之下（盖桌）；
+/// - collectionBehavior 同浮窗（canJoinAllSpaces + fullScreenAuxiliary，全屏应用之上也在）；
+/// - 非激活（nonactivatingPanel + orderFrontRegardless，不抢 key——录制不能被打断）。
+/// 生命周期由 `CameraPiPWindowController` 管辖：只随 `setLayoutSwapped(true)` 进场、
+/// false/end/begin 收（幂等）；预览层每次进场重装（跨场 stop→start 后 previewLayer 重建，
+/// 重装一并重钉镜像与重力，杜绝连接重建后的钉定丢失）。
+final class CameraFullscreenPreviewWindow: NSPanel {
+    /// level：浮窗（`.floating`）下一档（浮条与浮窗同层——三者相对次序全由本值钉定）。
+    static let level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue - 1)
+
+    /// 默认全屏视图：1×1 占位起窗（frame 由进场时的所在屏 bounds 覆写），窗口纪律见类注释。
+    static func makeDefault() -> CameraFullscreenPreviewWindow {
+        let panel = CameraFullscreenPreviewWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1, height: 1),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.level = Self.level
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.isMovableByWindowBackground = false // 背景幕布不可拖——拖动语义在小浮窗（拖=挪小图）
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary] // 同浮窗
+        panel.sharingType = .none // 采集排除（spec §3.3 钉定；与浮窗同机制并存，纵深防御）
+        panel.hasShadow = false // 全屏幕布无影
+        return panel
+    }
+
+    /// 安装摄像头预览层（同一 capture session 的**新**预览实例——浮窗侧持有系统建的那只，
+    /// CALayer 单父约束下全屏视图另建一层）。layer nil（摄像头未启动/无头测试）时仅铺黑底
+    /// ——装配路径不因预览缺位而失败。进场时序：setFrame（所在屏 bounds）先行，本方法随后，
+    /// 预览层 frame 恰为整屏。
+    func installPreviewLayer(_ layer: AVCaptureVideoPreviewLayer?) {
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.black.cgColor // 首帧未到 = 诚实黑幕布
+        if let layer {
+            layer.videoGravity = .resizeAspectFill // aspect-fill 铺满（spec §3.3 钉定）
+            layer.frame = content.bounds
+            Self.ensureMirroredSelfView(on: layer) // 镜像自视图（预览特权，见缝注释）
+            content.layer?.addSublayer(layer)
+        }
+        contentView = content
+    }
+
+    /// 镜像自视图钉定（internal 缝，无头钉测可断言跳过路径；exposureAnchoringPlan 同款
+    /// 「决策缝」先例）。macOS API 台账（brief 写的 `connection isMirrored` 为 iOS 名）：
+    /// macOS 连接属性是 `videoMirrored`（getter `isVideoMirrored`，10.7+），而
+    /// `automaticallyAdjustsVideoMirroring` 是 **iOS 专属**（macOS 不可读不可写）——「先关
+    /// 自动镜像再显式钉定」的 iOS 形在 macOS 不存在，且文档钉明自动调整在位时置位
+    /// `videoMirrored` 抛 NSInvalidArgumentException。故 macOS 口径**读优先**：连接已镜像
+    ///（macOS 前置预览的系统自动镜像——浮窗同款真机 observed 行为，同一 session 的全屏
+    /// 层同享）直接放行零置位（零异常风险）；未镜像时支持性守卫 + 显式置位（自拍观感，
+    /// 预览特权——成片仍「他人视角」不镜像，P7b 同口径）。无连接（会话未运行/无头测试）
+    /// 安全跳过返回 false——黑底装配不失败。
+    /// - Returns: 调用后连接是否处于镜像态（无头恒 false；真机 = true）。
+    @discardableResult
+    static func ensureMirroredSelfView(on layer: AVCaptureVideoPreviewLayer) -> Bool {
+        guard let connection = layer.connection else { return false }
+        if connection.isVideoMirrored { return true } // 已镜像（系统自动镜像在位）：零置位
+        guard connection.isVideoMirroringSupported else { return false }
+        connection.isVideoMirrored = true
+        return true
     }
 }
 
@@ -183,6 +255,9 @@ final class CameraPiPWindowController {
     private let stopCamera: (CameraPiPController) -> Void
     private let frameStore = PiPFrameStore()
     private var window: CameraPiPWindow?
+    /// 对调态全屏摄像头视图（spec §3.3 二次修订）：懒创建跨场录制复用（与浮窗同款纪律）；
+    /// nil = 从未对调进场。
+    private var fullscreenWindow: CameraFullscreenPreviewWindow?
     /// PiP 会话闸（P5 实时换背景）：begin 成功装配（浮窗已显示）置 true、end 复位。
     /// 降级纯屏幕（几何缺位/摄像头失败）不置位——无 PiP 场的设置变化无消费面，下一场
     /// begin 快照按当时设置装配。
@@ -209,6 +284,9 @@ final class CameraPiPWindowController {
     /// 帧回调自首帧起即走正确路径（nil = 一期旁路，blur/builtin = 处理流水线）。
     func beginRecording(geometry: PiPCaptureGeometry?,
                         backgroundProcessor: CameraBackgroundProcessor? = nil) {
+        // 全屏摄像头视图安全收（spec §3.3：begin 幂等收起——防上一场异常残留：降级路径
+        // （geometry 缺位/摄像头失败）也收，几何守卫前置不妨碍清场）。
+        fullscreenWindow?.orderOut(nil)
         guard let geometry else {
             NSLog("CameraPiP: 本模式无可用的 PiP 换算几何，本次录制为纯屏幕")
             return
@@ -264,11 +342,12 @@ final class CameraPiPWindowController {
         frameStore.setScreenRect(nil, screenFrame: .zero, cgDisplayOrigin: .zero)
         frameStore.setGeometry(nil)
         frameStore.setLayoutSwapped(false) // 幂等复位（与 begin 复位互为双保险）
-        // 对调态缩影 contents 清 nil（Ruling 16① 收口）：setScreenThumbnailMode(false)
-        // 仅隐藏层不清 contents——最后一张缩影 CGImage（~230KB）随浮窗跨场滞留，同场
+        // 对调态缩略图 contents 清 nil（Ruling 16① 收口）：setScreenThumbnailMode(false)
+        // 仅隐藏层不清 contents——最后一张缩略图 CGImage（~230KB）随浮窗跨场滞留，同场
         // 换回（对调 → 换回 → 再对调）还会闪 ≤0.5s 陈旧预览。经既有更新路径清（黑底占位）。
         window?.updateScreenThumbnailImage(nil)
         window?.orderOut(nil)
+        fullscreenWindow?.orderOut(nil) // 对调态全屏视图幂等收起（spec §3.3：end 收）
         stopCamera(camera)
     }
 
@@ -280,12 +359,49 @@ final class CameraPiPWindowController {
     // MARK: 对调状态桥（spec §3.1：会话级 layoutSwapped 布尔）
 
     /// 对调画面主入口（浮条按钮经装配层调用）：翻 PiPFrameStore 旗标 + 浮窗内容切换
-    ///（**旗标写在前**——video 队列下一帧即按新布局合成；浮窗换装随后，屏幕缩略图层
-    /// ↔ 摄像头预览）。window nil（降级纯屏/装配前）时仅旗标生效。
+    ///（**旗标写在前**——video 队列下一帧即按新布局合成；浮窗换装随后，摄像头预览 ↔
+    /// 屏幕缩略图层）+ 全屏摄像头视图开收（spec §3.3 二次修订：true 进场盖住浮窗所在屏、
+    /// false 换回即收）。window nil（降级纯屏/装配前）时仅旗标生效（无浮窗即无对调现场，
+    /// 全屏视图也不开——无所在屏可锚）。
     func setLayoutSwapped(_ swapped: Bool) {
         frameStore.setLayoutSwapped(swapped)
         window?.setScreenThumbnailMode(swapped)
+        if swapped {
+            showFullscreenCameraPreview()
+        } else {
+            fullscreenWindow?.orderOut(nil)
+        }
     }
+
+    /// 对调进场（主线程）：全屏摄像头视图盖住浮窗所在屏（兜底主屏，spec §3.3 摆位钉定）。
+    /// 预览层每次进场重装——跨场 stop→start 后 camera.previewLayer 重建（同一 session
+    /// 实例），重装一并重钉镜像与重力，杜绝连接重建后的钉定丢失；每次进场一次，非逐帧
+    /// 成本。orderFrontRegardless 不夺焦点（nonactivatingPanel，录制不能被打断）。
+    private func showFullscreenCameraPreview() {
+        guard let window else { return }
+        let fullscreen = ensureFullscreenWindow()
+        let screen = window.screen ?? NSScreen.main
+        fullscreen.setFrame(screen?.frame ?? window.frame, display: true)
+        fullscreen.installPreviewLayer(makeFullscreenPreviewLayer())
+        fullscreen.orderFrontRegardless()
+    }
+
+    /// 全屏预览层取数：同一 capture session 的新预览实例（camera.previewLayer 只在 lifecycle
+    /// 队列写，此处主线程只读 `session` 引用转装新层——不触碰 CameraPiPController 内部）。
+    /// 摄像头未启动/无头测试（previewLayer nil）返回 nil = 全屏视图铺黑底（装配不失败）。
+    private func makeFullscreenPreviewLayer() -> AVCaptureVideoPreviewLayer? {
+        guard let session = camera.previewLayer?.session else { return nil }
+        return AVCaptureVideoPreviewLayer(session: session)
+    }
+
+    /// 全屏视图懒创建（跨场录制复用）。
+    private func ensureFullscreenWindow() -> CameraFullscreenPreviewWindow {
+        if let fullscreenWindow { return fullscreenWindow }
+        let panel = CameraFullscreenPreviewWindow.makeDefault()
+        fullscreenWindow = panel
+        return panel
+    }
+
     /// 当前对调态（video 队列可读：`layoutSwappedProvider` 逐帧取数的取数缝）。
     nonisolated var isLayoutSwapped: Bool { frameStore.isLayoutSwapped }
 
@@ -294,9 +410,9 @@ final class CameraPiPWindowController {
     /// 自然不出现，无需另查捕获模式。
     var isPiPRecordingActive: Bool { isRecordingActive }
 
-    /// 对调态成片缩影入口（SCStreamRecorder `swappedPreviewConsumer` 缝，video 队列
-    /// 调用，nonisolated）：渲染完成的缩影 CGImage 跳主 actor 贴浮窗缩略图层。window
-    /// nil（降级纯屏/场外残余投递）静默丢弃；≤0.5s/张节流在 recorder 侧。
+    /// 对调态屏幕缩略图入口（SCStreamRecorder `screenThumbnailConsumer` 缝，video 队列
+    /// 调用，nonisolated）：渲染完成的 CGImage 跳主 actor 贴浮窗缩略图层。window nil
+    ///（降级纯屏/场外残余投递）静默丢弃；≤0.5s/张节流在 recorder 侧。
     nonisolated func updateScreenThumbnail(_ cg: CGImage) {
         Task { @MainActor in
             self.window?.updateScreenThumbnailImage(cg)
@@ -402,6 +518,10 @@ final class CameraPiPWindowController {
 
     /// 预览跟背景覆盖层可见性（internal 只读，测试断言装配/收起）。
     var isPreviewOverlayVisible: Bool { window?.isPreviewOverlayVisible ?? false }
+
+    /// 对调态全屏摄像头视图（internal 只读，无头测试断言开收与窗口纪律：sharingType/
+    /// level/frame）。nil = 从未对调进场。
+    var fullscreenCameraPreviewWindow: CameraFullscreenPreviewWindow? { fullscreenWindow }
 
     /// 以真实 setFrame 路径移动浮窗（触发 didMove/didResize 通知 → 拖动锚点全链）。
     func moveWindowForTesting(to frame: NSRect) {

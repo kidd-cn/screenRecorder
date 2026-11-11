@@ -613,21 +613,20 @@ final class CameraPiPWindowControllerTests: XCTestCase {
 
     // MARK: T5 对调态浮窗换装（屏幕缩略图层 ↔ 摄像头预览）
 
-    /// 缩略图层 gravity 钉测（成片缩影 spec §3.3 修订，真 RED 先行）：对调态浮窗承载完整
-    /// 对调布局缩影（黑底画布 + 摄像头主画面 + 屏幕小图同位角标）——contentsGravity 必须
-    /// resizeAspect，缩影 **完整可见含黑边**（aspect-fill 会裁掉黑边与画布边缘，「整窗所
-    /// 见即整片所得」破功）。无头直读 layer（windowThumbnailImage 同款无头缝）：缩略图层
-    /// 是 installPreviewLayer 最后添加的子层，经 contentView 子层序取层（topmost 装配序
-    /// 同钉），不新增生产面。
-    func testScreenThumbnailLayerUsesAspectFitGravity() throws {
+    /// 缩略图层 gravity 钉测（spec §3.3 二次修订回退 T5 原语义，真 RED 先行）：对调态浮窗
+    /// = 屏幕内容实时缩略图（非成片缩影）——contentsGravity 必须 aspect-fill，与成片摆放
+    /// 同语义（窗内所见即成片小图所得；首帧未到黑底占位）。无头直读 layer
+    ///（windowThumbnailImage 同款无头缝）：缩略图层是 installPreviewLayer 最后添加的子层，
+    /// 经 contentView 子层序取层（topmost 装配序同钉），不新增生产面。
+    func testScreenThumbnailLayerUsesAspectFillGravity() throws {
         let panel = CameraPiPWindow.makeDefault()
         panel.installPreviewLayer(nil)
         let thumbnailLayer = try XCTUnwrap(
             panel.contentView?.layer?.sublayers?.last,
             "缩略图层必须是最后装配的子层（topmost，盖过预览层与背景覆盖层）")
         XCTAssertEqual(
-            thumbnailLayer.contentsGravity, .resizeAspect,
-            "对调态浮窗 = 成片缩影：必须 aspect-fit 完整可见（含黑边），不得 aspect-fill 裁边")
+            thumbnailLayer.contentsGravity, .resizeAspectFill,
+            "对调态浮窗 = 屏幕缩略图：aspect-fill 与成片小图摆放同语义（T5 原钉定语义）")
     }
 
     /// 断源链钉测同款捕获缝（capturedCamera 先例）：windowFactory 在 beginRecording 的
@@ -712,6 +711,84 @@ final class CameraPiPWindowControllerTests: XCTestCase {
 
         controller.endRecording()
         XCTAssertNil(panel.windowThumbnailImage, "endRecording 必须清空缩略图 contents（跨场滞留 / 闪旧图防御）")
+    }
+
+    // MARK: 对调态全屏摄像头视图（spec §3.3 二次修订，2026-11-11 用户拍板）
+
+    /// swap-in 钉测（真 RED 先行）：begin 后 `setLayoutSwapped(true)` → 全屏摄像头视图
+    /// 出现——盖住浮窗所在屏（frame = 浮窗所在屏 bounds）、采集排除（sharingType .none，
+    /// 不入成片）、level 低于浮窗（浮窗与浮条同 .floating——小浮窗与浮条悬浮其上保持可点，
+    /// 换回/暂停/停止可达）、高于正常窗（盖桌）。
+    func testSwapInShowsFullscreenCameraPreview() throws {
+        let controller = makeControllerCapturingWindow()
+        controller.beginRecording(geometry: geometry)
+        let panel = try XCTUnwrap(capturedWindow, "windowFactory 缝必须捕获到装配的浮窗")
+
+        controller.setLayoutSwapped(true)
+
+        let fullscreen = try XCTUnwrap(
+            controller.fullscreenCameraPreviewWindow, "对调进场必须装配全屏摄像头视图")
+        XCTAssertTrue(fullscreen.isVisible, "对调态全屏摄像头视图必须显示（盖住浮窗所在屏）")
+        XCTAssertEqual(fullscreen.sharingType, .none, "采集排除：sharingType .none（不入成片）")
+        XCTAssertLessThan(fullscreen.level, panel.level, "level 必须低于浮窗（浮条同 .floating——悬浮其上可点）")
+        XCTAssertGreaterThan(fullscreen.level, NSWindow.Level.normal, "level 必须高于正常窗（盖桌）")
+        XCTAssertEqual(
+            fullscreen.frame, panel.screen?.frame ?? NSScreen.main?.frame,
+            "摆位 = 摄像头浮窗所在屏 bounds（兜底主屏）")
+    }
+
+    /// swap-out 钉测：换回即收（orderOut）；重复 false 幂等不崩。
+    func testSwapOutHidesFullscreenCameraPreview() throws {
+        let controller = makeControllerCapturingWindow()
+        controller.beginRecording(geometry: geometry)
+        controller.setLayoutSwapped(true)
+        let fullscreen = try XCTUnwrap(controller.fullscreenCameraPreviewWindow, "夹具自检：进场须装配")
+        XCTAssertTrue(fullscreen.isVisible, "夹具自检：对调态必须可见")
+
+        controller.setLayoutSwapped(false)
+        XCTAssertFalse(fullscreen.isVisible, "换回即收")
+        controller.setLayoutSwapped(false)
+        XCTAssertFalse(fullscreen.isVisible, "重复 false 幂等（不崩不复显）")
+    }
+
+    /// end/begin 幂等收钉测（防异常场残留）：对调态收场即收、重复 end 幂等；下一场 begin
+    /// 后（浮窗跨场复用）全屏视图必须仍不可见——每场开始屏幕为主（spec §3.1）。
+    func testEndAndBeginHidesFullscreenCameraPreview() throws {
+        let controller = makeControllerCapturingWindow()
+        controller.beginRecording(geometry: geometry)
+        controller.setLayoutSwapped(true)
+        let fullscreen = try XCTUnwrap(controller.fullscreenCameraPreviewWindow, "夹具自检：进场须装配")
+        XCTAssertTrue(fullscreen.isVisible, "夹具自检：对调态必须可见")
+
+        controller.endRecording()
+        XCTAssertFalse(fullscreen.isVisible, "endRecording 幂等收起")
+        controller.endRecording()
+        XCTAssertFalse(fullscreen.isVisible, "重复 end 幂等（不崩不复显）")
+
+        controller.beginRecording(geometry: geometry)
+        XCTAssertFalse(fullscreen.isVisible, "下一场 begin 安全收（防异常场残留）")
+    }
+
+    /// 全屏预览层纪律钉测（可经 layer 树读取部分）：装入全屏视图的层必须是
+    /// AVCaptureVideoPreviewLayer，videoGravity 钉 aspect-fill（铺满——预览特权，裁剪边界
+    /// 不入成片故无碍）。镜像自视图钉定走层缝（AVCaptureConnection 在会话运行后才存在，
+    /// 且 macOS 无公开连接构造器——无头无真连接）：无连接必须安全跳过（不崩、诚实返回
+    /// false、黑底装配照常落层）——镜像真路径是 spec §5 真机验收项（「对调态现场 = 全屏
+    /// 摄像头视图（镜像、盖桌、不入成片）」）。
+    func testFullscreenPreviewLayerGravityAndMirroring() throws {
+        let window = CameraFullscreenPreviewWindow.makeDefault()
+        let layer = AVCaptureVideoPreviewLayer(session: AVCaptureSession())
+        window.installPreviewLayer(layer)
+
+        XCTAssertEqual(
+            window.contentView?.layer?.sublayers?.first, layer,
+            "预览层必须装入全屏视图层树")
+        XCTAssertEqual(
+            layer.videoGravity, .resizeAspectFill,
+            "全屏视图 aspect-fill 铺满（spec §3.3 钉定）")
+        XCTAssertFalse(
+            CameraFullscreenPreviewWindow.ensureMirroredSelfView(on: layer),
+            "无连接（会话未运行/无头）必须安全跳过镜像钉定（不崩、诚实 false）")
     }
 
     /// 夹具：纯色 CGImage（贴层断言只需非 nil 图，不验像素）。

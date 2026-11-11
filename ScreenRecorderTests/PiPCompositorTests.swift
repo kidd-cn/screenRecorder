@@ -1390,37 +1390,16 @@ final class PiPCompositorSwappedTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(Int(samplePixel(output, x: 31, y: 20).red), 200, "rect 中带中心列应满铺摄像头红")
         XCTAssertGreaterThanOrEqual(Int(samplePixel(output, x: 31, y: 39).red), 200, "rect 末行中心列应满铺摄像头红")
     }
-}
 
-// MARK: - 成片缩影（spec §3.3 修订版：对调态浮窗 = 完整对调布局实时缩略预览）
+    // MARK: 屏幕缩略图（T4 对调态浮窗数据源，spec §3.3 二次修订恢复原钉定语义）
 
-/// makeSwappedPreview 像素钉测（brief 夹具逐字）：画布 320×200 纯蓝、摄像头 160×90
-///（16:9）纯红、小图位 (240,20,60,45) 圆角 12。s = min(1, 320/320) = 1 → mini 画布 =
-/// 320×200；contain rect = (0,10,320,180)（scale = min(2, 2.22) = 2，上下黑边各 10）。
-/// 采样点避字形墨迹与圆角切割 AA 带（既有像素钉测同纪律）。缩影出图是 CGImage：经位图
-/// 上下文整幅回读采样（DeviceRGB——纯色主分量经色彩管理往返恒等，assertColor ±3 兜底）。
-final class SwappedPreviewTests: XCTestCase {
-    private let screenBlue = BGRAColor(blue: 255, green: 0, red: 0, alpha: 255) // 纯蓝（屏幕）
-    private let cameraRed = BGRAColor(blue: 0, green: 0, red: 255, alpha: 255)  // 纯红（摄像头）
-    private let pureBlack = BGRAColor(blue: 0, green: 0, red: 0, alpha: 255)
-
-    /// 统一入口：320×200 蓝屏帧 + 参夹具 → makeSwappedPreview（maxEdgeLength 缺省 320，
-    /// brief 钉定签名；合成器自带 context——同旧缩略图缝出图口径）。
-    private func makePreview(camera: CVPixelBuffer?, pipFrame: PiPFrame?) throws -> CGImage {
-        let compositor = PiPCompositor(pixelSize: CGSize(width: 320, height: 200))
-        let screen = try XCTUnwrap(
-            makeColorBuffer(width: 320, height: 200, color: screenBlue), "屏幕夹具创建失败")
-        return try XCTUnwrap(
-            compositor.makeSwappedPreview(camera: camera, screen: screen, pipFrame: pipFrame),
-            "makeSwappedPreview 须出图（夹具全合法）")
-    }
-
-    /// CGImage 像素采样：整幅绘制进 8bit DeviceRGB 位图（context 自管缓冲）后按坐标取
-    /// BGRA。行序实证（首跑 RED 反推）：createCGImage 出图内存第 0 行 = 缓冲顶行（buffer
-    /// y=0）——draw 进位图上下文后上下文第 r 行 = 图像缓冲第 r 行，采样**不翻 y**、直读
-    /// `y * bytesPerRow`。字节序 RGBA（premultipliedLast = alpha 在末字节）→ 通道映射
-    /// R,G,B,A → BGRAColor（与既有 CVPixelBuffer 采样同通道序口径）。
-    private func samplePixel(_ image: CGImage, x: Int, y: Int) -> BGRAColor {
+    /// CGImage 像素采样（21087e9 成片缩影钉测的 CGBitmapContext 采样器原样迁入）：整幅绘制进 8bit
+    /// DeviceRGB 位图（context 自管缓冲）后按坐标取 BGRA。行序实证（首跑 RED 反推）：
+    /// createCGImage 出图内存第 0 行 = 缓冲顶行（buffer y=0）——draw 进位图上下文后上下文
+    /// 第 r 行 = 图像缓冲第 r 行，采样**不翻 y**、直读 `y * bytesPerRow`。字节序 RGBA
+    ///（premultipliedLast = alpha 在末字节）→ 通道映射 R,G,B,A → BGRAColor（与既有
+    /// CVPixelBuffer 采样同通道序口径）。
+    private func sampleCGPixel(_ image: CGImage, x: Int, y: Int) -> BGRAColor {
         let width = image.width
         let height = image.height
         guard x >= 0, x < width, y >= 0, y < height else {
@@ -1438,53 +1417,53 @@ final class SwappedPreviewTests: XCTestCase {
         return BGRAColor(blue: pixel[2], green: pixel[1], red: pixel[0], alpha: pixel[3])
     }
 
-    /// 主钉测（brief 夹具逐字）：黑底画布 + contain 主画面 + 小图同位角标全布局在位。
-    /// 钉：画布角 (5,5) 纯黑；黑边带 (10,5)/(10,195) 纯黑（contain rect = (0,10,320,180)
-    /// 上下黑边各 10 的几何随之钉死）；摄像头区 (50,100) 纯红；角标内 (265,40) 纯蓝；
-    /// 角标圆角外角点 (241,21)——距角心 (252,32) √(11²+11²)≈15.6 > 12、在圆角切割区，
-    /// 透出**下层摄像头红**（该点在 contain rect 内，按「红/黑按 contain 位置」规则取红；
-    /// 「角内蓝 + 角外红」一对采样合钉「角标在位且圆角在位」——方角回归则此处必蓝）。
-    func testSwappedPreviewShowsCameraContainMainAndScreenInsetBadge() throws {
-        let camera = try XCTUnwrap(
-            makeColorBuffer(width: 160, height: 90, color: cameraRed), "摄像头夹具创建失败")
-        let pipFrame = PiPFrame(
-            rectInCapturePixels: CGRect(x: 240, y: 20, width: 60, height: 45), cornerRadius: 12)
-        let preview = try makePreview(camera: camera, pipFrame: pipFrame)
-
-        XCTAssertEqual(preview.width, 320, "画布最长边 320 已达 maxEdgeLength：s=1，mini 画布 320×200")
-        XCTAssertEqual(preview.height, 200, "mini 画布等比 = 画布原尺寸")
-        assertColor(samplePixel(preview, x: 5, y: 5), equals: pureBlack, "画布角 (5,5) 纯黑（上黑边带——黑底画布在位）")
-        assertColor(samplePixel(preview, x: 10, y: 5), equals: pureBlack, "黑边带 (10,5) 纯黑（上黑边 10px）")
-        assertColor(samplePixel(preview, x: 10, y: 195), equals: pureBlack, "黑边带 (10,195) 纯黑（下黑边 10px）")
-        assertColor(samplePixel(preview, x: 50, y: 100), equals: cameraRed, "摄像头主画面区 (50,100) 纯红（contain (0,10,320,180) 内）")
-        assertColor(samplePixel(preview, x: 265, y: 40), equals: screenBlue, "角标内 (265,40) 纯蓝（屏幕小图同位角标）")
-        assertColor(samplePixel(preview, x: 241, y: 21), equals: cameraRed, "角标圆角外角点 (241,21) 透出下层摄像头红（圆角切割在位——方角回归必蓝）")
+    /// 屏幕帧缩略图（T4 数据源）：640×360 → 最长边 320（320×180）；100×50 → scale=1 原尺寸。
+    ///（ab920cc 既有钉测原样恢复——21087e9 换缩影缝时删除。）
+    func testMakeScreenThumbnailScalesLongestEdge() {
+        let compositor = makeCompositor()
+        let wide = makeColorBuffer(width: 640, height: 360, color: screenBlue)!
+        let wideThumb = compositor.makeScreenThumbnail(from: wide)
+        XCTAssertEqual(wideThumb?.width, 320, "640×360 最长边缩到 320")
+        XCTAssertEqual(wideThumb?.height, 180, "等比：320×180")
+        let small = makeColorBuffer(width: 100, height: 50, color: screenBlue)!
+        let smallThumb = compositor.makeScreenThumbnail(from: small)
+        XCTAssertEqual(smallThumb?.width, 100, "100×50 最长边 ≤ 320：scale=1 原尺寸")
+        XCTAssertEqual(smallThumb?.height, 50, "原尺寸直出")
     }
 
-    /// camera nil（断源窗口期）：缩影 = 成片真实内容——黑主画面 + 小图照常（spec §3.3：
-    /// 摄像头缺帧缩影诚实呈现黑主画面 + 小图，与成片一致，不透传旧内容）。
-    func testSwappedPreviewWithoutCameraRendersHonestBlackMain() throws {
-        let pipFrame = PiPFrame(
-            rectInCapturePixels: CGRect(x: 240, y: 20, width: 60, height: 45), cornerRadius: 12)
-        let preview = try makePreview(camera: nil, pipFrame: pipFrame)
+    /// 朝向像素钉（Minor 2 朝向停泊项彻底了结）：夹具上半蓝下半绿——缩略图第 0 行采样
+    /// 必须蓝（缓冲顶行 = 出图第 0 行，朝向不翻转）、末行必须绿（下半保持下半）。钉「缩小
+    /// 比例下顶行朝向停泊」——纯缩放变换（CI transformed）不做任何翻转，翻转回归必破钉。
+    func testMakeScreenThumbnailPreservesTopLeftOrientation() throws {
+        let compositor = makeCompositor()
+        let buffer = makeColorBuffer(width: 64, height: 40, color: screenBlue)!
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+        let bottomGreen = BGRAColor(blue: 0, green: 255, red: 0, alpha: 255)
+        if let base = CVPixelBufferGetBaseAddress(buffer) {
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+            for row in 20..<CVPixelBufferGetHeight(buffer) { // 下半刷绿
+                let rowBase = base.advanced(by: row * bytesPerRow)
+                for column in 0..<CVPixelBufferGetWidth(buffer) {
+                    let pixel = rowBase.advanced(by: column * 4).assumingMemoryBound(to: UInt8.self)
+                    pixel[0] = bottomGreen.blue
+                    pixel[1] = bottomGreen.green
+                    pixel[2] = bottomGreen.red
+                    pixel[3] = bottomGreen.alpha
+                }
+            }
+        }
+        let thumb = try XCTUnwrap(
+            compositor.makeScreenThumbnail(from: buffer), "夹具全合法：缩略图必须出图")
 
-        assertColor(samplePixel(preview, x: 50, y: 100), equals: pureBlack, "主画面区 (50,100) 纯黑（摄像头缺帧 = 诚实黑主画面）")
-        assertColor(samplePixel(preview, x: 265, y: 40), equals: screenBlue, "角标内 (265,40) 纯蓝（小图照常——断源不吞小图）")
-        assertColor(samplePixel(preview, x: 241, y: 21), equals: pureBlack, "角标圆角外角点 (241,21) 黑（无摄像头层 → 切割区露黑底画布）")
-        assertColor(samplePixel(preview, x: 10, y: 195), equals: pureBlack, "黑边带 (10,195) 仍纯黑")
-    }
-
-    /// pipFrame nil：摄像头 + 纯黑（无小图）——原角标区采样 = 红/黑按 contain 位置（本
-    /// 夹具角标 rect 全落 contain rect (0,10,320,180) 内 → 红；黑边带不受影响仍黑）。
-    func testSwappedPreviewWithoutPipFrameRendersCameraOnly() throws {
-        let camera = try XCTUnwrap(
-            makeColorBuffer(width: 160, height: 90, color: cameraRed), "摄像头夹具创建失败")
-        let preview = try makePreview(camera: camera, pipFrame: nil)
-
-        assertColor(samplePixel(preview, x: 50, y: 100), equals: cameraRed, "摄像头区 (50,100) 纯红（主画面照常）")
-        assertColor(samplePixel(preview, x: 265, y: 40), equals: cameraRed, "原角标内 (265,40) 红（无小图；该点在 contain rect 内）")
-        assertColor(samplePixel(preview, x: 241, y: 21), equals: cameraRed, "原角标角点 (241,21) 红（同上——红/黑按 contain 位置）")
-        assertColor(samplePixel(preview, x: 5, y: 5), equals: pureBlack, "画布角 (5,5) 纯黑（无小图时黑底画布照常）")
-        assertColor(samplePixel(preview, x: 10, y: 5), equals: pureBlack, "黑边带 (10,5) 仍纯黑")
+        XCTAssertEqual(thumb.width, 64, "64×40 最长边 ≤ 320：原尺寸直出")
+        XCTAssertEqual(thumb.height, 40, "原尺寸直出")
+        assertColor(
+            sampleCGPixel(thumb, x: 32, y: 0), equals: screenBlue,
+            "缩略图第 0 行 = 蓝（缓冲顶行停泊在出图顶行，朝向不翻转）")
+        assertColor(
+            sampleCGPixel(thumb, x: 32, y: 39), equals: bottomGreen,
+            "缩略图末行 = 绿（缓冲下半停泊在出图下半）")
     }
 }
+

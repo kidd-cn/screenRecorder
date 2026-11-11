@@ -142,9 +142,9 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         XCTAssertFalse(provider(), "换回后取数缝回到屏幕为主")
     }
 
-    /// 钉测 2（消费缝 wantsPiP 门控 + 端到端投递）：wantsPiP 为真时 `swappedPreviewConsumer`
+    /// 钉测 2（消费缝 wantsPiP 门控 + 端到端投递）：wantsPiP 为真时 `screenThumbnailConsumer`
     /// 非 nil 且喂图真落浮窗缩略图层（updateScreenThumbnail 主 actor hop 后 contents 非 nil）；
-    /// wantsPiP 为假（含 cameraPiP 在位）时消费缝保持 nil（无 PiP 不产缩影，热路径零渲染）。
+    /// wantsPiP 为假（含 cameraPiP 在位）时消费缝保持 nil（无 PiP 不产缩略图，热路径零渲染）。
     func testWirePipSwapSeamsThumbnailConsumerGatedByWantsPiP() async throws {
         let box = PiPWindowBox()
         let pipController = makePipControllerCapturingWindow(into: box)
@@ -154,7 +154,7 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         coordinator.wirePipSwapSeams(on: recorder, wantsPiP: true)
 
         let consumer = try XCTUnwrap(
-            recorder.swappedPreviewConsumer, "wantsPiP 场成片缩影消费缝必须装配")
+            recorder.screenThumbnailConsumer, "wantsPiP 场屏幕缩略图消费缝必须装配")
         pipController.beginRecording(geometry: pipGeometry) // 浮窗落位（updateScreenThumbnail 落点）
         let cg = try XCTUnwrap(Self.makeSolidImage(), "夹具缩略图创建失败")
         consumer(cg)
@@ -170,8 +170,8 @@ final class RecordingSessionCoordinatorTests: XCTestCase {
         let plainRecorder = SCStreamRecorder(config: makeConfig())
         coordinator.wirePipSwapSeams(on: plainRecorder, wantsPiP: false)
         XCTAssertNil(
-            plainRecorder.swappedPreviewConsumer,
-            "无 PiP 场（含 cameraPiP 在位）成片缩影消费缝必须保持 nil")
+            plainRecorder.screenThumbnailConsumer,
+            "无 PiP 场（含 cameraPiP 在位）屏幕缩略图消费缝必须保持 nil")
     }
 }
 
