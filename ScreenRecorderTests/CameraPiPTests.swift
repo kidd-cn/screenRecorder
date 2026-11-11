@@ -777,10 +777,10 @@ final class CameraPiPWindowControllerTests: XCTestCase {
 
     /// 全屏预览层纪律钉测（可经 layer 树读取部分）：装入全屏视图的层必须是
     /// AVCaptureVideoPreviewLayer，videoGravity 钉 aspect-fill（铺满——预览特权，裁剪边界
-    /// 不入成片故无碍）。镜像自视图钉定走层缝（AVCaptureConnection 在会话运行后才存在，
-    /// 且 macOS 无公开连接构造器——无头无真连接）：无连接必须安全跳过（不崩、诚实返回
-    /// false、黑底装配照常落层）——镜像真路径是 spec §5 真机验收项（「对调态现场 = 全屏
-    /// 摄像头视图（镜像、盖桌、不入成片）」）。
+    /// 不入成片故无碍）。镜像自视图 = **CA 水平翻转变换**：2026-11-11 真机实证
+    ///（探针 + 主线程卡死实录）`connection.isVideoMirrored = true` 对运行中会话的新建
+    /// 预览连接会死锁主线程——setter 整体弃用，改层变换（无连接/无头路径同样安全落变换、
+    /// 诚实返回 true）。
     func testFullscreenPreviewLayerGravityAndMirroring() throws {
         let window = CameraFullscreenPreviewWindow.makeDefault()
         let layer = AVCaptureVideoPreviewLayer(session: AVCaptureSession())
@@ -792,9 +792,15 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         XCTAssertEqual(
             layer.videoGravity, .resizeAspectFill,
             "全屏视图 aspect-fill 铺满（spec §3.3 钉定）")
-        XCTAssertFalse(
+        XCTAssertTrue(
             CameraFullscreenPreviewWindow.ensureMirroredSelfView(on: layer),
-            "无连接（会话未运行/无头）必须安全跳过镜像钉定（不崩、诚实 false）")
+            "镜像钉定必须成立（无连接路径同样落变换、返回 true）")
+        XCTAssertEqual(
+            layer.affineTransform().a, -1, accuracy: 0.0001,
+            "镜像 = 水平翻转变换（a 分量 -1；连接 setter 死锁，永久弃用）")
+        XCTAssertEqual(
+            layer.affineTransform().d, 1, accuracy: 0.0001,
+            "只做水平翻转，不得垂直翻转")
     }
 
     /// 预览层尺寸跟随钉测（修复轮 1，真 RED 先行——审查者 AppKit 脚本实证：装配时序里

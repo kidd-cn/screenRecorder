@@ -179,19 +179,23 @@ final class CameraFullscreenPreviewWindow: NSPanel {
     /// 「决策缝」先例）。macOS API 台账（brief 写的 `connection isMirrored` 为 iOS 名）：
     /// macOS 连接属性是 `videoMirrored`（getter `isVideoMirrored`，10.7+），而
     /// `automaticallyAdjustsVideoMirroring` 是 **iOS 专属**（macOS 不可读不可写）——「先关
-    /// 自动镜像再显式钉定」的 iOS 形在 macOS 不存在，且文档钉明自动调整在位时置位
-    /// `videoMirrored` 抛 NSInvalidArgumentException。故 macOS 口径**读优先**：连接已镜像
-    ///（macOS 前置预览的系统自动镜像——浮窗同款真机 observed 行为，同一 session 的全屏
-    /// 层同享）直接放行零置位（零异常风险）；未镜像时支持性守卫 + 显式置位（自拍观感，
-    /// 预览特权——成片仍「他人视角」不镜像，P7b 同口径）。无连接（会话未运行/无头测试）
-    /// 安全跳过返回 false——黑底装配不失败。
-    /// - Returns: 调用后连接是否处于镜像态（无头恒 false；真机 = true）。
+    /// 自动镜像再显式钉定」的 iOS 形在 macOS 不存在。
+    /// **2026-11-11 真机实证（探针 + 进程卡死实录，用户上报「切换后按钮全部失效、摄像头
+    /// 画面消失」的根因）**：对**运行中会话新建**的预览连接执行 `connection.isVideoMirrored
+    /// = true`（isVideoMirroringSupported 为真、当前未镜像）会**死锁主线程永不返回**——
+    /// 录屏 UI 全冻结、全屏视图永远停在安装中。故连接 setter 整体废弃，镜像改由 **CA 层
+    /// 水平翻转变换**实现（transform 于锚点中心就地翻转，不改位置/尺寸，与预览特权语义
+    /// 一致）。连接已由系统镜像（`connection.isVideoMirrored` 读真——小浮窗预览即在
+    /// startRunning 前建层、系统自动镜像）时不加变换，避免双重镜像。无连接（会话未运行/
+    /// 无头测试）同样安全：直接加变换、返回 true。
+    /// - Returns: 调用后该层是否处于镜像呈现（变换已加或系统已镜像，恒 true）。
     @discardableResult
     static func ensureMirroredSelfView(on layer: AVCaptureVideoPreviewLayer) -> Bool {
-        guard let connection = layer.connection else { return false }
-        if connection.isVideoMirrored { return true } // 已镜像（系统自动镜像在位）：零置位
-        guard connection.isVideoMirroringSupported else { return false }
-        connection.isVideoMirrored = true
+        if layer.connection?.isVideoMirrored == true {
+            return true // 系统已镜像：零变换（双重镜像防御）
+        }
+        // setAffineTransform 就地水平翻转：frame 由 bounds×transform 推导，保持位置不变。
+        layer.setAffineTransform(CGAffineTransform(scaleX: -1, y: 1))
         return true
     }
 }
