@@ -364,19 +364,96 @@ final class PiPCompositor {
         return output
     }
 
-    /// 屏幕帧缩略图（对调态浮窗预览数据源，T4 消费；video 队列调用）：等比缩到最长边 ≤
-    /// `maxEdgeLength`（默认 320），`self.context` 单实例渲染 createCGImage。最长边不超限
-    /// 时 scale=1 原尺寸直出。源异常（零尺寸/非有限/超限参数）返回 nil = 本拍不产缩略图。
-    func makeScreenThumbnail(from buffer: CVPixelBuffer, maxEdgeLength: CGFloat = 320) -> CGImage? {
-        let width = CGFloat(CVPixelBufferGetWidth(buffer))
-        let height = CGFloat(CVPixelBufferGetHeight(buffer))
-        guard width > 0, height > 0, width.isFinite, height.isFinite,
+    /// 对调态成片缩影（spec §3.3 修订版，替代原屏幕内容缩略图缝）：完整对调布局的
+    /// 实时缩略预览——黑底画布 + 摄像头 contain 主画面 + 屏幕小图同位角标，整幅按
+    /// `s = min(1, maxEdgeLength / max(canvasW, canvasH))` 缩为 mini 画布（canvas×s）。
+    /// 合成次序同 composite 对调分支（减键帽减特效）：小图特效（点击环/笔画瞬态）与键帽
+    ///（视口内容）不入缩影——瞬态/视口内容经 ≤0.5s 采样会失真频闪，缩影表达布局不是
+    /// 特效（spec §3.3 修订裁定）；摄像头不镜像（成片语义，镜像属预览特权）、小图圆角
+    /// 同成片（radius×s）。渲染纪律：`self.context` 单实例 createCGImage 出图（mini 域
+    /// 裁剪保证出图尺寸 = mini 画布）。guard：screen 零尺寸/非有限 或 maxEdgeLength 非法
+    /// → nil（诚实不产）；camera nil → 黑主画面 + 小图照常（断源窗口期缩影 = 成片真实
+    /// 内容）；pipFrame nil → 摄像头 + 纯黑（无小图）。video 队列串行调用（≤0.5s 节流在
+    /// 调用方 SCStreamRecorder），与池/缓存同无锁纪律。
+    func makeSwappedPreview(camera: CVPixelBuffer?, screen: CVPixelBuffer,
+                            pipFrame: PiPFrame?, maxEdgeLength: CGFloat = 320) -> CGImage? {
+        let canvasWidth = CGFloat(CVPixelBufferGetWidth(screen))
+        let canvasHeight = CGFloat(CVPixelBufferGetHeight(screen))
+        guard canvasWidth > 0, canvasHeight > 0, canvasWidth.isFinite, canvasHeight.isFinite,
               maxEdgeLength > 0, maxEdgeLength.isFinite else { return nil }
-        let scale = min(CGFloat(1), maxEdgeLength / max(width, height))
+        let scale = min(CGFloat(1), maxEdgeLength / max(canvasWidth, canvasHeight))
         guard scale > 0, scale.isFinite else { return nil }
-        let image = CIImage(cvPixelBuffer: buffer)
-            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        return context.createCGImage(image, from: image.extent)
+        let miniSize = CGSize(width: canvasWidth * scale, height: canvasHeight * scale)
+        let miniBounds = CGRect(origin: .zero, size: miniSize)
+        // 黑底画布（黑边底色纯黑，与 composite 对调分支同底）。
+        var composed = CIImage(color: .black).cropped(to: miniBounds)
+        // 摄像头 contain 主画面：rect 复用 SwappedLayout.cameraContainRect 纯函数在**全画布**
+        // 求出，rect×s 落进 mini 画布；放置纪律同 placeCameraMain（clamped(to: extent) →
+        // scale（contain 比×s）→ 平移（ciY = miniH − rect.maxY）→ cropped(to: rect)——源
+        // 先钳位到自身 extent（边缘延伸堵双线性读出源域外的透明黑掺入），输出再裁回 rect，
+        // 黑边保纯黑）。rect 非法/源异常本路直通不丢层（保下层黑画布或既有主画面）。
+        if let camera,
+           let containRect = SwappedLayout.cameraContainRect(
+                canvasSize: CGSize(width: canvasWidth, height: canvasHeight),
+                cameraSize: CGSize(width: CVPixelBufferGetWidth(camera),
+                                   height: CVPixelBufferGetHeight(camera))) {
+            let miniRect = CGRect(
+                x: containRect.minX * scale, y: containRect.minY * scale,
+                width: containRect.width * scale, height: containRect.height * scale)
+            let rawCamera = CIImage(cvPixelBuffer: camera)
+            if rawCamera.extent.width > 0, rawCamera.extent.height > 0,
+               miniRect.width > 0, miniRect.height > 0 {
+                let cameraScale = min(miniRect.width / rawCamera.extent.width,
+                                      miniRect.height / rawCamera.extent.height)
+                if cameraScale > 0, cameraScale.isFinite {
+                    let ciRect = CGRect(x: miniRect.minX, y: miniSize.height - miniRect.maxY,
+                                        width: miniRect.width, height: miniRect.height)
+                    let placed = rawCamera
+                        .clamped(to: rawCamera.extent)
+                        .transformed(by: CGAffineTransform(scaleX: cameraScale, y: cameraScale))
+                        .transformed(by: CGAffineTransform(
+                            translationX: miniRect.minX,
+                            y: miniSize.height - miniRect.maxY))
+                        .cropped(to: ciRect)
+                    composed = placed.composited(over: composed)
+                }
+            }
+        }
+        // 屏幕小图同位角标：screen **原始层**（不施加特效——Ruling 20① 同口径）aspect-fill
+        //（scale 取宽高比大者 + 中心裁剪）进 pipFrame.rectInCapturePixels×s，
+        // `applyRoundedCornerMask(radius: pipFrame.cornerRadius × s)`（圆角同成片），平移
+        // 到位（placeScreenInset 同数学同坐标换算，ciY = miniH − rect.maxY）。rect 空/
+        // 不相交/源异常本路直通（无小图，主画面不被吞）。
+        if let pipFrame {
+            let fullRect = pipFrame.rectInCapturePixels
+            let targetRect = CGRect(
+                x: fullRect.minX * scale, y: fullRect.minY * scale,
+                width: fullRect.width * scale, height: fullRect.height * scale)
+            let screenLayer = CIImage(cvPixelBuffer: screen)
+            if !targetRect.isEmpty,
+               miniBounds.intersection(targetRect) != .null,
+               screenLayer.extent.width > 0, screenLayer.extent.height > 0,
+               targetRect.width > 0, targetRect.height > 0 {
+                let fillScale = max(targetRect.width / screenLayer.extent.width,
+                                    targetRect.height / screenLayer.extent.height)
+                if fillScale > 0, fillScale.isFinite {
+                    let scaled = screenLayer.transformed(by: CGAffineTransform(scaleX: fillScale, y: fillScale))
+                    // 中心裁剪到 rect 尺寸：origin 归零后打圆角（圆角 mask 与图像须同
+                    // origin-0 对齐），最后统一平移到摆放位（placeScreenInset 逐行同构）。
+                    let cropOrigin = CGPoint(
+                        x: scaled.extent.midX - targetRect.width / 2,
+                        y: scaled.extent.midY - targetRect.height / 2)
+                    var placedInset = scaled
+                        .cropped(to: CGRect(origin: cropOrigin, size: targetRect.size))
+                        .transformed(by: CGAffineTransform(translationX: -cropOrigin.x, y: -cropOrigin.y))
+                    placedInset = applyRoundedCornerMask(to: placedInset, radius: pipFrame.cornerRadius * scale)
+                    let ciOrigin = CGPoint(x: targetRect.minX, y: miniSize.height - targetRect.maxY)
+                    placedInset = placedInset.transformed(by: CGAffineTransform(translationX: ciOrigin.x, y: ciOrigin.y))
+                    composed = placedInset.composited(over: composed)
+                }
+            }
+        }
+        return context.createCGImage(composed, from: miniBounds)
     }
 
     /// 标记笔画层（P2）：全部笔画栅格化为一张**彩色** RGBA 位图——每笔画自带

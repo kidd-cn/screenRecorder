@@ -203,6 +203,29 @@ private func samplePixel(_ buffer: CVPixelBuffer, x: Int, y: Int) -> BGRAColor {
     return BGRAColor(blue: pixel[0], green: pixel[1], red: pixel[2], alpha: pixel[3])
 }
 
+/// CGImage 版采样（成片缩影载荷断言；PiPCompositorTests/SwappedPreviewTests 同款换算）：
+/// 整幅绘制进 8bit DeviceRGB 位图（context 自管缓冲）后按坐标取 BGRA——纯色主分量经
+/// 色彩管理往返恒等，带宽断言（黑 ≤ 40 / 蓝·红 ≥ 200）余量充足。行序实证：createCGImage
+/// 出图内存第 0 行 = 缓冲顶行（buffer y=0），采样**不翻 y** 直读 `y * bytesPerRow`；
+/// 字节序 RGBA（premultipliedLast）→ BGRAColor 通道序映射。
+private func samplePixel(_ image: CGImage, x: Int, y: Int) -> BGRAColor {
+    let width = image.width
+    let height = image.height
+    guard x >= 0, x < width, y >= 0, y < height else {
+        return BGRAColor(blue: 0, green: 0, red: 0, alpha: 0)
+    }
+    let context = CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    guard let context else { return BGRAColor(blue: 0, green: 0, red: 0, alpha: 0) }
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    guard let base = context.data else { return BGRAColor(blue: 0, green: 0, red: 0, alpha: 0) }
+    let pixel = base.assumingMemoryBound(to: UInt8.self)
+        .advanced(by: y * context.bytesPerRow + x * 4)
+    return BGRAColor(blue: pixel[2], green: pixel[1], red: pixel[0], alpha: pixel[3])
+}
+
 /// 把像素缓冲打包成带 PTS 的视频 CMSampleBuffer（与 CameraPiPTests 夹具同构，PTS 显式
 /// 传入——时钟层单调护栏拒收平帧/回跳帧）。
 private func makeVideoSampleBuffer(_ pixelBuffer: CVPixelBuffer, pts: CMTime) -> CMSampleBuffer? {
@@ -252,7 +275,7 @@ private func assertRed(
         file: file, line: line)
 }
 
-// MARK: - T4 对调/缩略图取数缝：帧驱动钉测（真实 AssetWriterSession 落临时目录）
+// MARK: - T4 对调/缩影取数缝：帧驱动钉测（真实 AssetWriterSession 落临时目录）
 
 /// 帧驱动 harness（T4）：不经 start()（SCStream 构造依赖 SCContentFilter / TCC 枚举，
 /// 无头不可用），经 `armForTesting` 装配真实 AssetWriterSession + 按需合成器，再以
@@ -285,13 +308,13 @@ final class SCStreamRecorderSwapSeamTests: XCTestCase {
     // MARK: 夹具装配
 
     /// 对调夹具 recorder：includeCamera + PiP 双取数缝在位（合成器必装配）；swapped /
-    /// 缩略图消费 / 节拍时钟缝按参注入，真实 writer 会话（64×40 画布）经装配缝落位。
+    /// 缩影消费 / 节拍时钟缝按参注入，真实 writer 会话（64×40 画布）经装配缝落位。
     /// `includeCamera: false`（Fix B 计数钉用）= 直通路径夹具：合成器不装配（PiP 源缝照常
     /// 在位，同生产接线——producer 侧缝无条件装配、装配判定在 makeCompositorIfActive）。
     private func makeHarness(
         swapped: (() -> Bool)?,
         outputName: String,
-        thumbnailConsumer: ((CGImage) -> Void)? = nil,
+        previewConsumer: ((CGImage) -> Void)? = nil,
         clock: (() -> TimeInterval)? = nil,
         includeCamera: Bool = true
     ) throws -> SCStreamRecorder {
@@ -310,7 +333,7 @@ final class SCStreamRecorderSwapSeamTests: XCTestCase {
         recorder.pipPixelBufferProvider = { camera }
         recorder.pipFrameProvider = { [insetFrame] in insetFrame }
         if let swapped { recorder.layoutSwappedProvider = swapped }
-        recorder.screenThumbnailConsumer = thumbnailConsumer
+        recorder.swappedPreviewConsumer = previewConsumer
         if let clock { recorder.thumbnailNow = clock }
         let session = try AssetWriterSession(config: config, pixelSize: canvasSize)
         recorder.armForTesting(writerSession: session, pixelSize: canvasSize)
@@ -385,48 +408,55 @@ final class SCStreamRecorderSwapSeamTests: XCTestCase {
         assertRed(samplePixel(plainFrame, x: 50, y: 30), "PiP 位为摄像头红（原样布局在场）")
     }
 
-    /// 节流派发钉测：`thumbnailNow` 手控时钟——同帧率连喂 4 帧（时钟步进 0.1s）consumer
-    /// 恰 1 次（首拍打点后 0.1–0.3s 全被 0.5s 节流窗挡住）；时钟推进 0.6s 再喂第 2 次。
-    func testThumbnailConsumerThrottlesToHalfSecond() async throws {
+    /// 节流派发钉测（成片缩影载荷，spec §3.3 修订）：`thumbnailNow` 手控时钟——同帧率连喂
+    /// 4 帧（时钟步进 0.1s）consumer 恰 1 次（首拍打点后 0.1–0.3s 全被 0.5s 节流窗挡住）；
+    /// 时钟推进 0.6s 再喂第 2 次。载荷 = 完整对调布局缩影（非纯屏幕帧）：64×40 mini 画布
+    ///（= 画布×1，≤ 320 上限原尺寸）上钉 contain 主画面红 ((12,0,40,40) 中心) + 小图位蓝
+    /// 角标 ((40,24,20,12) 内) + 黑边（H264 无关——缩影像素直出，带宽断言从严亦过）。
+    func testPreviewConsumerThrottlesToHalfSecond() async throws {
         var clock: TimeInterval = 100.0
-        var thumbnails: [CGImage] = []
+        var previews: [CGImage] = []
         let recorder = try makeHarness(
             swapped: { true },
             outputName: "录屏_throttle.mp4",
-            thumbnailConsumer: { thumbnails.append($0) },
+            previewConsumer: { previews.append($0) },
             clock: { clock })
         try deliverFrames(recorder, count: 4) { clock = 100.0 + Double($0) * 0.1 }
-        XCTAssertEqual(thumbnails.count, 1, "首拍打点后 0.1s 步进的 4 帧恰产 1 张缩略图")
+        XCTAssertEqual(previews.count, 1, "首拍打点后 0.1s 步进的 4 帧恰产 1 张成片缩影")
         clock += 0.6 // 100.3 → 100.9：越过 0.5s 节流窗
         try deliverFrames(recorder, count: 1, ptsStartIndex: 4)
-        XCTAssertEqual(thumbnails.count, 2, "时钟推进 0.6s 后下一帧必须再产第 2 张")
-        XCTAssertEqual(thumbnails[0].width, 64, "64×40 屏幕帧 ≤ 320 上限：原尺寸直出")
-        XCTAssertEqual(thumbnails[0].height, 40, "64×40 屏幕帧 ≤ 320 上限：原尺寸直出")
+        XCTAssertEqual(previews.count, 2, "时钟推进 0.6s 后下一帧必须再产第 2 张")
+        XCTAssertEqual(previews[0].width, 64, "64×40 画布 ≤ 320 上限：mini 画布 = 画布×1 原尺寸")
+        XCTAssertEqual(previews[0].height, 40, "缩影保持画布尺寸（s=1）")
+        // 成片缩影载荷语义（spec §3.3 修订）：对调帧回调收到含摄像头色的完整布局图。
+        assertRed(samplePixel(previews[0], x: 32, y: 20), "缩影 contain 主画面中心 = 摄像头红（载荷升级为成片缩影，非纯屏幕帧）")
+        assertBlue(samplePixel(previews[0], x: 50, y: 30), "缩影小图位 = 屏幕蓝（同位角标在场）")
+        assertBlack(samplePixel(previews[0], x: 0, y: 20), "缩影左黑边纯黑（黑底画布在位）")
         await recorder.stop()
         XCTAssertNotNil(recorder.finishedFileURL, "帧须真实成片（断言非空转）")
     }
 
-    /// 零渲染纪律：不对调态连缩略图都不产——provider false 与 nil（T5 接线前生产常态：
+    /// 零渲染纪律：不对调态连缩影都不产——provider false 与 nil（T5 接线前生产常态：
     /// 缝在位而装配层未接 = 恒屏幕为主）两种取数态下，大幅跨过节流窗的多帧喂入 consumer
     /// 恒 0 次；同场帧须真实成片（断言非空转）。
-    func testThumbnailOnlyConsumedWhenSwapped() async throws {
+    func testPreviewOnlyConsumedWhenSwapped() async throws {
         var clock: TimeInterval = 100.0
         var consumed = 0
         let falseRecorder = try makeHarness(
             swapped: { false },
             outputName: "录屏_not_swapped.mp4",
-            thumbnailConsumer: { _ in consumed += 1 },
+            previewConsumer: { _ in consumed += 1 },
             clock: { clock })
         try deliverFrames(falseRecorder, count: 5) { clock = 100.0 + Double($0) * 10 }
-        XCTAssertEqual(consumed, 0, "不对调态零渲染：缩略图一次都不产")
+        XCTAssertEqual(consumed, 0, "不对调态零渲染：成片缩影一次都不产")
 
         let nilProviderRecorder = try makeHarness(
             swapped: nil,
             outputName: "录屏_nil_provider.mp4",
-            thumbnailConsumer: { _ in consumed += 1 },
+            previewConsumer: { _ in consumed += 1 },
             clock: { clock })
         try deliverFrames(nilProviderRecorder, count: 5) { clock = 200.0 + Double($0) * 10 }
-        XCTAssertEqual(consumed, 0, "provider nil 同缝：恒屏幕为主，缩略图不产")
+        XCTAssertEqual(consumed, 0, "provider nil 同缝：恒屏幕为主，缩影不产")
 
         await falseRecorder.stop()
         await nilProviderRecorder.stop()
@@ -437,23 +467,23 @@ final class SCStreamRecorderSwapSeamTests: XCTestCase {
     // MARK: Fix B 计数钉（Ruling 14①②：provider 每帧至多一次；consumer 为 nil 不读 provider）
 
     /// 单次读形钉测（合成器在场）：对调态连喂 5 帧，计数 provider 恰 ≤ 5 次（每帧至多一次，
-    /// 有合成器时恰一次——composite 实参与缩略图门共用单次读局部）。旧双调形态下同场
-    /// 计 10 次（composite 实参 + 缩略图门各一次）必破此钉。缩略图恰 1 张佐证单次读出的
-    /// `true` 同时供给合成与缩略图门（共享局部在场）。
+    /// 有合成器时恰一次——composite 实参与成片缩影门共用单次读局部）。旧双调形态下同场
+    /// 计 10 次（composite 实参 + 缩影门各一次）必破此钉。缩影恰 1 张佐证单次读出的
+    /// `true` 同时供给合成与缩影门（共享局部在场）。
     func testSwappedFrameCallsProviderAtMostOncePerFrame() async throws {
         var clock: TimeInterval = 100.0
         var providerCalls = 0
-        var thumbnails: [CGImage] = []
+        var previews: [CGImage] = []
         let recorder = try makeHarness(
             swapped: { providerCalls += 1; return true },
             outputName: "录屏_provider_count.mp4",
-            thumbnailConsumer: { thumbnails.append($0) },
+            previewConsumer: { previews.append($0) },
             clock: { clock })
         try deliverFrames(recorder, count: 5) { clock = 100.0 + Double($0) * 0.1 }
         XCTAssertLessThanOrEqual(
             providerCalls, 5,
             "provider 每帧至多一次：5 帧计 \(providerCalls) 次越界（疑似双调形态回归）")
-        XCTAssertEqual(thumbnails.count, 1, "单次读出的 true 须同帧供给缩略图门（共享局部在场）")
+        XCTAssertEqual(previews.count, 1, "单次读出的 true 须同帧供给缩影门（共享局部在场）")
         await recorder.stop()
         XCTAssertNotNil(recorder.finishedFileURL, "帧须真实成片（断言非空转）")
     }
@@ -466,7 +496,7 @@ final class SCStreamRecorderSwapSeamTests: XCTestCase {
         let recorder = try makeHarness(
             swapped: { providerCalls += 1; return true },
             outputName: "录屏_passthrough_count.mp4",
-            thumbnailConsumer: nil,
+            previewConsumer: nil,
             includeCamera: false)
         try deliverFrames(recorder, count: 5)
         XCTAssertEqual(

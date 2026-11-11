@@ -613,6 +613,23 @@ final class CameraPiPWindowControllerTests: XCTestCase {
 
     // MARK: T5 对调态浮窗换装（屏幕缩略图层 ↔ 摄像头预览）
 
+    /// 缩略图层 gravity 钉测（成片缩影 spec §3.3 修订，真 RED 先行）：对调态浮窗承载完整
+    /// 对调布局缩影（黑底画布 + 摄像头主画面 + 屏幕小图同位角标）——contentsGravity 必须
+    /// resizeAspect，缩影 **完整可见含黑边**（aspect-fill 会裁掉黑边与画布边缘，「整窗所
+    /// 见即整片所得」破功）。无头直读 layer（windowThumbnailImage 同款无头缝）：缩略图层
+    /// 是 installPreviewLayer 最后添加的子层，经 contentView 子层序取层（topmost 装配序
+    /// 同钉），不新增生产面。
+    func testScreenThumbnailLayerUsesAspectFitGravity() throws {
+        let panel = CameraPiPWindow.makeDefault()
+        panel.installPreviewLayer(nil)
+        let thumbnailLayer = try XCTUnwrap(
+            panel.contentView?.layer?.sublayers?.last,
+            "缩略图层必须是最后装配的子层（topmost，盖过预览层与背景覆盖层）")
+        XCTAssertEqual(
+            thumbnailLayer.contentsGravity, .resizeAspect,
+            "对调态浮窗 = 成片缩影：必须 aspect-fit 完整可见（含黑边），不得 aspect-fill 裁边")
+    }
+
     /// 断源链钉测同款捕获缝（capturedCamera 先例）：windowFactory 在 beginRecording 的
     /// ensureWindow 才懒运行——闭包必须写**类属性**（局部量快照在 factory 运行前读取恒 nil）。
     private var capturedWindow: CameraPiPWindow?

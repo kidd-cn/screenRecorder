@@ -95,13 +95,15 @@ final class SCStreamRecorder: NSObject {
     /// pip-swap 对调布局取数缝（T4）：video 队列逐帧读（PiPFrameStore 锁保护快照，T5 由
     /// 协调器以 `cameraPiP?.isLayoutSwapped` 满足）。nil/false = 屏幕为主——composite 的
     /// `layoutSwapped` 恒 false，与今日行为逐字节一致（无缓存，逐帧闭包调用）。调用纪律
-    ///（Fix B）：有合成器时每帧恰一次（composite 实参与缩略图门共用单次读局部）；合成器
+    ///（Fix B）：有合成器时每帧恰一次（composite 实参与成片缩影门共用单次读局部）；合成器
     /// nil（直通路径）整帧不调——门序先判 consumer-nil 同款减法。
     var layoutSwappedProvider: (() -> Bool)?
-    /// pip-swap 对调态屏幕缩略图消费缝（T4）：video 队列调用，≤ `thumbnailInterval`
-    /// （0.5s）节流；CGImage 已渲染完成，消费方自行跳主线程。nil = 不产缩略图（零渲染
-    /// ——不对调态连缩略图都不产，热路径纪律与 PiP 各路同款）。
-    var screenThumbnailConsumer: ((CGImage) -> Void)?
+    /// pip-swap 对调态成片缩影消费缝（spec §3.3 修订版，原屏幕缩略图缝升级载荷后随语义
+    /// 改名）：video 队列调用，≤ `thumbnailInterval`（0.5s）节流；CGImage = 完整对调布局
+    /// 缩影（黑底画布 + 摄像头 contain 主画面 + 屏幕小图同位角标；特效/键帽不入缩影——
+    /// 瞬态/视口内容 0.5s 采样失真），已渲染完成，消费方自行跳主线程。nil = 不产缩影
+    ///（零渲染——不对调态连缩影都不产，热路径纪律与 PiP 各路同款）。
+    var swappedPreviewConsumer: ((CGImage) -> Void)?
     /// 缩略图节拍时钟注入缝（T4 测试手控；缺省 systemUptime——只做同源差值，跨源无语义）。
     var thumbnailNow: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// 上次出图时刻：仅 video 队列触碰（handleVideoSample 串行上下文），无锁。
@@ -689,17 +691,23 @@ extension SCStreamRecorder: SCStreamOutput {
             // 直通，全缺省直返原 buffer）——合成不改变时间轴，PTS 原样透传（append 仍用
             // shiftedPTS）；合成器 nil 时直通路径零开销（同 T8–T14 行为）。
             // Fix B 单次读形：`layoutSwapped` provider 每帧**至多一次**（有合成器时恰一次），
-            // composite 实参与缩略图门共用该局部——原两处各调一次，理论上可跨越一次翻转；
-            // 合成器 nil（直通路径）整帧不读 provider（零锁读，原缩略图门在判 consumer 之前
+            // composite 实参与成片缩影门共用该局部——原两处各调一次，理论上可跨越一次翻转；
+            // 合成器 nil（直通路径）整帧不读 provider（零锁读，原缩影门在判 consumer 之前
             // 先读 provider，非 PiP 场每帧一次多余锁读）。
             let layoutSwapped: Bool
+            let pip: CVPixelBuffer?
+            let pipFrame: PiPFrame?
             let outputBuffer: CVPixelBuffer
             if let pipCompositor {
                 layoutSwapped = layoutSwappedProvider?() ?? false
+                // Fix B 单次读纪律顺延（成片缩影载荷）：pip / pipFrame provider 每帧**至多
+                // 一次**——composite 实参与对调态缩影门共用同一局部（同帧两读数恒一致）。
+                pip = pipPixelBufferProvider?()
+                pipFrame = pipFrameProvider?()
                 outputBuffer = pipCompositor.composite(
                     screenFrame: pixelBuffer,
-                    pip: pipPixelBufferProvider?(),
-                    pipFrame: pipFrameProvider?(),
+                    pip: pip,
+                    pipFrame: pipFrame,
                     clickOverlay: clickOverlayProvider?(),
                     strokes: strokeOverlayProvider?(),
                     zoomTransform: zoomStateProvider?(),
@@ -709,6 +717,8 @@ extension SCStreamRecorder: SCStreamOutput {
                     into: pipCompositor.context)
             } else {
                 layoutSwapped = false // 直通路径：无合成即无对调可施
+                pip = nil // 直通路径：provider 整帧不调（零锁读）
+                pipFrame = nil
                 outputBuffer = pixelBuffer // 直通路径：零开销（同 T8–T14 行为）
             }
             try session.appendVideo(outputBuffer, at: shiftedPTS)
@@ -719,17 +729,21 @@ extension SCStreamRecorder: SCStreamOutput {
                 let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
                 mixer?.setGatePTS(rawPTS)
             }
-            // T4 对调态缩略图派发（composite/append 之后）：仅对调态产屏幕缩略图（不对调
-            // 态零渲染——连缩略图都不产）；≤ 0.5s/张节流（首拍打点，窗口内静默），节拍时
-            // 钟经 thumbnailNow 注入；lastThumbnailUptime 仅本队列触碰无锁。合成器 nil
-            //（直通路径）整段跳过；出图失败（源异常）本拍不回调消费方。对调值复用 composite
-            // 前的单次读局部（Fix B：不再二次调 provider，同帧两读数恒一致）。
-            if layoutSwapped, let screenThumbnailConsumer, let pipCompositor {
+            // 对调态成片缩影派发（composite/append 之后，spec §3.3 修订版——原 T4 屏幕
+            // 缩略图升级载荷）：仅对调态产缩影（不对调态零渲染——连缩影都不产）；≤ 0.5s/
+            // 张节流（首拍打点，窗口内静默），节拍时钟经 thumbnailNow 注入；
+            // lastThumbnailUptime 仅本队列触碰无锁。合成器 nil（直通路径）整段跳过；出图
+            // 失败（源异常）本拍不回调消费方。对调值与 pip/pipFrame 复用 composite 前的
+            // 单次读局部（Fix B：不再二次调 provider，同帧两读数恒一致）。载荷 = 完整对调
+            // 布局缩影（makeSwappedPreview 内减键帽减特效——瞬态/视口内容 0.5s 采样失真，
+            // spec §3.3 修订裁定）。
+            if layoutSwapped, let swappedPreviewConsumer, let pipCompositor {
                 let now = thumbnailNow()
                 if now - lastThumbnailUptime >= Self.thumbnailInterval {
                     lastThumbnailUptime = now
-                    if let cg = pipCompositor.makeScreenThumbnail(from: pixelBuffer) {
-                        screenThumbnailConsumer(cg)
+                    if let cg = pipCompositor.makeSwappedPreview(
+                        camera: pip, screen: pixelBuffer, pipFrame: pipFrame) {
+                        swappedPreviewConsumer(cg)
                     }
                 }
             }

@@ -342,9 +342,10 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
 
     /// pip-swap 双缝接线（T5 清偿 Ruling 1 的 T4 遗留四行，评审点名验证）：对调态逐帧取数
     /// 缝（video 队列直读 `isLayoutSwapped` nonisolated——PiPFrameStore 锁保护快照；弱引防
-    /// 跨场滞留，cameraPiP 归装配层所有）+ 对调态屏幕缩略图消费缝（浮窗 nonisolated 缩略图
-    /// 入口，内部跳主 actor）。缩略图缝仅 wantsPiP 场装配——无 PiP（含 includeCamera=false /
-    /// cameraPiP=nil）不产缩略图（recorder 侧节流块同样要求 pipCompositor 在位），热路径零渲染。
+    /// 跨场滞留，cameraPiP 归装配层所有）+ 对调态成片缩影消费缝（浮窗 nonisolated 缩影
+    /// 入口，内部跳主 actor；载荷 = 完整对调布局缩影，spec §3.3 修订版）。缩影缝仅
+    /// wantsPiP 场装配——无 PiP（含 includeCamera=false / cameraPiP=nil）不产缩影
+    ///（recorder 侧节流块同样要求 pipCompositor 在位），热路径零渲染。
     ///
     /// Fix A 钉测缝：begin 成功路径依赖 ScreenCaptureKit TCC（无头环境不可确定性驱动），
     /// 接线断言无法走 begin 全程——本方法从 begin 单点抽出（行为逐字不变，唯一调用点在
@@ -353,7 +354,7 @@ final class RecordingSessionCoordinator: CaptureSessionManaging {
     func wirePipSwapSeams(on recorder: SCStreamRecorder, wantsPiP: Bool) {
         recorder.layoutSwappedProvider = { [weak cameraPiP] in cameraPiP?.isLayoutSwapped ?? false }
         if wantsPiP {
-            recorder.screenThumbnailConsumer = { [weak cameraPiP] cg in
+            recorder.swappedPreviewConsumer = { [weak cameraPiP] cg in
                 cameraPiP?.updateScreenThumbnail(cg)
             }
         }
