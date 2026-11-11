@@ -447,6 +447,7 @@ final class FloatingControlBarPanel {
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.sharingType = .none // 显式采集排除（window server 不外发非共享窗口）——浮条绝不入成片
         panel.contentView = hostingView
 
         // @Published state 在主线程发布；Task 主 actor 跳转保序，显隐操作全部回到主 actor。

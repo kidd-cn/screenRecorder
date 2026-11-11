@@ -23,6 +23,7 @@ final class CameraPiPWindow: NSPanel {
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.sharingType = .none // 显式采集排除（window server 不外发非共享窗口）——浮窗绝不入成片
         panel.hasShadow = true
         return panel
     }
@@ -118,8 +119,9 @@ final class CameraPiPWindow: NSPanel {
 /// 对调态全屏摄像头实时预览（NSPanel，2026-11-11 用户拍板）：盖住摄像头浮窗所在屏、
 /// 镜像自视图（预览特权，自拍观感——成片仍「他人视角」不镜像，P7b 同口径）、aspect-fill
 /// 铺满（预览特权——裁剪边界不入成片故无碍）。采集排除不入成片：`sharingType = .none`
-///（spec 钉定）+ ScreenCaptureKit 对采集进程自有窗口的隐式排除（浮窗/浮条不入成片的同一
-/// 机制，真机验收已证）。窗口纪律（浮窗 `CameraPiPWindow` 口径照抄）：
+/// 为**显式**采集排除——window server 不外发非共享窗口（WWDC22 10156/10155 口径要求
+/// 显式排除；本仓 SCContentFilter 以 excludingWindows: [] 建构，无任何窗口排除，故采集
+/// 面的一切悬浮 UI 都须逐窗设 .none 兜底）。窗口纪律（浮窗 `CameraPiPWindow` 口径照抄）：
 /// - level = 浮窗（`.floating`）**下一档**——小浮窗与浮条（同 `.floating`）悬浮其上保持
 ///   可点（换回/暂停/停止可达），正常窗在其之下（盖桌）；
 /// - collectionBehavior 同浮窗（canJoinAllSpaces + fullScreenAuxiliary，全屏应用之上也在）；
@@ -146,15 +148,18 @@ final class CameraFullscreenPreviewWindow: NSPanel {
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary] // 同浮窗
-        panel.sharingType = .none // 采集排除（spec §3.3 钉定；与浮窗同机制并存，纵深防御）
+        panel.sharingType = .none // 显式采集排除（window server 不外发非共享窗口；浮窗/浮条同一纪律）
         panel.hasShadow = false // 全屏幕布无影
         return panel
     }
 
     /// 安装摄像头预览层（同一 capture session 的**新**预览实例——浮窗侧持有系统建的那只，
     /// CALayer 单父约束下全屏视图另建一层）。layer nil（摄像头未启动/无头测试）时仅铺黑底
-    /// ——装配路径不因预览缺位而失败。进场时序：setFrame（所在屏 bounds）先行，本方法随后，
-    /// 预览层 frame 恰为整屏。
+    /// ——装配路径不因预览缺位而失败。尺寸纪律（修复轮 1）：content 以 1×1 起建、预览层
+    /// frame 初钉其 bounds——CA 不随父层拉伸，层须挂 widthSizable+heightSizable
+    /// autoresizingMask 随 content（窗侧拉伸到所在屏 bounds）同步铺满；无 mask 则层钉死
+    /// 1×1（真机全屏视图=黑幕+1pt 相机点，无头钉测 testFullscreenPreviewLayerFillsWindowAfterAssembly
+    /// 防回归）。
     func installPreviewLayer(_ layer: AVCaptureVideoPreviewLayer?) {
         let content = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 1))
         content.wantsLayer = true
@@ -162,6 +167,8 @@ final class CameraFullscreenPreviewWindow: NSPanel {
         if let layer {
             layer.videoGravity = .resizeAspectFill // aspect-fill 铺满（spec §3.3 钉定）
             layer.frame = content.bounds
+            // 尺寸跟随（修复轮 1）：content 被窗拉伸时层同步铺满。
+            layer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
             Self.ensureMirroredSelfView(on: layer) // 镜像自视图（预览特权，见缝注释）
             content.layer?.addSublayer(layer)
         }
@@ -373,7 +380,9 @@ final class CameraPiPWindowController {
         }
     }
 
-    /// 对调进场（主线程）：全屏摄像头视图盖住浮窗所在屏（兜底主屏，spec §3.3 摆位钉定）。
+    /// 对调进场（主线程）：全屏摄像头视图盖住浮窗所在屏（无屏归属时兜底 NSScreen.main
+    /// ——key/menu-bar 屏，AppKit 语义，非 CG 主屏；publishFrame 回退同口径。spec §3.3
+    /// 摆位钉定）。
     /// 预览层每次进场重装——跨场 stop→start 后 camera.previewLayer 重建（同一 session
     /// 实例），重装一并重钉镜像与重力，杜绝连接重建后的钉定丢失；每次进场一次，非逐帧
     /// 成本。orderFrontRegardless 不夺焦点（nonactivatingPanel，录制不能被打断）。

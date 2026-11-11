@@ -724,6 +724,12 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         controller.beginRecording(geometry: geometry)
         let panel = try XCTUnwrap(capturedWindow, "windowFactory 缝必须捕获到装配的浮窗")
 
+        // 夹具：浮窗先经 moveWindowForTesting（真实 setFrame 路径）挪到已知屏，期望值取
+        // **该屏 bounds**——消解「fullscreen.frame == panel.screen 推导」的半同义反复
+        //（期望与实取同源自 panel.screen，挪屏后期望值独立于实现取哪只屏）。
+        let knownScreen = try XCTUnwrap(NSScreen.screens.last, "测试宿主至少一块屏")
+        controller.moveWindowForTesting(to: knownScreen.frame)
+
         controller.setLayoutSwapped(true)
 
         let fullscreen = try XCTUnwrap(
@@ -733,8 +739,8 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         XCTAssertLessThan(fullscreen.level, panel.level, "level 必须低于浮窗（浮条同 .floating——悬浮其上可点）")
         XCTAssertGreaterThan(fullscreen.level, NSWindow.Level.normal, "level 必须高于正常窗（盖桌）")
         XCTAssertEqual(
-            fullscreen.frame, panel.screen?.frame ?? NSScreen.main?.frame,
-            "摆位 = 摄像头浮窗所在屏 bounds（兜底主屏）")
+            fullscreen.frame, knownScreen.frame,
+            "摆位 = 浮窗被移到的已知屏 bounds（盖住浮窗所在屏）")
     }
 
     /// swap-out 钉测：换回即收（orderOut）；重复 false 幂等不崩。
@@ -789,6 +795,34 @@ final class CameraPiPWindowControllerTests: XCTestCase {
         XCTAssertFalse(
             CameraFullscreenPreviewWindow.ensureMirroredSelfView(on: layer),
             "无连接（会话未运行/无头）必须安全跳过镜像钉定（不崩、诚实 false）")
+    }
+
+    /// 预览层尺寸跟随钉测（修复轮 1，真 RED 先行——审查者 AppKit 脚本实证：装配时序里
+    /// content 以 1×1 起建、预览层 frame 钉在其 1×1 bounds 上，CA 不随 content 拉伸 →
+    /// 真机全屏视图 = 黑幕 + 1pt 相机点）。钉定：窗口先 setFrame 到所在屏 bounds（生产
+    /// 同序），装配 + 强制同步布局（真机由 runloop 派发）后，预览层 frame 必须 ≈
+    /// content view bounds（铺满，非 1×1）。
+    func testFullscreenPreviewLayerFillsWindowAfterAssembly() throws {
+        let fullscreen = CameraFullscreenPreviewWindow.makeDefault()
+        let screenFrame = NSScreen.main?.frame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        fullscreen.setFrame(screenFrame, display: true)
+        let layer = AVCaptureVideoPreviewLayer(session: AVCaptureSession())
+        fullscreen.installPreviewLayer(layer)
+
+        let content = try XCTUnwrap(fullscreen.contentView, "装配必须已设 content view")
+        fullscreen.contentView?.layoutSubtreeIfNeeded() // 真机布局走 runloop；无头强制同步
+        XCTAssertEqual(
+            content.frame.width, screenFrame.width, accuracy: 1,
+            "content view 必须随窗铺满（NSWindow contentView 语义）")
+        XCTAssertEqual(
+            content.frame.height, screenFrame.height, accuracy: 1,
+            "content view 必须随窗铺满（NSWindow contentView 语义）")
+        XCTAssertEqual(
+            layer.frame.width, content.bounds.width, accuracy: 1,
+            "预览层必须随 content 拉伸铺满——钉死 1×1 则真机黑幕+1pt 相机点")
+        XCTAssertEqual(
+            layer.frame.height, content.bounds.height, accuracy: 1,
+            "预览层必须随 content 拉伸铺满——钉死 1×1 则真机黑幕+1pt 相机点")
     }
 
     /// 夹具：纯色 CGImage（贴层断言只需非 nil 图，不验像素）。
