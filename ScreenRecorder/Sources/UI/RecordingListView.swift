@@ -11,11 +11,15 @@ import SwiftUI
 /// `RecordingListWindowController` 承担）双通道。列表真源是 `RecordingListViewModel`
 ///（store 经取数缝在调用时刻读装配层当前值——输出目录变更后刷新即见新目录，T17 审查修复）。
 ///
-/// 行操作挂载方式（偏差台账）：brief 行操作以右键行菜单 + 双击行（播放）承载——SDK
-///（Xcode 27.1 / Swift 6.4）下 `Table(_:actions:columns:)` 初始化器在最小用例即泛型推断
-/// 失败无法编译，改用 macOS 13 起的官方等价物 `contextMenu(forSelectionType:menu:primaryAction:)`；
-/// 操作集合与 brief 逐字一致。
-/// 重命名走模态 sheet（macOS 13 `Table` 无单元格就地编辑；brief「rename inline」的等价实现）。
+/// 行操作挂载方式（偏差台账，2026-11-13 交互层修复）：brief 行操作以右键行菜单 + 双击行
+///（播放）承载。SDK（Xcode 27.1 / Swift 6.4）下 `Table(_:actions:columns:)` 初始化器在
+/// 最小用例即泛型推断失败无法编译；其官方等价物 `contextMenu(forSelectionType:)` 又在
+/// 本库手建 `NSWindow + NSHostingView` 窗口里整层不响应（macOS 26 实测：SwiftUI 手势/
+/// 菜单/双击全灭，仅控件激活存活——探针取证，同轮实证 AppKit 事件与 NSMenu 原生可用）。
+/// 故行列表 = 原生 `NSTableView`（`RecordingListTable`），右键菜单 = `NSMenu`
+///（条目/顺序/置灰规则见 `RecordingListMenuSpec`，与原 SwiftUI 菜单逐字一致）；操作集合
+/// 与 brief 逐字一致。
+/// 重命名走模态 sheet（无单元格就地编辑；brief「rename inline」的等价实现）。
 /// P8（T16）导出入口：右键菜单「导出 GIF…」「压缩…」→ 模态参数小窗（参数档位直接绑
 /// `GIFExportOptions`/`CompressionPreset` 档位集合）+ 进度条（`exportProgress` 已由模型
 /// hop 主线程）；完成/失败自动收窗，结果走通知（ExportNotifying 缝）。
@@ -27,26 +31,12 @@ struct RecordingListView: View {
     @State private var exportTarget: ExportTarget?
 
     var body: some View {
-        Table(viewModel.items) {
-            TableColumn("名称", value: \.name)
-            TableColumn("大小") { item in
-                Text(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file))
-            }
-            TableColumn("时长") { item in
-                Text(Self.durationText(item.duration))
-            }
-            TableColumn("创建时间") { item in
-                Text(Self.createdAtText(item.createdAt))
-            }
-        }
-        .contextMenu(forSelectionType: RecordingFileMetadata.self) { selection in
-            rowMenu(for: selection)
-        } primaryAction: { selection in
-            if let item = selection.first { // 双击行：播放
-                NSWorkspace.shared.open(item.url)
-            }
-        }
-        .safeAreaInset(edge: .bottom) {
+        VStack(spacing: 0) {
+            RecordingListTable(
+                items: viewModel.items,
+                menuProvider: { selection in self.makeMenu(for: selection) },
+                onDoubleClick: { item in NSWorkspace.shared.open(item.url) } // 双击行：播放
+            )
             bottomBar
         }
         .sheet(item: $renameTarget) { item in
@@ -86,58 +76,51 @@ struct RecordingListView: View {
         .padding(.vertical, 8)
     }
 
-    // MARK: - 行操作（右键菜单；选中集非单选时部分操作收敛）
+    // MARK: - 行操作（原生右键菜单；选中集非单选时部分操作收敛）
 
-    @ViewBuilder
-    private func rowMenu(for selection: Set<RecordingFileMetadata>) -> some View {
-        Button("播放") {
-            selection.forEach { NSWorkspace.shared.open($0.url) }
-        }
-        .disabled(selection.isEmpty)
-        Button("在 Finder 中显示") {
-            if let first = selection.first {
-                viewModel.revealInFinder(first)
-            }
-        }
-        .disabled(selection.isEmpty)
-        Button("重命名…") {
-            guard let item = selection.first else { return }
-            renameText = item.name
-            renameTarget = item
-        }
-        .disabled(selection.count != 1)
-        Button("编辑…") {
-            // P9/T18 缩放分段编辑器：独立时间线窗（AVPlayer 预览 + 分段 + 导出），
-            // 按成片 URL 键控单实例（ZoomEditorWindowOpener 登记/复用）。
-            guard let item = selection.first else { return }
-            ZoomEditorWindowOpener.open(for: item, viewModel: viewModel)
-        }
-        // 仅声音成片（P7a .m4a）无视频画布，缩放分段编辑（视频轨编排）不适用。
-        .disabled(selection.count != 1 || selection.first?.url.pathExtension.lowercased() == "m4a")
-        Button("导出 GIF…") {
-            guard let item = selection.first else { return }
-            exportTarget = ExportTarget(item: item, kind: .gif)
-        }
-        .disabled(selection.count != 1)
-        Button("压缩…") {
-            guard let item = selection.first else { return }
-            exportTarget = ExportTarget(item: item, kind: .compress)
-        }
-        .disabled(selection.count != 1)
-        Button("移出列表") {
-            // Q4 记账不删文件：条目移出列表，磁盘文件原地保留（无确认弹窗——非破坏性，
-            // 与「删除…」的 destructive + NSAlert 确认相对）。
-            Task {
-                for item in selection {
-                    await viewModel.removeFromList(item)
-                }
-            }
-        }
-        .disabled(selection.isEmpty)
-        Button("删除…", role: .destructive) {
-            confirmDelete(Array(selection))
-        }
-        .disabled(selection.isEmpty)
+    /// 右键菜单（NSMenu 承载，AppKit 原生呈现）：条目/顺序/置灰按 `RecordingListMenuSpec`
+    /// 生成，行为闭包与本视图的 sheet/告警流对接。
+    private func makeMenu(for selection: Set<RecordingFileMetadata>) -> NSMenu {
+        RecordingListMenuSpec.menu(
+            selectionCount: selection.count,
+            firstIsAudioOnly: selection.first.map { Self.isAudioOnly($0) } ?? false,
+            handlers: .init(
+                play: { selection.forEach { NSWorkspace.shared.open($0.url) } },
+                reveal: { if let first = selection.first { viewModel.revealInFinder(first) } },
+                rename: {
+                    guard let item = selection.first else { return }
+                    renameText = item.name
+                    renameTarget = item
+                },
+                edit: {
+                    // P9/T18 缩放分段编辑器：独立时间线窗（AVPlayer 预览 + 分段 + 导出），
+                    // 按成片 URL 键控单实例（ZoomEditorWindowOpener 登记/复用）。
+                    guard let item = selection.first else { return }
+                    ZoomEditorWindowOpener.open(for: item, viewModel: viewModel)
+                },
+                exportGIF: {
+                    guard let item = selection.first else { return }
+                    exportTarget = ExportTarget(item: item, kind: .gif)
+                },
+                compress: {
+                    guard let item = selection.first else { return }
+                    exportTarget = ExportTarget(item: item, kind: .compress)
+                },
+                removeFromList: {
+                    // Q4 记账不删文件：条目移出列表，磁盘文件原地保留（无确认弹窗——非破坏性，
+                    // 与「删除…」的 NSAlert 确认相对）。
+                    Task {
+                        for item in selection {
+                            await viewModel.removeFromList(item)
+                        }
+                    }
+                },
+                delete: { confirmDelete(Array(selection)) }))
+    }
+
+    /// 仅声音成片（P7a .m4a）无视频画布，缩放分段编辑（视频轨编排）不适用。
+    private static func isAudioOnly(_ item: RecordingFileMetadata) -> Bool {
+        item.url.pathExtension.lowercased() == "m4a"
     }
 
     // MARK: - 重命名（inline 语义的模态等价实现）
@@ -218,21 +201,6 @@ struct RecordingListView: View {
         }
     }
 
-    // MARK: - 展示格式
-
-    private static func durationText(_ duration: TimeInterval?) -> String {
-        guard let duration, duration.isFinite, duration >= 0 else { return "—" }
-        let total = Int(duration.rounded())
-        if total >= 3600 {
-            return String(format: "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
-        }
-        return String(format: "%d:%02d", total / 60, total % 60)
-    }
-
-    private static func createdAtText(_ date: Date?) -> String {
-        guard let date else { return "—" }
-        return date.formatted(date: .abbreviated, time: .shortened)
-    }
 }
 
 // MARK: - 导出参数小窗（P8/T16）：模态参数 + 进度条
