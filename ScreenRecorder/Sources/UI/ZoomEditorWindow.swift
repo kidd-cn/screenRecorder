@@ -317,25 +317,33 @@ final class ZoomEditorModel: ObservableObject {
 
 /// 时间线窗（brief Produces）：AVPlayer 预览 + 播放/时间行 + 时间线条（分段块、拖入出点、
 /// 播放头、点击跳播）+ 分段列表（增/选/调档位/删）+ 九宫格中心 + 导出参数（fps/分辨率/
-/// 编码）+ 预估大小 + 渲染进度。SwiftUI 工具链限制沿用一期教训（Table/toolbar 不可用
-/// ——contextMenu/safeAreaInset 惯例），列表用手写行不用 Table。
+/// 编码）+ 预估大小 + 渲染进度。
 ///
-/// 预览实现裁定：`AVKit.VideoPlayer`（SwiftUI 原生、macOS 12+，本 floor 13 直接可用），
-/// 不用 NSViewRepresentable 包 `AVPlayerView`——一期教训的坑都集中在 AppKit↔SwiftUI
-/// 桥接边界（Table 泛型推断/toolbar 不渲染）；且 AVPlayerView 自带传输控件与时间线窗
-/// 自带的播放控制/播放头重复，Representable 还需额外 delegate/清理面。裁切（裁剪/拼接/
-/// 多轨）不做（spec §5 P9 非目标）。
+/// 交互通道（2026-11-13 同列表窗修复）：本窗为手建 `NSWindow + NSHostingView`，
+/// SwiftUI 手势/菜单层整层不响应（见 RecordingListView 头注）——分段列表与时间线条的
+/// 选中/右键菜单/拖端点全走 AppKit 原生通道：列表 = 原生 `NSTableView`
+///（`ZoomSegmentTable`），时间线条 = 自绘 `NSView`（`ZoomTimelineStrip`）。控件
+///（Button/Picker/下拉）激活通道本就存活，维持 SwiftUI。
+///
+/// 预览实现裁定（2026-11-13 修订）：改用原生 `AVPlayerView`（NSViewRepresentable）。
+/// 原 `AVKit.VideoPlayer` 在本环境打不开编辑器——`_AVKit_SwiftUI` 被链接而 AVKit.framework
+/// 本体未进加载列表，`VideoPlayerView` 初始化时父类 `AVPlayerView` 元数据缺失，进程
+/// SIGABRT（`failed to demangle superclass ... 'So12AVPlayerViewC'`，崩溃报告实证）；
+/// 且 VideoPlayer 的传输控件本是 SwiftUI 层（本窗口族内不可交互）。AVPlayerView 为
+/// AppKit 控件：强制 AVKit 链接消除崩溃，传输控件（悬浮样式）原生可用。裁切（裁剪/
+/// 拼接/多轨）不做（spec §5 P9 非目标）。
 struct ZoomEditorView: View {
     @ObservedObject var model: ZoomEditorModel
     @ObservedObject var viewModel: RecordingListViewModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VideoPlayer(player: model.player)
+            PlayerPreview(player: model.player)
                 .frame(minHeight: 220, maxHeight: 300)
                 .frame(maxWidth: .infinity)
             playControlRow
-            TimelineStrip(model: model)
+            ZoomTimelineStrip(model: model)
+                .frame(height: 64) // 时间线条高（旧 64pt）
             segmentSection
             selectedSegmentSection
             Divider()
@@ -366,7 +374,7 @@ struct ZoomEditorView: View {
         }
     }
 
-    // MARK: 分段列表（增/选/调档位/删；Table 不可用——手写行 + contextMenu）
+    // MARK: 分段列表（增/选/调档位/删；原生 NSTableView——SwiftUI 手势/菜单层不可用）
 
     @ViewBuilder
     private var segmentSection: some View {
@@ -377,58 +385,10 @@ struct ZoomEditorView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
-                VStack(spacing: 4) {
-                    ForEach(model.segments.indices, id: \.self) { index in
-                        segmentRow(index: index)
-                    }
-                }
+                ZoomSegmentTable(model: model)
+                    .frame(height: CGFloat(model.segments.count) * ZoomSegmentTable.rowHeight)
             }
         }
-    }
-
-    private func segmentRow(index: Int) -> some View {
-        let segment = model.segments[index]
-        return HStack(spacing: 12) {
-            Text("段 \(index + 1)")
-                .frame(width: 40, alignment: .leading)
-            Text(String(format: "%.2fs – %.2fs", segment.start, segment.end))
-                .font(.system(.body, design: .monospaced))
-                .frame(width: 128, alignment: .leading)
-            Picker("档位", selection: levelBinding(index: index)) {
-                ForEach(ZoomSegment.levels, id: \.self) { level in
-                    Text(String(format: "%.2fx", level)).tag(level)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 96)
-            Spacer()
-            Button {
-                model.removeSegment(at: index)
-            } label: {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .help("删除分段")
-        }
-        .padding(.vertical, 3)
-        .padding(.horizontal, 8)
-        .background(
-            (index == model.selectedIndex ? Color.accentColor.opacity(0.15) : Color.clear)
-                .cornerRadius(4))
-        .contentShape(Rectangle())
-        .onTapGesture { model.selectedIndex = index }
-        .contextMenu {
-            Button("删除分段") {
-                model.removeSegment(at: index)
-            }
-        }
-    }
-
-    /// 档位绑定：读当前值、写经统一闸（`setLevel` → applyEdit）——直绑段值会绕过 validate。
-    private func levelBinding(index: Int) -> Binding<Double> {
-        Binding(
-            get: { model.segments.indices.contains(index) ? model.segments[index].level : ZoomSegment.levels[1] },
-            set: { model.setLevel(at: index, level: $0) })
     }
 
     // MARK: 选中段细节（九宫格中心）
@@ -508,6 +468,26 @@ struct ZoomEditorView: View {
     }
 }
 
+/// 源片预览（原生 AVPlayerView 桥接）：悬浮传输控件（悬停出现，近似原 VideoPlayer
+/// 交互）+ aspect-fit 视频；播放/跳播真源仍是 `ZoomEditorModel` 的 AVPlayer。
+private struct PlayerPreview: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .floating
+        view.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        if view.player !== player {
+            view.player = player
+        }
+    }
+}
+
 /// 九宫格中心选择（3×3；当前中心所在格高亮，`ZoomEditorLogic.ninePatchCell` 逆映射）。
 private struct NinePatchGrid: View {
     let currentCenter: CGPoint
@@ -534,103 +514,6 @@ private struct NinePatchGrid: View {
                 }
             }
         }
-    }
-}
-
-/// 时间线条（比例尺 = 条宽 / 源时长；源时长未就绪前退化为最小比例尺）：
-/// 分段块（选中高亮 + 缓入/缓出窗口淡色端帽——窗口常量引用 `OfflineZoomRenderer`
-/// 单一真源，短段不画端帽的收敛语义真源在 `zoomProgress`，此处仅为视觉近似）；
-/// 段块两端白色把手拖入出点（拖拽中实时预览、松手经统一闸 commit）；背景点击跳播；
-/// 播放头竖线。
-private struct TimelineStrip: View {
-    @ObservedObject var model: ZoomEditorModel
-
-    var body: some View {
-        GeometryReader { geometry in
-            let scale = geometry.size.width / max(model.sourceDuration, 0.001)
-            ZStack(alignment: .topLeading) {
-                Rectangle()
-                    .fill(.quaternary)
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 0).onEnded { value in
-                        model.seek(to: value.location.x / scale)
-                    })
-                ForEach(model.segments.indices, id: \.self) { index in
-                    segmentView(index: index, scale: scale, height: geometry.size.height)
-                }
-                Rectangle()
-                    .fill(Color.accentColor)
-                    .frame(width: 1.5, height: geometry.size.height)
-                    .offset(x: min(max(model.playhead * scale, 0), geometry.size.width - 1.5))
-            }
-        }
-        .frame(height: 64)
-    }
-
-    @ViewBuilder
-    private func segmentView(index: Int, scale: CGFloat, height: CGFloat) -> some View {
-        let range = model.displayedRange(at: index)
-        let x = max(range.start * scale, 0)
-        let width = max((range.end - range.start) * scale, 2)
-        let isSelected = index == model.selectedIndex
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 3)
-                .fill(isSelected ? Color.accentColor.opacity(0.55) : Color.accentColor.opacity(0.3))
-            HStack(spacing: 0) {
-                edgeHandle(index: index, scale: scale, isLeading: true)
-                Spacer(minLength: 0)
-                edgeHandle(index: index, scale: scale, isLeading: false)
-            }
-            easingCaps(range: range, scale: scale)
-        }
-        .frame(width: width, height: height - 8)
-        .offset(x: x, y: 4)
-        .onTapGesture { model.selectedIndex = index }
-        .contextMenu {
-            Button("删除分段") {
-                model.removeSegment(at: index)
-            }
-        }
-    }
-
-    /// 缓入/缓出窗口端帽（淡色）：仅长段绘制（段长 > 缓入 + 缓出窗时窗口不收敛，
-    /// 端帽语义与 `zoomProgress` 一致；短段收敛形态不画，避免在 UI 复制收敛公式）。
-    @ViewBuilder
-    private func easingCaps(range: (start: TimeInterval, end: TimeInterval), scale: CGFloat) -> some View {
-        if range.end - range.start > OfflineZoomRenderer.easingInWindow + OfflineZoomRenderer.easingOutWindow {
-            HStack(spacing: 0) {
-                Rectangle().fill(Color.white.opacity(0.35))
-                    .frame(width: min(OfflineZoomRenderer.easingInWindow * scale, 24))
-                Spacer(minLength: 0)
-                Rectangle().fill(Color.white.opacity(0.35))
-                    .frame(width: min(OfflineZoomRenderer.easingOutWindow * scale, 24))
-            }
-        }
-    }
-
-    /// 端点把手（入点/出点拖拽）：拖拽中写 `dragPreview`（实时预览未落库），松手经
-    /// `commitDrag`（钳邻居边界 + 统一闸 validate + 存草稿）。
-    private func edgeHandle(index: Int, scale: CGFloat, isLeading: Bool) -> some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.75))
-            .frame(width: 8)
-            .contentShape(Rectangle())
-            .gesture(DragGesture(minimumDistance: 1)
-                .onChanged { value in
-                    guard model.segments.indices.contains(index) else { return }
-                    let original = model.segments[index]
-                    let delta = value.translation.width / scale
-                    model.dragPreview = ZoomEditorModel.DragPreview(
-                        index: index,
-                        start: isLeading ? original.start + delta : original.start,
-                        end: isLeading ? original.end : original.end + delta)
-                }
-                .onEnded { _ in
-                    if let preview = model.dragPreview {
-                        model.commitDrag(index: preview.index, start: preview.start, end: preview.end)
-                    }
-                    model.dragPreview = nil
-                })
     }
 }
 
