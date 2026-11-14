@@ -24,10 +24,11 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: Q9TF3XSQ3N
-        # 产品名（2026-11-14 命名裁定「蜂鸟录屏」）：app bundle/executable 与
-        # CFBundleName（About/访达可见）取此名；模块名保持 ScreenRecorder
-        #（测试 @testable import ScreenRecorder）；bundle id 不变（TCC/UserDefaults 锚定）。
-        PRODUCT_NAME: 蜂鸟录屏
+        # 产品名（2026-11-14 命名裁定）：编译产物/可执行用英文 Hummingbird
+        #（路径、终端、脚本友好；用户要求 build 产物名英文）；界面显示名仍是
+        # CFBundleDisplayName「蜂鸟录屏」。模块名保持 ScreenRecorder（测试 import
+        # 不变）；bundle id 不变（TCC/UserDefaults 锚定）。
+        PRODUCT_NAME: Hummingbird
         PRODUCT_MODULE_NAME: ScreenRecorder
     info:
       path: ScreenRecorder/Info.plist
@@ -56,9 +57,8 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        # 测试宿主＝重命名后的产品（PRODUCT_NAME=蜂鸟录屏；xcodegen 自动推导仍用
-        # target 名 ScreenRecorder，需显式覆盖）。
-        TEST_HOST: $(BUILT_PRODUCTS_DIR)/蜂鸟录屏.app/Contents/MacOS/蜂鸟录屏
+        # 测试宿主＝产品名（Hummingbird；xcodegen 自动推导仍用 target 名，需显式覆盖）。
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Hummingbird.app/Contents/MacOS/Hummingbird
         BUNDLE_LOADER: $(TEST_HOST)
 schemes:
   ScreenRecorder:
