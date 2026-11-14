@@ -24,11 +24,21 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: Q9TF3XSQ3N
+        # 产品名（2026-11-14 命名裁定「蜂鸟录屏」）：app bundle/executable 与
+        # CFBundleName（About/访达可见）取此名；模块名保持 ScreenRecorder
+        #（测试 @testable import ScreenRecorder）；bundle id 不变（TCC/UserDefaults 锚定）。
+        PRODUCT_NAME: 蜂鸟录屏
+        PRODUCT_MODULE_NAME: ScreenRecorder
     info:
       path: ScreenRecorder/Info.plist
       properties:
         LSUIElement: true
-        # App 主图标（2026-11-14）：Omi 风格相机图标（绿渐变圆角底 + 白色 camera.fill），
+        # 显示名（2026-11-14 命名裁定）：「蜂鸟录屏」——蜂鸟悬停振翅、身体定格，
+        # 是自然界最著名的「定格」意象（↔ 截图），高频振翅 ↔ 高帧率录制。
+        # 只改显示名，不动 PRODUCT_BUNDLE_IDENTIFIER（TCC 权限与 UserDefaults 锚定它）。
+        CFBundleDisplayName: 蜂鸟录屏
+        CFBundleName: 蜂鸟录屏
+        # App 主图标（2026-11-14）：绿渐变圆角底 + 白色摄像机（video.fill），
         # ScreenRecorder/Resources/AppIcon.icns 随 resources 段拷入 bundle。
         CFBundleIconFile: AppIcon
         NSMicrophoneUsageDescription: 用于录制会议和教程
@@ -46,6 +56,10 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        # 测试宿主＝重命名后的产品（PRODUCT_NAME=蜂鸟录屏；xcodegen 自动推导仍用
+        # target 名 ScreenRecorder，需显式覆盖）。
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/蜂鸟录屏.app/Contents/MacOS/蜂鸟录屏
+        BUNDLE_LOADER: $(TEST_HOST)
 schemes:
   ScreenRecorder:
     build:
