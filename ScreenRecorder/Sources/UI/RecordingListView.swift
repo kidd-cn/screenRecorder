@@ -37,8 +37,11 @@ struct RecordingListView: View {
                 menuProvider: { selection in self.makeMenu(for: selection) },
                 onDoubleClick: { item in NSWorkspace.shared.open(item.url) } // 双击行：播放
             )
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
             bottomBar
         }
+        .background(OmiStyle.panelBackground) // Omi 化（2026-11-14）：面板底 + 卡片留白
         .sheet(item: $renameTarget) { item in
             renameSheet(item: item)
         }
@@ -59,21 +62,28 @@ struct RecordingListView: View {
         .task { await viewModel.refresh() } // 窗口首开刷新（复用窗口下仅生命周期首帧一次；后续激活刷新由窗口 didBecomeKeyNotification 承担）
     }
 
-    /// 内容区底部刷新栏（审查修复轮 1 #1）：macOS 13 可渲染的窗口内控件——刷新按钮 +
-    /// 条目计数。
+    /// 内容区底部刷新栏（审查修复轮 1 #1）：macOS 13 可渲染的窗口内控件——刷新药丸 +
+    /// 条目计数（Omi 化：主绿柔底胶囊）。
     private var bottomBar: some View {
         HStack {
             Button {
                 Task { await viewModel.refresh() }
             } label: {
                 Label("刷新", systemImage: "arrow.clockwise")
+                    .font(.callout.weight(.medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(OmiStyle.accent.opacity(0.14)))
+                    .foregroundStyle(OmiStyle.accent)
             }
+            .buttonStyle(.plain)
             Spacer()
             Text("\(viewModel.items.count) 个录制")
+                .font(.callout)
                 .foregroundStyle(.secondary)
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     // MARK: - 行操作（原生右键菜单；选中集非单选时部分操作收敛）

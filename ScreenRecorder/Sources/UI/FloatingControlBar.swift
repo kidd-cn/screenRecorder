@@ -50,8 +50,8 @@ struct FloatingControlBar: View {
             Button {
                 onToggleMarking()
             } label: {
-                Image(systemName: isMarkingEnabled ? "paintbrush.pointed.fill" : "paintbrush.pointed")
-                    .frame(width: 18, height: 18)
+                barIcon(isMarkingEnabled ? "paintbrush.pointed.fill" : "paintbrush.pointed",
+                        tint: .orange)
             }
             .help(isMarkingEnabled ? "关闭边录边标记" : "边录边标记")
             .accessibilityLabel(isMarkingEnabled ? "关闭边录边标记" : "边录边标记")
@@ -63,7 +63,7 @@ struct FloatingControlBar: View {
                 Button {
                     onTogglePipSwap()
                 } label: {
-                    Image(systemName: "arrow.left.arrow.right").frame(width: 18, height: 18)
+                    barIcon("arrow.left.arrow.right", tint: .teal)
                 }
                 .help(pipSwapped ? "换回屏幕为主" : "对调画面（摄像头为主）")
                 .accessibilityLabel(pipSwapped ? "换回屏幕为主" : "对调画面（摄像头为主）")
@@ -76,8 +76,7 @@ struct FloatingControlBar: View {
                     controller.pause()
                 }
             } label: {
-                Image(systemName: controller.state == .paused ? "play.fill" : "pause.fill")
-                    .frame(width: 18, height: 18)
+                barIcon(controller.state == .paused ? "play.fill" : "pause.fill", tint: .blue)
             }
             .help(controller.state == .paused ? "恢复录制" : "暂停录制")
             .accessibilityLabel(controller.state == .paused ? "恢复录制" : "暂停录制")
@@ -85,9 +84,12 @@ struct FloatingControlBar: View {
             Button {
                 controller.stop()
             } label: {
+                // 停止 = 主破坏操作：实心红圆底白字（Omi 绿药丸同级的强调形态）。
                 Image(systemName: "stop.fill")
-                    .foregroundStyle(.red)
-                    .frame(width: 18, height: 18)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 24, height: 24)
+                    .background(Circle().fill(Color.red))
             }
             .help("停止并保存录制")
             .accessibilityLabel("停止并保存录制")
@@ -105,8 +107,7 @@ struct FloatingControlBar: View {
                         .padding(.vertical, 6)
                         .background(Capsule().fill(Color.red))
                 } else {
-                    Image(systemName: "arrow.counterclockwise")
-                        .frame(width: 18, height: 18)
+                    barIcon("arrow.counterclockwise", tint: .purple)
                 }
             }
             .help("重新录制会丢弃已录制的内容，再次点击确认")
@@ -126,17 +127,20 @@ struct FloatingControlBar: View {
                         .padding(.vertical, 6)
                         .background(Capsule().fill(Color.red))
                 } else {
-                    Image(systemName: "trash")
-                        .frame(width: 18, height: 18)
+                    barIcon("trash", tint: .red)
                 }
             }
             .help("取消录制会丢弃已录制的内容，再次点击确认")
             .accessibilityLabel("丢弃录制")
             .reportingInteractiveRegion(to: regionRegistry)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(Capsule().fill(.regularMaterial).shadow(radius: 3))
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(
+            Capsule()
+                .fill(OmiStyle.cardBackground)
+                .shadow(color: .black.opacity(0.18), radius: 5, y: 1))
+        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
         // 交互热区汇总上报（按钮 frame 变化——如武装换装后丢弃按钮变宽——即重报）。
         .onPreferenceChange(InteractiveRegionPreferenceKey.self) { regions in
             regionRegistry.replace(regions: regions)
@@ -157,6 +161,15 @@ struct FloatingControlBar: View {
                 restartAutoDisarmTask = nil
             }
         }
+    }
+
+    /// 浮条图标钮（Omi 磁贴语言：浅色圆底 + 彩色符号；热区上报随 frame 变化自动重报）。
+    private func barIcon(_ systemName: String, tint: OmiStyle.TileTint) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Color(nsColor: OmiStyle.tintNS(tint)))
+            .frame(width: 26, height: 26)
+            .background(Circle().fill(Color(nsColor: OmiStyle.tintNS(tint)).opacity(0.14)))
     }
 
     private func handleDiscardTap() {

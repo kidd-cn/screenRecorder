@@ -337,20 +337,23 @@ struct ZoomEditorView: View {
     @ObservedObject var viewModel: RecordingListViewModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: OmiStyle.sectionSpacing) {
             PlayerPreview(player: model.player)
                 .frame(minHeight: 220, maxHeight: 300)
                 .frame(maxWidth: .infinity)
-            playControlRow
-            ZoomTimelineStrip(model: model)
-                .frame(height: 64) // 时间线条高（旧 64pt）
-            segmentSection
+                .clipShape(RoundedRectangle(cornerRadius: OmiStyle.cardRadius))
+            OmiCard { playControlRow }
+            OmiCard {
+                ZoomTimelineStrip(model: model)
+                    .frame(height: 64) // 时间线条高（旧 64pt）
+            }
+            OmiCard { segmentSection }
             selectedSegmentSection
-            Divider()
-            exportSection
+            OmiCard { exportSection }
         }
         .padding(16)
         .frame(width: 720)
+        .background(OmiStyle.panelBackground) // Omi 化（2026-11-14）：分区卡片 + 绿 accent
         .task { await model.loadMediaInfo() }
     }
 
@@ -396,7 +399,8 @@ struct ZoomEditorView: View {
     @ViewBuilder
     private var selectedSegmentSection: some View {
         if let index = model.selectedIndex, model.segments.indices.contains(index) {
-            HStack(alignment: .top, spacing: 16) {
+            OmiCard {
+                HStack(alignment: .top, spacing: 16) {
                 NinePatchGrid(currentCenter: model.segments[index].center) { row, column in
                     model.setCenter(atIndex: index, ninePatchRow: row, column: column)
                 }
@@ -407,6 +411,7 @@ struct ZoomEditorView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                }
             }
         }
     }
@@ -446,9 +451,17 @@ struct ZoomEditorView: View {
             progressArea
             HStack {
                 Spacer()
-                Button("开始导出") {
+                Button {
                     model.export()
+                } label: {
+                    Label("开始导出", systemImage: "square.and.arrow.up")
+                        .font(.callout.weight(.semibold))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(OmiStyle.accent))
+                        .foregroundStyle(.white)
                 }
+                .buttonStyle(.plain)
                 .keyboardShortcut(.defaultAction)
                 .disabled(viewModel.zoomRenderProgress != nil)
             }
@@ -504,7 +517,7 @@ private struct NinePatchGrid: View {
                         } label: {
                             RoundedRectangle(cornerRadius: 3)
                                 .fill(current.row == row && current.column == column
-                                      ? Color.accentColor
+                                      ? OmiStyle.accent
                                       : Color.secondary.opacity(0.25))
                                 .frame(width: 22, height: 22)
                         }

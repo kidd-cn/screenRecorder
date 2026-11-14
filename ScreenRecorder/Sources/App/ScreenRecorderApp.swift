@@ -1414,6 +1414,8 @@ struct ScreenRecorderApp: App {
             // P6b：排程等待期 idle 用倒计时态（timer），故 label 同持调度器。
             MenuBarStatusIcon(controller: assembly.controller, scheduler: assembly.scheduler)
         }
+        // Omi 化面板（2026-11-14）：NSMenu 式菜单 → 卡片窗口面板（MenuBarView 头注）。
+        .menuBarExtraStyle(.window)
         Window("授权设置", id: "permission-onboarding") {
             PermissionOnboardingWindowContent()
         }

@@ -80,6 +80,10 @@ struct ZoomSegmentTable: NSViewRepresentable {
             segments.count
         }
 
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            OmiTableRowView() // Omi 化：绿柔光圆角选中
+        }
+
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard segments.indices.contains(row) else { return nil }
             let cell = tableView.makeView(withIdentifier: Self.cellID, owner: nil) as? SegmentRowCell

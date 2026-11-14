@@ -29,11 +29,11 @@ struct RecordingListTable: NSViewRepresentable {
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
         table.headerView = nil // 旧 SwiftUI Table 表头无排序交互（纯展示），原生等价简化为无表头
-        table.usesAlternatingRowBackgroundColors = true
+        table.usesAlternatingRowBackgroundColors = false // Omi 卡面：白卡行 + 绿柔光选中（OmiTableRowView）
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.allowsEmptySelection = true
         table.usesAutomaticRowHeights = false
-        table.rowHeight = 24
+        table.rowHeight = 28
         table.target = context.coordinator
         table.doubleAction = #selector(Coordinator.doubleClick(_:))
         for column in Self.makeColumns() {
@@ -91,6 +91,10 @@ struct RecordingListTable: NSViewRepresentable {
 
         func numberOfRows(in tableView: NSTableView) -> Int {
             items.count
+        }
+
+        func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? {
+            OmiTableRowView() // Omi 化：绿柔光圆角选中
         }
 
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {

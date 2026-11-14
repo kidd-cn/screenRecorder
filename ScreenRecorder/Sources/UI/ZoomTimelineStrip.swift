@@ -143,7 +143,7 @@ final class ZoomTimelineCanvas: NSView {
         for (position, block) in blocks.enumerated() {
             let range = ranges[position]
             let selected = block.index == model.selectedIndex
-            NSColor.controlAccentColor
+            NSColor.systemGreen
                 .withAlphaComponent(selected ? 0.55 : 0.3)
                 .setFill()
             NSBezierPath(roundedRect: block.rect, xRadius: 3, yRadius: 3).fill()
@@ -178,7 +178,7 @@ final class ZoomTimelineCanvas: NSView {
         // 播放头竖线。
         let playheadX = ZoomTimelineGeometry.playheadX(
             playhead: model.playhead, scale: scale, width: bounds.width)
-        NSColor.controlAccentColor.setFill()
+        NSColor.systemGreen.setFill()
         NSBezierPath(rect: CGRect(
             x: playheadX, y: 0,
             width: ZoomTimelineGeometry.playheadWidth, height: bounds.height)).fill()
