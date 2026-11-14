@@ -86,10 +86,10 @@
 "仅声音录制：只录系统声音与麦克风，输出 m4a 音频文件" = "Audio-only recording: system audio and microphone, saved as m4a";
 "摄像头画中画" = "Camera PiP";
 "摄像头画中画开关：翻转只影响下一场录制" = "Camera PiP toggle — applies to the next recording";
-"定时录制…" = "Scheduled Recording…";
+"定时录制…" = "Scheduled Recording";
 "取消定时录制" = "Cancel Scheduled Recording";
-"文件列表…" = "Recordings…";
-"偏好设置…" = "Preferences…";
+"文件列表…" = "Recordings";
+"偏好设置…" = "Preferences";
 "%@（主）" = "%@ (Main)";
 "播放" = "Play";
 "在 Finder 中显示" = "Show in Finder";
