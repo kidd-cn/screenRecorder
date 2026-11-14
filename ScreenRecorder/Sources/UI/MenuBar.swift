@@ -121,7 +121,13 @@ struct MenuBarView: View {
         }
     }
 
-    // MARK: 会话控制卡（暂停/恢复 · 重新录制 · 停止）
+    // MARK: 会话控制卡（暂停/恢复 · 重新录制（两击确认） · 停止）
+
+    /// 重录两击确认真源（浮条 `FloatingControlBar` 同一 `DiscardConfirmation` 类——
+    /// 2026-11-14 用户目验裁定：主面板与浮条行为必须一致，单击直执行会无确认丢弃成片）。
+    @StateObject private var restartConfirmation = DiscardConfirmation()
+    /// 武装态 5s 自动解除驱动（浮条 scheduleRestartAutoDisarm 同构）。
+    @State private var restartAutoDisarmTask: Task<Void, Never>?
 
     private var sessionControlsCard: some View {
         HStack(spacing: 8) {
@@ -135,35 +141,92 @@ struct MenuBarView: View {
                     controller.pause()
                 }
             }
-            controlPill(title: "重录", icon: "arrow.counterclockwise", tint: .purple) {
-                onRestartRecording()
+            // 重录 = 丢弃已录内容（破坏性）：两击确认，武装视觉与浮条逐字同款
+            //（红底胶囊白字「再次点击确认重录」，lineLimit(1)+fixedSize 防约束循环）。
+            Button {
+                handleRestartTap()
+            } label: {
+                if restartConfirmation.isArmed {
+                    Text("再次点击确认重录")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Capsule().fill(Color.red))
+                } else {
+                    controlPillLabel("重录", icon: "arrow.counterclockwise", tint: .purple)
+                }
             }
+            .buttonStyle(.plain)
+            .help("重新录制会丢弃已录制的内容，再次点击确认")
+            .accessibilityLabel(restartConfirmation.isArmed ? "再次点击确认重录" : "重新录制")
             Spacer()
             controlPill(title: "停止", icon: "stop.fill", tint: .red, filled: true) {
                 controller.stop()
             }
         }
+        .onChange(of: controller.state) { newState in
+            // 离开录制/暂停（面板即将随会话收场）即解除武装——与浮条同一纪律。
+            if newState != .recording && newState != .paused {
+                restartConfirmation.disarm()
+                cancelRestartAutoDisarm()
+            }
+        }
+    }
+
+    /// 两击判定（handleRestartTap 同构）：首击武装 + 调度 5s 自动解除；窗口内再击确认
+    /// → 出口重录编排。时钟注入与过期自校验收在 `DiscardConfirmation`。
+    private func handleRestartTap() {
+        let now = ProcessInfo.processInfo.systemUptime
+        if restartConfirmation.tap(at: now) {
+            cancelRestartAutoDisarm()
+            onRestartRecording()
+        } else {
+            scheduleRestartAutoDisarm()
+        }
+    }
+
+    private func scheduleRestartAutoDisarm() {
+        restartAutoDisarmTask?.cancel()
+        restartAutoDisarmTask = Task {
+            try? await Task.sleep(nanoseconds: UInt64(DiscardConfirmation.disarmWindow * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            restartConfirmation.tick(at: ProcessInfo.processInfo.systemUptime)
+        }
+    }
+
+    private func cancelRestartAutoDisarm() {
+        restartAutoDisarmTask?.cancel()
+        restartAutoDisarmTask = nil
     }
 
     /// 胶囊控制钮（磁贴同语言的横排形态；filled = 主红底白字，停止语义）。
     private func controlPill(title: String, icon: String, tint: OmiStyle.TileTint,
                              filled: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: icon).font(.system(size: 12, weight: .semibold))
-                Text(title).font(.callout.weight(.medium))
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(
-                Capsule().fill(filled
-                    ? Color(nsColor: OmiStyle.tintNS(tint))
-                    : Color(nsColor: OmiStyle.tintNS(tint)).opacity(0.14)))
-            .foregroundStyle(filled
-                ? Color.white
-                : Color(nsColor: OmiStyle.tintNS(tint)))
+            controlPillLabel(title, icon: icon, tint: tint,
+                             filled: filled)
         }
         .buttonStyle(.plain)
+    }
+
+    private func controlPillLabel(_ title: String, icon: String, tint: OmiStyle.TileTint,
+                                  filled: Bool = false) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+            Text(title).font(.callout.weight(.medium))
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(
+            Capsule().fill(filled
+                ? Color(nsColor: OmiStyle.tintNS(tint))
+                : Color(nsColor: OmiStyle.tintNS(tint)).opacity(0.14)))
+        .foregroundStyle(filled
+            ? Color.white
+            : Color(nsColor: OmiStyle.tintNS(tint)))
     }
 
     // MARK: 模式宫格（录制 7 模式 + 截图 2 入口；非会话态整体置灰）
