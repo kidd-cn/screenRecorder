@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import CoreGraphics
 import KeyboardShortcuts
+import ScreenCaptureKit
 import SwiftUI
 import UserNotifications
 
@@ -406,7 +407,8 @@ final class AppAssembly: ObservableObject {
         }
     }
 
-    /// 截图编排（Q1 Produces）：CGDisplayCreateImage 取帧 → ScreenshotCore 裁剪 → PNG
+    /// 截图编排（Q1 Produces）：ScreenCaptureKit 取帧（2026-11-14 废弃 API 迁移）→
+    /// ScreenshotCore 裁剪 → PNG
     /// 写盘（`截图_yyyy-MM-dd_HH-mm-ss.png`，冲突 " (2)"；截图不入文件列表——contents()
     /// 只列 mp4/m4a，无需改动）→ 成功通知。`regionInGlobalPoints` nil = 整屏（显示器
     /// bounds 作 region，经同一裁剪路径零特判）。
@@ -435,8 +437,34 @@ final class AppAssembly: ObservableObject {
             NSLog("Screenshot: settle 后状态已非 idle（被并发起录抢先），放弃截图")
             return
         }
-        guard let frame = CGDisplayCreateImage(displayID) else {
-            NSLog("Screenshot: 显示器 %u 取帧失败，放弃截图", displayID)
+        // SCK 取帧（替代废弃的 CGDisplayCreateImage）：显示器像素尺寸作配置，
+        // 与 ScreenshotCore 的点→像素比例尺一致。
+        let frame: CGImage
+        do {
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: false),
+                let display = content.displays.first(where: { $0.displayID == displayID })
+            else {
+                NSLog("Screenshot: SCShareableContent 中找不到显示器 %u，放弃截图", displayID)
+                return
+            }
+            // Retina 修正（2026-11-14）：SCK 配置按点口径的显示器尺寸出图会掉到
+            // 逻辑分辨率（实测 1512×982）——乘 backingScaleFactor 恢复原生像素
+            // （3024×1964），与旧 CGDisplayCreateImage 同清晰度。
+            let scaleFactor = NSScreen.screens.first {
+                ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
+                    .uint32Value == displayID
+            }?.backingScaleFactor ?? 2
+            let pointBounds = CGDisplayBounds(displayID)
+            let config = SCStreamConfiguration()
+            config.width = Int(pointBounds.width * scaleFactor)
+            config.height = Int(pointBounds.height * scaleFactor)
+            config.showsCursor = false
+            config.capturesAudio = false
+            let filter = SCContentFilter(display: display, excludingWindows: [])
+            frame = try await ScreenFrameCapture.capture(filter: filter, configuration: config)
+        } catch {
+            NSLog("Screenshot: 显示器 %u 取帧失败（\(error)），放弃截图", displayID)
             return
         }
         guard let cropped = ScreenshotCore.crop(

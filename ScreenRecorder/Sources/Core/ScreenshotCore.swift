@@ -4,7 +4,7 @@ import ImageIO
 import UniformTypeIdentifiers
 
 /// 截图核心（Q1）：纯函数——位图裁剪 + PNG 编码。无 AppKit、无采集调用，无头可测；
-/// 选区（RegionSelector）、取帧（CGDisplayCreateImage）、写盘与通知的编排归装配层
+/// 选区（RegionSelector）、取帧（ScreenCaptureKit）、写盘与通知的编排归装配层
 ///（`AppAssembly.takeScreenshot`）。
 enum ScreenshotCore {
     /// 位图裁剪：显示器全局 points rect → 像素 rect。region 契约（审查轮 1 修正，规格

@@ -73,7 +73,7 @@ enum WindowPicker {
 
     /// 可录制的可见窗口候选（简报 Produces）。主 actor 入口：NSImage 与候选数组在主线程
     /// 组装（缩略图裁定）；重活都不占主线程——枚举走 SCK 自己的异步（非隔离缝自动跳离），
-    /// 光栅化在后台队列（见 `generateThumbnails`）。
+    /// 抓帧在 `ScreenFrameCapture`（见 `generateThumbnails`）。
     ///
     /// 失败可诊断：权限未授予/失效抛 `.screenRecordingPermissionDenied`（不弹系统设置
     /// 跳转——那是接线任务的事）；`SCShareableContent` 枚举失败包裹为
@@ -82,7 +82,7 @@ enum WindowPicker {
     /// - Parameters:
     ///   - preflight: 注入缝——屏幕录制权限预检（生产 `CGPreflightScreenCaptureAccess`）。
     ///   - loadWindows: 注入缝——可共享内容枚举（生产 `SCShareableContent`，无头不可测）。
-    ///   - loadThumbnails: 注入缝——缩略图批量生成（生产 `CGWindowListCreateImage` 批处理）。
+    ///   - loadThumbnails: 注入缝——缩略图批量生成（生产 `ScreenFrameCapture` 逐窗口单帧）。
     @MainActor
     static func availableWindows(
         preflight: () -> Bool = preflightScreenRecordingPermission,
@@ -271,34 +271,37 @@ enum WindowPicker {
         return layers
     }
 
-    /// 缩略图批量生成：光栅化在后台队列（`CGWindowListCreateImage` 同步调用，macOS 13 的
-    /// 正确 API，14+ 才弃用、deployment target 13 下零告警）；`.bestResolution` 取 Retina
-    /// 物理像素，`NSImage(cgImage:size:)` 以封顶点尺寸声明 DPI（2x 屏即 2x 清晰度）。
-    /// 主 actor 入口：续体恢复即跳回主线程，NSImage 组装在主线程完成、字典不跨域
-    /// （NSImage 的 Sendable 一致性 macOS 14 才有，跨域组装会触发可用性告警）。
-    /// 失败窗口（无内容/已消失）缺席映射，候选侧保持 nil 由视图出占位图。
+    /// 缩略图批量生成（2026-11-14 废弃 API 迁移）：ScreenCaptureKit 逐窗口单帧抓取，
+    /// 替代已弃用的 `CGWindowListCreateImage`。像素 2x 对齐旧 `.bestResolution` 清晰度，
+    /// `NSImage(cgImage:size:)` 以点尺寸声明 DPI（2x 屏即 2x 清晰度）；窗口已关闭/
+    /// 抓取失败缺席映射，候选侧保持 nil 由视图出占位图。
     @MainActor
     private static func generateThumbnails(_ requests: [ThumbnailRequest]) async -> [CGWindowID: NSImage] {
-        let rasterized: [(windowID: CGWindowID, cgImage: CGImage?)] = await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let images = requests.map { request in
-                    (windowID: request.windowID,
-                     cgImage: CGWindowListCreateImage(.null, .optionIncludingWindow, request.windowID, [.bestResolution]))
-                }
-                continuation.resume(returning: images)
-            }
+        guard !requests.isEmpty,
+              let content = try? await SCShareableContent.excludingDesktopWindows(
+                  false, onScreenWindowsOnly: true)
+        else { return [:] }
+        var windowsByID: [CGWindowID: SCWindow] = [:]
+        for window in content.windows {
+            windowsByID[window.windowID] = window
         }
         var thumbnails: [CGWindowID: NSImage] = [:]
         for request in requests {
-            guard let cgImage = rasterized.first(where: { $0.windowID == request.windowID })?.cgImage else { continue }
+            guard let window = windowsByID[request.windowID],
+                  request.pointSize.width > 0, request.pointSize.height > 0 else { continue }
+            let config = SCStreamConfiguration()
+            config.width = Int(request.pointSize.width) * 2
+            config.height = Int(request.pointSize.height) * 2
+            config.showsCursor = false
+            config.capturesAudio = false
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            guard let cgImage = try? await ScreenFrameCapture.capture(
+                filter: filter, configuration: config) else { continue }
             thumbnails[request.windowID] = NSImage(cgImage: cgImage, size: request.pointSize)
         }
         return thumbnails
     }
 }
-
-// MARK: - 窗口选择界面（P3a 起含「窗口/App」范围切换：窗口行=App 名/窗口名+缩略图，
-// App 行=图标+名称+窗口数；双击选择）
 
 /// 窗口选择器 UI（T14 简报 Produces + P3a 范围切换）：窗口范围加载
 /// `WindowPicker.availableWindows()`、App 范围加载 `WindowPicker.availableApps()`，
