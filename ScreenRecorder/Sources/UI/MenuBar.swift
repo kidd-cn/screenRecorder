@@ -263,9 +263,15 @@ struct MenuBarView: View {
                   spacing: 10) {
             displayMenuTile("全屏", icon: "display", tint: .blue) { onStartDisplay($0) }
             OmiTileButton(title: "窗口", icon: "macwindow", tint: .blue,
-                          isEnabled: isIdle) { onStartWindowPicker() }
+                          isEnabled: isIdle) {
+                dismissPanelWindow() // 选择器是普通层级窗口，面板不收会压在面板下（用户裁定：弹窗必须在面板之上）
+                onStartWindowPicker()
+            }
             OmiTileButton(title: "App", icon: "square.grid.2x2", tint: .indigo,
-                          isEnabled: isIdle) { onStartAppPicker() }
+                          isEnabled: isIdle) {
+                dismissPanelWindow() // 同上
+                onStartAppPicker()
+            }
             OmiTileButton(title: "区域", icon: "crop", tint: .teal,
                           isEnabled: isIdle) {
                 dismissPanelWindow() // 全屏选区遮罩不被面板遮挡
@@ -318,6 +324,7 @@ struct MenuBarView: View {
         OmiCard {
             VStack(alignment: .leading, spacing: 2) {
                 functionRow(icon: "calendar", tint: .orange, title: "定时录制…") {
+                    dismissPanelWindow() // 弹窗先收面板（面板不收会压在新窗之下）
                     onOpenScheduledPanel()
                 }
                 if scheduler.active != nil {
@@ -340,14 +347,17 @@ struct MenuBarView: View {
                 .accessibilityLabel("摄像头画中画开关：翻转只影响下一场录制")
                 Divider()
                 functionRow(icon: "list.bullet", tint: .blue, title: "文件列表…") {
+                    dismissPanelWindow() // 弹窗先收面板（面板不收会压在新窗之下）
                     onOpenRecordingList()
                 }
                 functionRow(icon: "gearshape", tint: .gray, title: "偏好设置…") {
+                    dismissPanelWindow() // 同上
                     onOpenPreferences()
                 }
                 Divider()
                 HStack(spacing: 16) {
                     functionRow(icon: "info.circle", tint: .gray, title: "关于") {
+                        dismissPanelWindow() // 关于面板同为普通层窗口，先收面板
                         NSApplication.shared.orderFrontStandardAboutPanel(nil)
                     }
                     functionRow(icon: "power", tint: .red, title: "退出") {
