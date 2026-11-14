@@ -63,9 +63,9 @@ struct MenuBarView: View {
             }
             OmiCard {
                 VStack(alignment: .leading, spacing: 10) {
-                    OmiSectionHeader(icon: "record.circle", title: "开始录制", tint: .red)
+                    OmiSectionHeader(icon: "record.circle", title: "录像", tint: .red)
                     modeGrid
-                    OmiSectionHeader(icon: "camera.viewfinder", title: "截图", tint: .green)
+                    OmiSectionHeader(icon: "camera.viewfinder", title: "截屏", tint: .green)
                         .padding(.top, 6)
                     screenshotGrid
                 }

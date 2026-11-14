@@ -328,3 +328,7 @@
 "开始录制后，成片会出现在这里。" = "New recordings will appear here once you start.";
 "双击播放 · 右键更多操作" = "Double-click to play · Right-click for more";
 "到点自动开始录制。" = "Starts automatically at the set time.";
+
+/* 分区名（2026-11-14 可辨识度调整） */
+"录像" = "Video Recording";
+"截屏" = "Screenshot";
