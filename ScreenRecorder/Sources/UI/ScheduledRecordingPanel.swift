@@ -45,7 +45,7 @@ struct ScheduledRecordingPanelView: View {
                 OmiTileIcon(icon: "timer", tint: .orange, tileSize: 40, symbolSize: 16)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("定时录制").font(.callout.weight(.semibold))
-                    Text("到点自动开始录制。").font(.caption).foregroundStyle(.secondary)
+                    Text("到点自动开始录制。").font(.caption).foregroundStyle(OmiStyle.subtleText)
                 }
                 Spacer()
             }

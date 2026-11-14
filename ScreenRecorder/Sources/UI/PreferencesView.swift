@@ -246,7 +246,7 @@ private struct RecordingSourcesTab: View {
                 // 文案精简（2026-11-14 用户要求与快捷键页同法）：原两句全句改为两短语。
                 Text("包含麦克风：开录时生效；静音与音量：实时生效。")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
             Toggle("摄像头画中画", isOn: $settings.pipEnabled)
             // P5 摄像头背景：off=原画面、blur=模糊、builtin=三内置（程序生成，零素材）。
@@ -262,7 +262,7 @@ private struct RecordingSourcesTab: View {
             .disabled(!settings.pipEnabled)
             Text("实时生效。")
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
             // Q2 录制鼠标光标：默认开（既有行为）；开录快照语义（同点击高亮——下一场录制生效）。
             Toggle("录制光标", isOn: $settings.captureMouseCursor)
             Toggle("点击高亮", isOn: $settings.clickHighlightEnabled)
@@ -305,17 +305,17 @@ private struct RecordingSourcesTab: View {
                 // 说明行（简报钉定原文两行，逐字）。
                 Text("拼音组合期显示原始字母")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
                 Text("安全输入时暂停显示")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
             Section("窗口捕获") {
                 windowTargetRow
                 Button("选择窗口…") { onPickWindowTarget() }
                 Text("按 ⇧⌘W 录制该窗口（可在快捷键页修改）。")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
             }
         }
@@ -331,13 +331,13 @@ private struct RecordingSourcesTab: View {
             if let target = settings.windowCaptureTarget {
                 let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? NSLocalizedString("（无标题）", comment: "Untitled window") : target.windowTitle)"
                 Text(display)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(display)
             } else {
                 Text("未设置")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
         }
     }
@@ -372,7 +372,7 @@ private struct ShortcutsTab: View {
                 }
                 Text("全局生效，可点按右侧键位修改。")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
         }
     }

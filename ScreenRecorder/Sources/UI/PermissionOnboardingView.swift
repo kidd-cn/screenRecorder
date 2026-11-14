@@ -32,7 +32,7 @@ struct PermissionOnboardingView: View {
                 .font(.title2).bold()
             Text("录制需要以下系统权限，请逐项允许。")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
 
             VStack(spacing: 0) {
                 row(icon: "display", title: "屏幕录制", isGranted: status.screen, kind: .screen)
@@ -52,14 +52,14 @@ struct PermissionOnboardingView: View {
 
             Text("输入监控仅用于录制其他应用中的键盘按键（可选）；未授权时仍可正常录制，只是键帽只显示本应用内的按键。")
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
 
             if isRequesting {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
                     Text("等待授权中…若未弹出提示，请到系统设置手动允许。")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(OmiStyle.subtleText)
                 }
             }
 

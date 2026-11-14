@@ -15,6 +15,11 @@ enum OmiStyle {
     /// 圆角：卡片 14 / 磁贴 9。
     static let cardRadius: CGFloat = 14
     static let tileRadius: CGFloat = 9
+    /// 次级文本（暗色下提亮：primary 78% ——系统 .secondary 在深色卡面上偏灰，
+    /// 2026-11-14 用户目验「字的颜色在暗背景下吃力」）。
+    static let subtleText = Color.primary.opacity(0.78)
+    /// 更弱文本（提示类；原 tertiary 提至系统 secondary）。
+    static let faintText = Color.secondary
     /// 卡内边距 / 区块间距。
     static let cardPadding: CGFloat = 12
     static let sectionSpacing: CGFloat = 12
@@ -156,7 +161,7 @@ struct OmiSectionHeader: View {
                 .foregroundStyle(Color(nsColor: OmiStyle.tintNS(tint)))
             Text(title)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
         }
     }
 }

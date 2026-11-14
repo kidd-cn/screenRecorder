@@ -133,7 +133,7 @@ struct MenuBarView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(headerTile.title).font(.callout.weight(.semibold))
                 if let subtitle = headerTile.subtitle {
-                    Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                    Text(subtitle).font(.caption).foregroundStyle(OmiStyle.subtleText)
                 }
             }
             Spacer()

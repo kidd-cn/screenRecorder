@@ -370,7 +370,7 @@ struct ZoomEditorView: View {
             }
             Text("\(model.playhead, specifier: "%.1f")s / \(model.sourceDuration, specifier: "%.1f")s")
                 .font(.system(.footnote, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
             Spacer()
             Button("在播放头添加分段") {
                 model.addSegment(at: model.playhead)
@@ -387,7 +387,7 @@ struct ZoomEditorView: View {
                 Text("缩放分段").font(.headline)
                 Text("\(model.segments.count)")
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 1)
                     .background(Capsule().fill(Color.secondary.opacity(0.14)))
@@ -395,7 +395,7 @@ struct ZoomEditorView: View {
             if model.segments.isEmpty {
                 Text("暂无分段——播放到目标位置后点「在播放头添加分段」，或在时间线上拖段块两端调整入出点。")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             } else {
                 ZoomSegmentTable(model: model)
                     .frame(height: CGFloat(model.segments.count) * ZoomSegmentTable.rowHeight)
@@ -417,7 +417,7 @@ struct ZoomEditorView: View {
                     Text("缩放中心（九宫格）").font(.subheadline)
                     Text("点选九宫格设定「段 \(index + 1)」的缩放中心；与点击自动缩放同一画面口径（格中心 ±1/6 归一化）。")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(OmiStyle.subtleText)
                 }
                 Spacer()
                 }
@@ -432,7 +432,7 @@ struct ZoomEditorView: View {
             Text("导出").font(.headline)
             Text("输出：\(viewModel.suggestedZoomedDestinationName(for: model.item))（与源同目录）")
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
             HStack(spacing: 16) {
                 Picker("帧率", selection: $model.fpsChoice) {
                     Text("沿用源").tag(ZoomEditorModel.FPSChoice.source)
@@ -455,7 +455,7 @@ struct ZoomEditorView: View {
                 Spacer()
                 Text("预估大小：\(model.estimatedSizeText)（近似值）")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
             progressArea
             HStack {
@@ -484,7 +484,7 @@ struct ZoomEditorView: View {
                 ProgressView(value: progress)
                 Text("正在渲染缩放成片…\(Int((progress * 100).rounded()))%")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
         }
     }

@@ -374,10 +374,10 @@ struct WindowPickerView: View {
             VStack(spacing: 12) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.title)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
                 Text(failureText)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 24)
                 Button("重试") {
@@ -388,7 +388,7 @@ struct WindowPickerView: View {
         } else if scope == .apps {
             if apps.isEmpty {
                 Text("没有可录制的 App")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 WindowPickerTable(
@@ -399,7 +399,7 @@ struct WindowPickerView: View {
             }
         } else if candidates.isEmpty {
             Text("没有可录制的窗口")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
             WindowPickerTable(
@@ -554,7 +554,7 @@ final class WindowPickerWindowCell: NSTableCellView {
         super.init(frame: .zero)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         subtitleLabel.font = .systemFont(ofSize: 11)
-        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.textColor = NSColor.labelColor.withAlphaComponent(0.78)
         for label in [titleLabel, subtitleLabel] {
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false
@@ -609,7 +609,7 @@ final class WindowPickerAppCell: NSTableCellView {
         super.init(frame: .zero)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
         subtitleLabel.font = .systemFont(ofSize: 11)
-        subtitleLabel.textColor = .secondaryLabelColor
+        subtitleLabel.textColor = NSColor.labelColor.withAlphaComponent(0.78)
         for label in [titleLabel, subtitleLabel] {
             label.lineBreakMode = .byTruncatingTail
             label.translatesAutoresizingMaskIntoConstraints = false

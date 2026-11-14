@@ -71,13 +71,13 @@ struct RecordingListView: View {
         VStack(spacing: 10) {
             Image(systemName: "film.stack")
                 .font(.system(size: 36, weight: .light))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(OmiStyle.faintText)
             Text("暂无录制")
                 .font(.callout.weight(.medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
             Text("开始录制后，成片会出现在这里。")
                 .font(.caption)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(OmiStyle.faintText)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -101,11 +101,11 @@ struct RecordingListView: View {
             if !viewModel.items.isEmpty {
                 Text("双击播放 · 右键更多操作")
                     .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(OmiStyle.faintText)
             }
             Text("\(viewModel.items.count) 个录制")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -286,7 +286,7 @@ private struct GIFExportSheet: View {
             Text("导出 GIF").font(.headline)
             Text("输出：\(suggestedName)（与源同目录）")
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
             Picker("帧率", selection: $frameRate) {
                 Text("5 fps").tag(5)
                 Text("10 fps").tag(10)
@@ -331,7 +331,7 @@ private struct GIFExportSheet: View {
                 ProgressView(value: progress)
                 Text("正在导出 GIF…\(Int((progress * 100).rounded()))%")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
         }
     }
@@ -366,7 +366,7 @@ private struct CompressSheet: View {
             Text("压缩录像").font(.headline)
             Text("输出：\(suggestedName)（与源同目录）")
                 .font(.footnote)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(OmiStyle.subtleText)
             Picker("编码", selection: $codec) {
                 Text("H.264").tag(VideoCodec.h264)
                 Text("HEVC").tag(VideoCodec.hevc)
@@ -408,7 +408,7 @@ private struct CompressSheet: View {
                 ProgressView(value: progress)
                 Text("正在压缩…\(Int((progress * 100).rounded()))%")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(OmiStyle.subtleText)
             }
         }
     }
