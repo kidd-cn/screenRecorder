@@ -301,24 +301,14 @@ struct MenuBarView: View {
 
     private var isIdle: Bool { controller.state == .idle }
 
-    /// 显示器列表磁贴（多显示器选择语义保留：Menu 弹层 = 系统 scene 弹层，AppKit 呈现；
-    /// 单显示器时点选直出唯一项）。命名同旧菜单：本地化屏名 + points，主屏追加「（主）」。
-    /// 标签与 OmiTileButton 共用 `OmiTileLabel`（逐字同构）；`.button`+`.plain` 零底衬，
-    /// 修「全屏/全屏截图磁贴底衬与其它磁贴不一致」（2026-11-14 用户目验反馈）。
+    /// 显示器列表磁贴（多显示器选择语义保留）。命名同旧菜单：本地化屏名 + points，
+    /// 主屏追加「（主）」。标签与 OmiTileButton 共用 `OmiTileLabel`（逐字同构）。
     private func displayMenuTile(_ title: String, icon: String, tint: OmiStyle.TileTint,
                                  action: @escaping (CGDirectDisplayID) -> Void) -> some View {
-        Menu {
-            ForEach(displayOptions) { option in
-                Button(option.isMain ? "\(option.name)（主）" : option.name) {
-                    action(option.displayID)
-                }
-            }
-        } label: {
-            OmiTileLabel(title: title, icon: icon, tint: tint, isEnabled: isIdle)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .disabled(!isIdle)
+        DisplayMenuTile(
+            title: title, icon: icon, tint: tint, isIdle: isIdle,
+            options: displayOptions.map { ($0.name, $0.isMain, $0.displayID) },
+            onSelect: action)
     }
 
     // MARK: 功能列表卡（定时 / 画中画 / 文件列表 / 偏好设置 / 关于 / 退出）
@@ -408,6 +398,62 @@ struct MenuBarView: View {
     /// 与 `RegionSelector` 同口径的 displayID 读取（deviceDescription NSScreenNumber）。
     private static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
+/// 显示器列表磁贴（多显示器选择入口）：点击经 `NSMenu.popUp` 就地弹出列表——系统
+/// 弹层恒在面板之上（2026-11-14 用户目验裁定「弹出框必须在主界面之上」；SwiftUI
+/// `Menu` 在 MenuBarExtra `.window` 内的弹层会被面板压住，弃用）。条目分发复用
+/// 列表窗的 `RetainingMenu`/`MenuActionProxy`（target 弱引用 → 菜单子类强持有同寿命）。
+/// 磁贴视觉与 `OmiTileButton` 共用 `OmiTileLabel`。
+private struct DisplayMenuTile: View {
+    let title: String
+    let icon: String
+    let tint: OmiStyle.TileTint
+    let isIdle: Bool
+    /// 显示器列表（名称 / 主屏标记 / displayID）。
+    let options: [(name: String, isMain: Bool, displayID: CGDirectDisplayID)]
+    let onSelect: (CGDirectDisplayID) -> Void
+
+    /// 磁贴在窗口系（SwiftUI .global，左上原点）的 frame——弹出锚点用。
+    @State private var tileFrame: CGRect = .zero
+
+    var body: some View {
+        Button {
+            presentDisplayMenu()
+        } label: {
+            OmiTileLabel(title: title, icon: icon, tint: tint, isEnabled: isIdle)
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear { tileFrame = geo.frame(in: .global) }
+                            .onChange(of: geo.frame(in: .global)) { tileFrame = $0 }
+                    })
+        }
+        .buttonStyle(.plain)
+        .disabled(!isIdle)
+    }
+
+    private func presentDisplayMenu() {
+        guard let panel = NSApp.windows.first(where: {
+            $0.identifier?.rawValue == "SRMenuBarPanel"
+        }), let content = panel.contentView else { return }
+        let menu = RetainingMenu()
+        menu.autoenablesItems = false
+        var proxies: [MenuActionProxy] = []
+        for option in options {
+            let displayID = option.displayID
+            let proxy = MenuActionProxy { onSelect(displayID) }
+            let item = NSMenuItem(
+                title: option.isMain ? "\(option.name)（主）" : option.name,
+                action: #selector(MenuActionProxy.picked), keyEquivalent: "")
+            item.target = proxy
+            menu.addItem(item)
+            proxies.append(proxy)
+        }
+        menu.retainedProxies = proxies
+        // 磁贴左下角（flipped 系里 y 取 maxY）——弹层自磁贴下缘向下展开。
+        menu.popUp(positioning: nil, at: CGPoint(x: tileFrame.minX, y: tileFrame.maxY), in: content)
     }
 }
 
