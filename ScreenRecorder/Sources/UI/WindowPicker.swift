@@ -385,93 +385,23 @@ struct WindowPickerView: View {
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(apps, id: \.bundleID) { app in
-                    appRow(app)
-                }
+                WindowPickerTable(
+                    rows: apps.map(PickerRow.app),
+                    onActivate: { row in
+                        if case .app(let app) = row { onAppSelect(app.bundleID) }
+                    })
             }
         } else if candidates.isEmpty {
             Text("没有可录制的窗口")
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            List(candidates) { candidate in
-                row(candidate)
-            }
+            WindowPickerTable(
+                rows: candidates.map(PickerRow.window),
+                onActivate: { row in
+                    if case .window(let candidate) = row { onSelect(candidate.id) }
+                })
         }
-    }
-
-    /// 行布局（简报「两列」）：左列 App 名 + 窗口名，右列缩略图（72×48 展示框，
-    /// 128pt 生成余量供 Retina 2x 用）；双击整行选择。
-    private func row(_ candidate: WindowCandidate) -> some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(candidate.appName.isEmpty ? "未知应用" : candidate.appName)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text(candidate.title.isEmpty ? "（无标题）" : candidate.title)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            Spacer(minLength: 8)
-            thumbnailView(candidate.thumbnail)
-        }
-        .padding(.vertical, 2)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            onSelect(candidate.id)
-        }
-    }
-
-    @ViewBuilder
-    private func thumbnailView(_ image: NSImage?) -> some View {
-        if let image {
-            Image(nsImage: image)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 72, height: 48)
-                .clipShape(RoundedRectangle(cornerRadius: 4))
-                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(.separator, lineWidth: 1))
-        } else {
-            Image(systemName: "macwindow")
-                .foregroundStyle(.secondary)
-                .frame(width: 72, height: 48)
-        }
-    }
-
-    /// App 行（P3a 简报「App 行=图标+名称+窗口数」）：图标经 NSWorkspace 按 bundle id
-    /// 现场取（urlForApplication 失败回退通用占位符号）；双击整行选择。
-    private func appRow(_ app: AppCandidate) -> some View {
-        HStack(spacing: 12) {
-            appIcon(app.bundleID)
-                .resizable()
-                .scaledToFit()
-                .frame(width: 32, height: 32)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(app.appName.isEmpty ? "未知应用" : app.appName)
-                    .font(.headline)
-                    .lineLimit(1)
-                Text("\(app.windowCount) 个窗口")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-        }
-        .padding(.vertical, 2)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            onAppSelect(app.bundleID)
-        }
-        .accessibilityLabel("\(app.appName)，\(app.windowCount) 个窗口")
-    }
-
-    /// bundle id → App 图标（沙盒/系统应用同样适用；取不到应用 URL 时回退虚线占位符号）。
-    private func appIcon(_ bundleID: String) -> Image {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
-            return Image(nsImage: NSWorkspace.shared.icon(forFile: url.path))
-        }
-        return Image(systemName: "app.dashed")
     }
 
     private func load() async {
@@ -490,5 +420,222 @@ struct WindowPickerView: View {
             failureText = error.localizedDescription
         }
         isLoading = false
+    }
+}
+
+// MARK: - 原生行表格（交互层修复，2026-11-14）
+//
+// 原行视图用 `.onTapGesture(count: 2)` 双击选择——本库手建 NSWindow + NSHostingView
+// 窗口内 SwiftUI 手势层整层不响应（列表窗同根因实证实修，见 RecordingListView 头注），
+// 用户真机「选择窗口和选择 App 没法选择」。故行列表改用原生 NSTableView：单击选中、
+// 双击（doubleAction）触发选择回调，全走 AppKit 事件通道。
+
+/// 选择器行数据（窗口行 / App 行共用一张表，按 scope 二选一装配）。
+enum PickerRow {
+    case window(WindowCandidate)
+    case app(AppCandidate)
+}
+
+/// 选择器行表格（原生 NSTableView 桥接）：行内容与旧 SwiftUI 行逐项对齐——
+/// 窗口行 = App 名/窗口名 + 右侧 72×48 缩略图；App 行 = 32pt 图标 + 名称/窗口数。
+struct WindowPickerTable: NSViewRepresentable {
+    let rows: [PickerRow]
+    /// 双击行回调（等价旧 `onTapGesture(count: 2)`）。
+    let onActivate: (PickerRow) -> Void
+
+    /// 行高：窗口行带缩略图 56，App 行 44（按行内容定，见 `rowOffsets`）。
+    private static let windowRowHeight: CGFloat = 56
+    private static let appRowHeight: CGFloat = 44
+
+    private var isAppScope: Bool {
+        if case .app = rows.first { return true }
+        return false
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(rows: rows, onActivate: onActivate)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+
+        let table = NSTableView()
+        table.dataSource = context.coordinator
+        table.delegate = context.coordinator
+        table.headerView = nil
+        table.style = .plain
+        table.backgroundColor = .clear
+        table.allowsEmptySelection = true
+        table.allowsMultipleSelection = false
+        table.rowHeight = isAppScope ? Self.appRowHeight : Self.windowRowHeight
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("picker"))
+        column.width = 600
+        table.addTableColumn(column)
+        table.target = context.coordinator
+        table.doubleAction = #selector(Coordinator.doubleClick(_:))
+        context.coordinator.table = table
+        scrollView.documentView = table
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.rows = rows
+        coordinator.onActivate = onActivate
+        coordinator.table?.rowHeight = isAppScope ? Self.appRowHeight : Self.windowRowHeight
+        coordinator.table?.reloadData()
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+        var rows: [PickerRow]
+        var onActivate: (PickerRow) -> Void
+        weak var table: NSTableView?
+
+        init(rows: [PickerRow], onActivate: @escaping (PickerRow) -> Void) {
+            self.rows = rows
+            self.onActivate = onActivate
+        }
+
+        func numberOfRows(in tableView: NSTableView) -> Int {
+            rows.count
+        }
+
+        func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+            guard rows.indices.contains(row) else { return nil }
+            switch rows[row] {
+            case .window(let candidate):
+                let cell = tableView.makeView(
+                    withIdentifier: NSUserInterfaceItemIdentifier("window-row"), owner: nil)
+                    as? WindowPickerWindowCell ?? WindowPickerWindowCell()
+                cell.identifier = NSUserInterfaceItemIdentifier("window-row")
+                cell.titleLabel.stringValue = candidate.appName.isEmpty ? "未知应用" : candidate.appName
+                cell.subtitleLabel.stringValue = candidate.title.isEmpty ? "（无标题）" : candidate.title
+                cell.applyThumbnail(candidate.thumbnail)
+                return cell
+            case .app(let app):
+                let cell = tableView.makeView(
+                    withIdentifier: NSUserInterfaceItemIdentifier("app-row"), owner: nil)
+                    as? WindowPickerAppCell ?? WindowPickerAppCell()
+                cell.identifier = NSUserInterfaceItemIdentifier("app-row")
+                cell.titleLabel.stringValue = app.appName.isEmpty ? "未知应用" : app.appName
+                cell.subtitleLabel.stringValue = "\(app.windowCount) 个窗口"
+                cell.applyIcon(forBundleID: app.bundleID)
+                return cell
+            }
+        }
+
+        @objc func doubleClick(_ sender: NSTableView) {
+            let row = sender.clickedRow
+            guard rows.indices.contains(row) else { return }
+            onActivate(rows[row])
+        }
+    }
+}
+
+/// 窗口行单元格：App 名（headline）/ 窗口名（次级）+ 右侧 72×48 缩略图（无图回退符号占位）。
+@MainActor
+final class WindowPickerWindowCell: NSTableCellView {
+    let titleLabel = NSTextField(labelWithString: "")
+    let subtitleLabel = NSTextField(labelWithString: "")
+    private let thumbnailView = NSImageView()
+
+    init() {
+        super.init(frame: .zero)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.textColor = .secondaryLabelColor
+        for label in [titleLabel, subtitleLabel] {
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+        }
+        thumbnailView.imageScaling = .scaleProportionallyUpOrDown
+        thumbnailView.wantsLayer = true
+        thumbnailView.layer?.cornerRadius = 4
+        thumbnailView.layer?.masksToBounds = true
+        thumbnailView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(thumbnailView)
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            titleLabel.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -1),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: thumbnailView.leadingAnchor, constant: -12),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+            subtitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: thumbnailView.leadingAnchor, constant: -12),
+            thumbnailView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            thumbnailView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            thumbnailView.widthAnchor.constraint(equalToConstant: 72),
+            thumbnailView.heightAnchor.constraint(equalToConstant: 48)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) 不支持（代码构建视图）")
+    }
+
+    func applyThumbnail(_ image: NSImage?) {
+        if let image {
+            thumbnailView.image = image
+        } else {
+            thumbnailView.image = NSImage(
+                systemSymbolName: "macwindow", accessibilityDescription: nil)
+            thumbnailView.contentTintColor = .secondaryLabelColor
+        }
+    }
+}
+
+/// App 行单元格：32pt 图标 + 名称/窗口数（图标经 NSWorkspace 现场取，失败回退占位符号）。
+@MainActor
+final class WindowPickerAppCell: NSTableCellView {
+    let titleLabel = NSTextField(labelWithString: "")
+    let subtitleLabel = NSTextField(labelWithString: "")
+    private let iconView = NSImageView()
+    /// 图标缓存（同一 App 行复用时避免重复查 NSWorkspace）。
+    private var iconBundleID: String?
+
+    init() {
+        super.init(frame: .zero)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        subtitleLabel.font = .systemFont(ofSize: 11)
+        subtitleLabel.textColor = .secondaryLabelColor
+        for label in [titleLabel, subtitleLabel] {
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+        }
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(iconView)
+        NSLayoutConstraint.activate([
+            iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            iconView.widthAnchor.constraint(equalToConstant: 32),
+            iconView.heightAnchor.constraint(equalToConstant: 32),
+            titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
+            titleLabel.bottomAnchor.constraint(equalTo: centerYAnchor, constant: -1),
+            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+            subtitleLabel.topAnchor.constraint(equalTo: centerYAnchor, constant: 1)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) 不支持（代码构建视图）")
+    }
+
+    func applyIcon(forBundleID bundleID: String) {
+        guard iconBundleID != bundleID else { return }
+        iconBundleID = bundleID
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            iconView.image = NSWorkspace.shared.icon(forFile: url.path)
+        } else {
+            iconView.image = NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil)
+        }
     }
 }

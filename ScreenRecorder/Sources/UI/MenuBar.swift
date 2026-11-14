@@ -87,9 +87,7 @@ struct MenuBarView: View {
     /// `PanelWindowMarker` 打上 `SRMenuBarPanel` identifier（不依赖宿主泛型名），
     /// 面板未开时为无操作。先投 Escape（优先原生取消路径），orderOut 兜底。
     private func dismissPanelWindow() {
-        guard let panel = NSApp.windows.first(where: {
-            $0.identifier?.rawValue == "SRMenuBarPanel"
-        }) else { return }
+        guard let panel = Self.menuBarPanelWindow() else { return }
         if let escape = NSEvent.keyEvent(
             with: .keyDown, location: .zero, modifierFlags: [],
             timestamp: ProcessInfo.processInfo.systemUptime,
@@ -99,6 +97,24 @@ struct MenuBarView: View {
             NSApp.postEvent(escape, atStart: false)
         }
         panel.orderOut(nil)
+    }
+
+    /// 面板窗口定位（双通道）：identifier 命中优先（PanelWindowMarker 打的标）；
+    /// 未命中时回退「内容宿主含 MenuBarView」——MenuBarExtra 重建窗口/标记时序异常时
+    /// 仍能收面板（2026-11-14 用户复验「弹窗又压到面板下」的稳健化）。
+    static func menuBarPanelWindow() -> NSWindow? {
+        if let byID = NSApp.windows.first(where: {
+            $0.identifier?.rawValue == "SRMenuBarPanel"
+        }) {
+            return byID
+        }
+        func hostsMenuBarView(_ view: NSView) -> Bool {
+            if String(describing: type(of: view)).contains("MenuBarView") { return true }
+            return view.subviews.contains { hostsMenuBarView($0) }
+        }
+        return NSApp.windows.first { window in
+            window.contentView.map { hostsMenuBarView($0) } ?? false
+        }
     }
 
     // MARK: 状态头卡（裁定 2：面板反映状态机）
@@ -446,9 +462,8 @@ private struct DisplayMenuTile: View {
     }
 
     private func presentDisplayMenu() {
-        guard let panel = NSApp.windows.first(where: {
-            $0.identifier?.rawValue == "SRMenuBarPanel"
-        }), let content = panel.contentView else { return }
+        guard let panel = MenuBarView.menuBarPanelWindow(),
+              let content = panel.contentView else { return }
         let menu = RetainingMenu()
         menu.autoenablesItems = false
         var proxies: [MenuActionProxy] = []
