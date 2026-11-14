@@ -80,7 +80,7 @@ struct PermissionOnboardingView: View {
         .onDisappear { requestTask?.cancel() }
     }
 
-    private func row(icon: String, title: String, isGranted: Bool, kind: PermissionKind) -> some View {
+    private func row(icon: String, title: LocalizedStringKey, isGranted: Bool, kind: PermissionKind) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .frame(width: 20)

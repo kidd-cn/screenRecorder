@@ -312,7 +312,11 @@ struct WindowPickerView: View {
         case apps
 
         var id: String { rawValue }
-        var title: String { self == .windows ? "窗口" : "App" }
+        var title: String {
+            self == .windows
+                ? NSLocalizedString("窗口", comment: "Picker scope window")
+                : NSLocalizedString("App", comment: "Picker scope app")
+        }
     }
 
     var onSelect: (CGWindowID) -> Void
@@ -361,7 +365,9 @@ struct WindowPickerView: View {
     private var content: some View {
         if isLoading {
             ProgressView {
-                Text(scope == .apps ? "正在枚举 App…" : "正在枚举窗口…")
+                Text(scope == .apps
+                     ? NSLocalizedString("正在枚举 App…", comment: "Enumerating apps")
+                     : NSLocalizedString("正在枚举窗口…", comment: "Enumerating windows"))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if let failureText {

@@ -72,3 +72,6 @@ schemes:
     test:
       targets:
         - HummingbirdTests
+      # 测试宿主语言固定简体中文（2026-11-14 本地化引入）：断言按源语言文案编写，
+      # 不随开发机系统语言漂移（-testLanguage 同效，此处内置到 scheme）。
+      language: zh-Hans

@@ -150,20 +150,33 @@ struct MenuBarView: View {
     }
 
     /// 头卡磁贴逐态映射（MenuBarStatusIcon 同一状态机，面板内的放大表达）。
+    /// 注意：本属性返回 String（非字面量渲染路径）——`Text(String)` 是 verbatim、
+    /// 不查本地化表，故逐串 NSLocalizedString 包装（2026-11-14 用户目验「待命未翻译」）。
     private var headerTile: (icon: String, tint: OmiStyle.TileTint, title: String, subtitle: String?) {
         switch controller.state {
         case .idle:
             return scheduler.active != nil
-                ? ("timer", .orange, "定时待录", "排程已就绪，到点自动开始")
-                : ("record.circle", .red, "待命", "选择下方模式开始录制")
+                ? ("timer", .orange,
+                   NSLocalizedString("定时待录", comment: "Panel header title"),
+                   NSLocalizedString("排程已就绪，到点自动开始", comment: "Panel header subtitle"))
+                : ("record.circle", .red,
+                   NSLocalizedString("待命", comment: "Panel header title"),
+                   NSLocalizedString("选择下方模式开始录制", comment: "Panel header subtitle"))
         case .countdown(let secondsLeft):
-            return ("timer", .orange, "倒计时中…（\(secondsLeft)s）", "即将开始录制")
+            return ("timer", .orange,
+                    String(format: NSLocalizedString("倒计时中…（%llds）", comment: "Panel countdown"), secondsLeft),
+                    NSLocalizedString("即将开始录制", comment: "Panel header subtitle"))
         case .recording:
-            return ("dot.radiowaves.left.and.right", .red, "录制中", nil)
+            return ("dot.radiowaves.left.and.right", .red,
+                    NSLocalizedString("录制中", comment: "Panel header title"), nil)
         case .paused:
-            return ("pause.circle", .orange, "已暂停", "时长不含暂停段")
+            return ("pause.circle", .orange,
+                    NSLocalizedString("已暂停", comment: "Panel header title"),
+                    NSLocalizedString("时长不含暂停段", comment: "Panel header subtitle"))
         case .finishing:
-            return ("hourglass", .gray, "收尾中…", "正在落盘成片")
+            return ("hourglass", .gray,
+                    NSLocalizedString("收尾中…", comment: "Panel header title"),
+                    NSLocalizedString("正在落盘成片", comment: "Panel header subtitle"))
         }
     }
 
@@ -474,7 +487,9 @@ private struct DisplayMenuTile: View {
             let displayID = option.displayID
             let proxy = MenuActionProxy { onSelect(displayID) }
             let item = NSMenuItem(
-                title: option.isMain ? "\(option.name)（主）" : option.name,
+                title: option.isMain
+                ? String(format: NSLocalizedString("%@（主）", comment: "Main display suffix"), option.name)
+                : option.name,
                 action: #selector(MenuActionProxy.picked), keyEquivalent: "")
             item.target = proxy
             menu.addItem(item)

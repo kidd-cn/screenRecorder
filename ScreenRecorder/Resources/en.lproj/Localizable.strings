@@ -79,8 +79,8 @@
 "窗口区域" = "Window Area";
 "仅声音" = "Audio Only";
 "仅摄像头" = "Camera Only";
-"区域截图" = "Region Screenshot";
-"全屏截图" = "Full-Screen Screenshot";
+"区域截图" = "Region Shot";
+"全屏截图" = "Full Shot";
 "App" = "App";
 "窗口区域录制：选择一个窗口后，在其内部拖框选定录制范围" = "Window-area recording: choose a window, then drag a region inside it";
 "仅声音录制：只录系统声音与麦克风，输出 m4a 音频文件" = "Audio-only recording: system audio and microphone, saved as m4a";
@@ -189,8 +189,8 @@
 "窗口区域：" = "Window Area:";
 "仅声音：" = "Audio Only:";
 "仅摄像头：" = "Camera Only:";
-"区域截图：" = "Region Screenshot:";
-"全屏截图：" = "Full-Screen Screenshot:";
+"区域截图：" = "Region Shot:";
+"全屏截图：" = "Full Shot:";
 "全局生效，可点按右侧键位修改。" = "Works globally; click the shortcut to change it.";
 "授权设置" = "Permissions";
 "录制需要以下系统权限，请逐项允许。" = "Recording needs these permissions. Grant each one.";
