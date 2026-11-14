@@ -28,6 +28,9 @@ targets:
       path: ScreenRecorder/Info.plist
       properties:
         LSUIElement: true
+        # App 主图标（2026-11-14）：Omi 风格相机图标（绿渐变圆角底 + 白色 camera.fill），
+        # ScreenRecorder/Resources/AppIcon.icns 随 resources 段拷入 bundle。
+        CFBundleIconFile: AppIcon
         NSMicrophoneUsageDescription: 用于录制会议和教程
         NSCameraUsageDescription: 用于录制会议和教程
         NSScreenRecordingUsageDescription: 用于录制会议和教程
