@@ -41,7 +41,7 @@ enum OmiStyle {
 /// Omi 磁贴按钮（宫格用）：浅底色块圆角方形 + 符号 + 底部小字标题。控件激活通道
 /// （Button）——本库手建窗手势层红线不涉及。
 struct OmiTileButton: View {
-    let title: String
+    let title: LocalizedStringKey
     let icon: String
     let tint: OmiStyle.TileTint
     var isEnabled = true
@@ -59,7 +59,7 @@ struct OmiTileButton: View {
 /// 磁贴标签（宫格钮与 Menu 弹层磁贴**共用同一视觉**——主面板「全屏」「全屏截图」是
 /// 多显示器 Menu 弹层，标签必须与 OmiTileButton 逐字同构，样式不许分叉漂移）。
 struct OmiTileLabel: View {
-    let title: String
+    let title: LocalizedStringKey
     let icon: String
     let tint: OmiStyle.TileTint
     var isEnabled = true

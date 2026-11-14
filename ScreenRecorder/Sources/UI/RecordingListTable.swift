@@ -59,10 +59,10 @@ struct RecordingListTable: NSViewRepresentable {
     /// 列定义：名称（弹性）/ 大小 / 时长 / 创建时间——与原 SwiftUI Table 四列对齐。
     private static func makeColumns() -> [NSTableColumn] {
         let specs: [(id: String, title: String, width: CGFloat)] = [
-            ("name", "名称", 260),
-            ("size", "大小", 100),
-            ("duration", "时长", 80),
-            ("createdAt", "创建时间", 200)
+            ("name", NSLocalizedString("名称", comment: "Column name"), 260),
+            ("size", NSLocalizedString("大小", comment: "Column size"), 100),
+            ("duration", NSLocalizedString("时长", comment: "Column duration"), 80),
+            ("createdAt", NSLocalizedString("创建时间", comment: "Column created"), 200)
         ]
         return specs.map { spec in
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(spec.id))

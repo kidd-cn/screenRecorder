@@ -181,15 +181,15 @@ struct RecordingListView: View {
         let nsError = error as NSError
         let detail: String
         if let cocoaError = error as? CocoaError, cocoaError.code == .fileWriteFileExists {
-            detail = "同名文件已存在，请换一个名称。"
+            detail = NSLocalizedString("同名文件已存在，请换一个名称。", comment: "Rename conflict")
         } else {
             detail = nsError.localizedDescription
         }
         let alert = NSAlert()
-        alert.messageText = "重命名失败"
+        alert.messageText = NSLocalizedString("重命名失败", comment: "Rename failed title")
         alert.informativeText = detail
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: NSLocalizedString("好", comment: "OK"))
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
@@ -199,11 +199,13 @@ struct RecordingListView: View {
     private func confirmDelete(_ targets: [RecordingFileMetadata]) {
         guard let first = targets.first else { return }
         let alert = NSAlert()
-        alert.messageText = targets.count == 1 ? "删除「\(first.name)」？" : "删除 \(targets.count) 条录像？"
-        alert.informativeText = "录像文件将从磁盘删除，且不可撤销。"
+        alert.messageText = targets.count == 1
+            ? String(format: NSLocalizedString("删除「%@」？", comment: "Delete single confirm"), first.name)
+            : String(format: NSLocalizedString("删除 %lld 条录像？", comment: "Delete multiple confirm"), targets.count)
+        alert.informativeText = NSLocalizedString("录像文件将从磁盘删除，且不可撤销。", comment: "Delete detail")
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "删除")
-        alert.addButton(withTitle: "取消")
+        alert.addButton(withTitle: NSLocalizedString("删除", comment: "Delete"))
+        alert.addButton(withTitle: NSLocalizedString("取消", comment: "Cancel"))
         NSApp.activate(ignoringOtherApps: true)
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         for item in targets {

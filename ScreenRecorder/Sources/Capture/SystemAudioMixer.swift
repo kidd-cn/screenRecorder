@@ -46,9 +46,9 @@ final class SystemAudioMixer {
         var errorDescription: String? {
             switch self {
             case .cannotCreateConverter(let from, let to):
-                return "AVAudioConverter 创建失败（\(from) → \(to)）"
+                return String(format: NSLocalizedString("AVAudioConverter 创建失败（%@ → %@）", comment: "msg"), from, to)
             case .cannotCreateMasterFormatDescription(let status):
-                return "masterFormat 的 CMFormatDescription 创建失败（status=\(status)）"
+                return String(format: NSLocalizedString("masterFormat 的 CMFormatDescription 创建失败（status=%lld）", comment: "msg"), status)
             case .clickEffectWavUnusable(let url, let frames):
                 return "点击音效 wav 不可用（\(url.path)，帧数 \(frames)）：须为非空且 ≤\(SystemAudioMixer.clickEffectMaxFrames) 帧的短促样本"
             }

@@ -78,23 +78,23 @@ enum OfflineZoomRenderer {
         var errorDescription: String? {
             switch self {
             case .cannotAddVideoInput:
-                return "缩放导出失败：编码器视频输入装配被拒绝"
+                return NSLocalizedString("缩放导出失败：编码器视频输入装配被拒绝", comment: "msg")
             case .cannotAddAudioInput:
-                return "缩放导出失败：音频输入装配被拒绝"
+                return NSLocalizedString("缩放导出失败：音频输入装配被拒绝", comment: "msg")
             case .readerFailed(let status, let underlying):
-                return "缩放导出失败：读取源失败（status=\(status.rawValue)）：\(underlying.map(String.init(describing:)) ?? "无底层错误")"
+                return String(format: NSLocalizedString("缩放导出失败：读取源失败（status=%lld）：%@", comment: "msg"), status.rawValue, underlying.map(String.init(describing:)) ?? NSLocalizedString("无底层错误", comment: "msg"))
             case .writerFailed(let status, let underlying):
-                return "缩放导出失败：写入成片失败（status=\(status.rawValue)）：\(underlying.map(String.init(describing:)) ?? "无底层错误")"
+                return String(format: NSLocalizedString("缩放导出失败：写入成片失败（status=%lld）：%@", comment: "msg"), status.rawValue, underlying.map(String.init(describing:)) ?? NSLocalizedString("无底层错误", comment: "msg"))
             case .appendFailedVideo(let underlying):
-                return "缩放导出失败：视频帧写入失败：\(underlying.map(String.init(describing:)) ?? "未知原因")"
+                return String(format: NSLocalizedString("缩放导出失败：视频帧写入失败：%@", comment: "msg"), underlying.map(String.init(describing:)) ?? NSLocalizedString("未知原因", comment: "msg"))
             case .appendFailedAudio(let underlying):
-                return "缩放导出失败：音频样本写入失败：\(underlying.map(String.init(describing:)) ?? "未知原因")"
+                return String(format: NSLocalizedString("缩放导出失败：音频样本写入失败：%@", comment: "msg"), underlying.map(String.init(describing:)) ?? NSLocalizedString("未知原因", comment: "msg"))
             case .cannotCreateOutputBuffer:
-                return "缩放导出失败：无法创建输出像素缓冲"
+                return NSLocalizedString("缩放导出失败：无法创建输出像素缓冲", comment: "msg")
             case .appendInputStalled(let mediaType):
-                return "缩放导出失败：\(mediaType)编码器长时间未就绪，导出已中止"
+                return String(format: NSLocalizedString("缩放导出失败：%@编码器长时间未就绪，导出已中止", comment: "msg"), mediaType)
             case .noRenderableSamples:
-                return "缩放导出失败：源不含可解码的媒体样本"
+                return NSLocalizedString("缩放导出失败：源不含可解码的媒体样本", comment: "msg")
             }
         }
     }
@@ -123,7 +123,7 @@ enum OfflineZoomRenderer {
     /// （复用 `ExportCore.conflictFreeURL`——冲突惯例单一事实源；不创建文件）。
     static func zoomedDestinationURL(for sourceURL: URL) -> URL {
         let target = sourceURL.deletingLastPathComponent().appendingPathComponent(
-            "\(sourceURL.deletingPathExtension().lastPathComponent)_缩放.mp4")
+            "\(sourceURL.deletingPathExtension().lastPathComponent)\(NSLocalizedString("_缩放", comment: "Zoom export suffix")).mp4")
         return ExportCore.conflictFreeURL(for: target)
     }
 

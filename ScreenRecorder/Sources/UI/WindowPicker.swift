@@ -53,9 +53,9 @@ enum WindowPickerError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .screenRecordingPermissionDenied:
-            return "无法枚举窗口：屏幕录制权限未授予或已失效（重新编译后签名变化会使授权失效，需在系统设置重新勾选并重启应用）"
+            return NSLocalizedString("无法枚举窗口：屏幕录制权限未授予或已失效（重新编译后签名变化会使授权失效，需在系统设置重新勾选并重启应用）", comment: "Picker permission error")
         case .contentUnavailable(let underlying):
-            return "无法枚举窗口：\(underlying)"
+            return String(format: NSLocalizedString("无法枚举窗口：%@", comment: "Picker enumeration error"), underlying)
         }
     }
 }
@@ -513,8 +513,8 @@ struct WindowPickerTable: NSViewRepresentable {
                     withIdentifier: NSUserInterfaceItemIdentifier("window-row"), owner: nil)
                     as? WindowPickerWindowCell ?? WindowPickerWindowCell()
                 cell.identifier = NSUserInterfaceItemIdentifier("window-row")
-                cell.titleLabel.stringValue = candidate.appName.isEmpty ? "未知应用" : candidate.appName
-                cell.subtitleLabel.stringValue = candidate.title.isEmpty ? "（无标题）" : candidate.title
+                cell.titleLabel.stringValue = candidate.appName.isEmpty ? NSLocalizedString("未知应用", comment: "Unknown app") : candidate.appName
+                cell.subtitleLabel.stringValue = candidate.title.isEmpty ? NSLocalizedString("（无标题）", comment: "Untitled window") : candidate.title
                 cell.applyThumbnail(candidate.thumbnail)
                 return cell
             case .app(let app):
@@ -522,8 +522,8 @@ struct WindowPickerTable: NSViewRepresentable {
                     withIdentifier: NSUserInterfaceItemIdentifier("app-row"), owner: nil)
                     as? WindowPickerAppCell ?? WindowPickerAppCell()
                 cell.identifier = NSUserInterfaceItemIdentifier("app-row")
-                cell.titleLabel.stringValue = app.appName.isEmpty ? "未知应用" : app.appName
-                cell.subtitleLabel.stringValue = "\(app.windowCount) 个窗口"
+                cell.titleLabel.stringValue = app.appName.isEmpty ? NSLocalizedString("未知应用", comment: "Unknown app") : app.appName
+                cell.subtitleLabel.stringValue = String(format: NSLocalizedString("%lld 个窗口", comment: "Window count"), app.windowCount)
                 cell.applyIcon(forBundleID: app.bundleID)
                 return cell
             }

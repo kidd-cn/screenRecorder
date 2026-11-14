@@ -32,15 +32,15 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
         var errorDescription: String? {
             switch self {
             case .cameraPermissionNotDetermined:
-                return "摄像头尚未授权：已代为发起系统授权请求，本次录制为纯屏幕；重新开始录制即可带上摄像头画面"
+                return NSLocalizedString("摄像头尚未授权：已代为发起系统授权请求，本次录制为纯屏幕；重新开始录制即可带上摄像头画面", comment: "msg")
             case .cameraPermissionDenied:
-                return "摄像头权限被拒绝：请在系统设置 > 隐私与安全性 > 摄像头中允许本应用，本次录制为纯屏幕"
+                return NSLocalizedString("摄像头权限被拒绝：请在系统设置 > 隐私与安全性 > 摄像头中允许本应用，本次录制为纯屏幕", comment: "msg")
             case .cameraNotFound:
-                return "未找到可用的前置摄像头，本次录制为纯屏幕"
+                return NSLocalizedString("未找到可用的前置摄像头，本次录制为纯屏幕", comment: "msg")
             case .sessionConfigurationFailed(let reason):
-                return "摄像头会话装配失败：\(reason)，本次录制为纯屏幕"
+                return String(format: NSLocalizedString("摄像头会话装配失败：%@，本次录制为纯屏幕", comment: "msg"), reason)
             case .sessionDidNotStart:
-                return "摄像头会话启动失败（设备被其他应用占用或已断开），本次录制为纯屏幕"
+                return NSLocalizedString("摄像头会话启动失败（设备被其他应用占用或已断开），本次录制为纯屏幕", comment: "msg")
             }
         }
     }
@@ -209,10 +209,10 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
                     do {
                         input = try AVCaptureDeviceInput(device: device)
                     } catch {
-                        throw CameraPiPError.sessionConfigurationFailed("无法连接摄像头设备：\(error)")
+                        throw CameraPiPError.sessionConfigurationFailed(String(format: NSLocalizedString("无法连接摄像头设备：%@", comment: "msg"), String(describing: error)))
                     }
                     guard session.canAddInput(input) else {
-                        throw CameraPiPError.sessionConfigurationFailed("会话拒绝摄像头输入")
+                        throw CameraPiPError.sessionConfigurationFailed(NSLocalizedString("会话拒绝摄像头输入", comment: "msg"))
                     }
                     session.addInput(input)
                 }
@@ -224,7 +224,7 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
                     output.alwaysDiscardsLateVideoFrames = true // 实时语义：宁丢帧不积压（合成侧零背压）
                     output.setSampleBufferDelegate(self, queue: videoQueue)
                     guard session.canAddOutput(output) else {
-                        throw CameraPiPError.sessionConfigurationFailed("会话拒绝帧输出")
+                        throw CameraPiPError.sessionConfigurationFailed(NSLocalizedString("会话拒绝帧输出", comment: "msg"))
                     }
                     session.addOutput(output)
                 }

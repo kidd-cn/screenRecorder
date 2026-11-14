@@ -19,14 +19,14 @@ enum RecordingListMenuSpec {
     /// 单条目标题（与 brief 逐字一致）。
     static func title(for action: Action) -> String {
         switch action {
-        case .play: return "播放"
-        case .reveal: return "在 Finder 中显示"
-        case .rename: return "重命名…"
-        case .edit: return "编辑…"
-        case .exportGIF: return "导出 GIF…"
-        case .compress: return "压缩…"
-        case .removeFromList: return "移出列表"
-        case .delete: return "删除…"
+        case .play: return NSLocalizedString("播放", comment: "List menu play")
+        case .reveal: return NSLocalizedString("在 Finder 中显示", comment: "List menu reveal")
+        case .rename: return NSLocalizedString("重命名…", comment: "List menu rename")
+        case .edit: return NSLocalizedString("编辑…", comment: "List menu edit")
+        case .exportGIF: return NSLocalizedString("导出 GIF…", comment: "List menu GIF")
+        case .compress: return NSLocalizedString("压缩…", comment: "List menu compress")
+        case .removeFromList: return NSLocalizedString("移出列表", comment: "List menu remove")
+        case .delete: return NSLocalizedString("删除…", comment: "List menu delete")
         }
     }
 

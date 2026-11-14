@@ -441,7 +441,7 @@ final class AppAssembly: ObservableObject {
             return
         }
         try? fileStore.ensureDirectory()
-        let url = fileStore.nextFileURL(extension: "png", prefix: "截图")
+        let url = fileStore.nextFileURL(extension: "png", prefix: NSLocalizedString("截图", comment: "Screenshot file prefix"))
         do {
             try png.write(to: url)
         } catch {
@@ -675,7 +675,7 @@ final class AppAssembly: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "定时录制"
+            window.title = NSLocalizedString("定时录制", comment: "Scheduled panel title")
             window.isReleasedWhenClosed = false
             window.center()
             scheduledPanelWindowController = NSWindowController(window: window)
@@ -744,7 +744,7 @@ final class AppAssembly: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "偏好设置"
+            window.title = NSLocalizedString("偏好设置", comment: "Preferences window title")
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: PreferencesView(
                 settings: settings,
@@ -822,7 +822,7 @@ final class AppAssembly: ObservableObject {
                 backing: .buffered,
                 defer: false
             )
-            window.title = "文件列表"
+            window.title = NSLocalizedString("文件列表", comment: "Recording list window title")
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: RecordingListView(viewModel: viewModel))
             window.center()
@@ -1044,7 +1044,7 @@ final class AppAssembly: ObservableObject {
         pendingWindowPickerStartsRecording = startsRecordingOnSelection
         presentPicker(
             scope: .windows,
-            bannerText: showsStaleNotice ? "上次选择的窗口不可用，请重新选择" : nil)
+            bannerText: showsStaleNotice ? NSLocalizedString("上次选择的窗口不可用，请重新选择", comment: "Stale window banner") : nil)
     }
 
     /// 菜单「开始录制 → App…」入口（P3a）：App 范围的选择器，选定 bundleID 即开始录制
@@ -1082,7 +1082,9 @@ final class AppAssembly: ObservableObject {
             window.center()
             windowPickerWindowController = NSWindowController(window: window)
         }
-        windowPickerWindowController?.window?.title = scope == .apps ? "选择 App" : "选择窗口"
+        windowPickerWindowController?.window?.title = scope == .apps
+            ? NSLocalizedString("选择 App", comment: "App picker title")
+            : NSLocalizedString("选择窗口", comment: "Window picker title")
         windowPickerWindowController?.window?.contentView = NSHostingView(rootView: WindowPickerHostView(
             scope: scope,
             bannerText: bannerText,
@@ -1399,11 +1401,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func presentQuitConfirmation(controller: CaptureController) {
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "正在录制中，确定退出吗？"
-        alert.informativeText = "「退出并保存录制」将停止录制并保留成片；「退出并丢弃」将停止录制并删除未保存的内容。"
-        alert.addButton(withTitle: "退出并保存录制")
-        alert.addButton(withTitle: "退出并丢弃")
-        alert.addButton(withTitle: "取消")
+        alert.messageText = NSLocalizedString("正在录制中，确定退出吗？", comment: "Quit confirm title")
+        alert.informativeText = NSLocalizedString("「退出并保存录制」将停止录制并保留成片；「退出并丢弃」将停止录制并删除未保存的内容。", comment: "Quit confirm detail")
+        alert.addButton(withTitle: NSLocalizedString("退出并保存录制", comment: "Quit save"))
+        alert.addButton(withTitle: NSLocalizedString("退出并丢弃", comment: "Quit discard"))
+        alert.addButton(withTitle: NSLocalizedString("取消", comment: "Cancel"))
         let response = alert.runModal()
         Task { @MainActor in
             switch response {
@@ -1476,7 +1478,7 @@ struct HummingbirdApp: App {
         }
         // Omi 化面板（2026-11-14）：NSMenu 式菜单 → 卡片窗口面板（MenuBarView 头注）。
         .menuBarExtraStyle(.window)
-        Window("授权设置", id: "permission-onboarding") {
+        Window(NSLocalizedString("授权设置", comment: "Permission window title"), id: "permission-onboarding") {
             PermissionOnboardingWindowContent()
         }
     }

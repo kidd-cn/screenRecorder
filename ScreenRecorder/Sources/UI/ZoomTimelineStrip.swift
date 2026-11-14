@@ -259,7 +259,7 @@ enum ZoomEditorMenus {
             Task { @MainActor in model?.removeSegment(at: index) } // NSMenu 动作投递在主线程，显式 hop 与库惯例一致
         }
         let item = NSMenuItem(
-            title: "删除分段", action: #selector(MenuActionProxy.picked), keyEquivalent: "")
+            title: NSLocalizedString("删除分段", comment: "Segment menu delete"), action: #selector(MenuActionProxy.picked), keyEquivalent: "")
         item.target = proxy
         menu.addItem(item)
         menu.retainedProxies = [proxy]

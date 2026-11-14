@@ -95,9 +95,9 @@ enum CaptureSessionError: Equatable, LocalizedError {
         case .insufficientDiskSpace(let free, let required):
             let freeText = ByteCountFormatter.string(fromByteCount: free, countStyle: .file)
             let requiredText = ByteCountFormatter.string(fromByteCount: required, countStyle: .file)
-            return "磁盘剩余空间不足（剩 \(freeText)，低于安全阈值 \(requiredText)），无法开始录制"
+            return String(format: NSLocalizedString("磁盘剩余空间不足（剩 %@，低于安全阈值 %@），无法开始录制", comment: "msg"), freeText, requiredText)
         case .diskSpaceCritical:
-            return "磁盘剩余空间严重不足"
+            return NSLocalizedString("磁盘剩余空间严重不足", comment: "msg")
         }
     }
 }
@@ -793,7 +793,7 @@ final class CaptureController: ObservableObject {
         } else if !discard {
             // 修复轮 1 Minor #1：正常停止但未产出成片（零样本 nothingWritten 等）不再静默；
             // 丢弃路径无产出即本意，保持安静。
-            notifier?.notifyFailure(message: "录制已停止，但本次未能保存成片（可能未捕获到任何内容）。")
+            notifier?.notifyFailure(message: NSLocalizedString("录制已停止，但本次未能保存成片（可能未捕获到任何内容）。", comment: "msg"))
         }
     }
 
@@ -887,15 +887,15 @@ final class CaptureController: ObservableObject {
         let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         guard didStart else {
             if isPermissionRelated(error) {
-                return "未能开始录制：屏幕录制权限未就绪，请退出并重启本应用；若重启后仍失败，请在系统设置中重新授权屏幕录制。原因：\(reason)"
+                return String(format: NSLocalizedString("未能开始录制：屏幕录制权限未就绪，请退出并重启本应用；若重启后仍失败，请在系统设置中重新授权屏幕录制。原因：%@", comment: "msg"), reason)
             }
-            return "未能开始录制。原因：\(reason)"
+            return String(format: NSLocalizedString("未能开始录制。原因：%@", comment: "msg"), reason)
         }
-        let savedNote = savedFile != nil ? "已录制内容已自动保存。" : "本次未能保存成片。"
+        let savedNote = savedFile != nil ? NSLocalizedString("已录制内容已自动保存。", comment: "msg") : NSLocalizedString("本次未能保存成片。", comment: "msg")
         if isPermissionRelated(error) {
-            return "屏幕录制权限已失效：请退出并重启本应用；若重启后仍失败，请在系统设置中重新授权屏幕录制。\(savedNote)原因：\(reason)"
+            return String(format: NSLocalizedString("屏幕录制权限已失效：请退出并重启本应用；若重启后仍失败，请在系统设置中重新授权屏幕录制。%@原因：%@", comment: "msg"), savedNote, reason)
         }
-        return "录制中断。\(savedNote)原因：\(reason)"
+        return String(format: NSLocalizedString("录制中断。%@原因：%@", comment: "msg"), savedNote, reason)
     }
 
     /// 权限类失败判定：SCStream 权限族错误码，或运行时预检已无屏幕录制授权。

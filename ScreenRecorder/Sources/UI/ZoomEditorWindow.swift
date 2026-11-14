@@ -556,7 +556,7 @@ enum ZoomEditorWindowOpener {
             backing: .buffered,
             defer: false
         )
-        window.title = "编辑 — \(item.name)"
+        window.title = String(format: NSLocalizedString("编辑 — %@", comment: "Editor window title"), item.name)
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: ZoomEditorView(model: model, viewModel: viewModel))
         window.center()

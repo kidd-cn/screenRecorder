@@ -329,7 +329,7 @@ private struct RecordingSourcesTab: View {
             Text("当前目标")
             Spacer()
             if let target = settings.windowCaptureTarget {
-                let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? "（无标题）" : target.windowTitle)"
+                let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? NSLocalizedString("（无标题）", comment: "Untitled window") : target.windowTitle)"
                 Text(display)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

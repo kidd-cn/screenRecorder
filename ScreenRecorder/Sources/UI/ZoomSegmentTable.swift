@@ -109,7 +109,7 @@ struct ZoomSegmentTable: NSViewRepresentable {
                 Task { @MainActor in self?.model.removeSegment(at: row) } // NSMenu 动作投递在主线程，显式 hop 与库惯例一致
             }
             let item = NSMenuItem(
-                title: "删除分段", action: #selector(MenuActionProxy.picked), keyEquivalent: "")
+                title: NSLocalizedString("删除分段", comment: "Segment menu delete"), action: #selector(MenuActionProxy.picked), keyEquivalent: "")
             item.target = proxy
             menu.addItem(item)
             menu.retainedProxies = [proxy]
@@ -157,7 +157,7 @@ final class SegmentRowCell: NSTableCellView {
 
     /// 绑定当前行数据与行为（复用单元格每次取用时重新绑定——行号不跨刷新存活）。
     func configure(segment: ZoomSegment, row: Int, model: ZoomEditorModel) {
-        nameLabel.stringValue = "段 \(row + 1)"
+        nameLabel.stringValue = String(format: NSLocalizedString("段 %lld", comment: "Segment row"), row + 1)
         rangeLabel.stringValue = String(format: "%.2fs – %.2fs", segment.start, segment.end)
         levelPopup.selectItem(withTitle: String(format: "%.2fx", segment.level))
         onLevelChange = { [weak model] level in

@@ -249,7 +249,7 @@ struct MenuBarView: View {
     }
 
     /// 胶囊控制钮（磁贴同语言的横排形态；filled = 主红底白字，停止语义）。
-    private func controlPill(title: String, icon: String, tint: OmiStyle.TileTint,
+    private func controlPill(title: LocalizedStringKey, icon: String, tint: OmiStyle.TileTint,
                              filled: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             controlPillLabel(title, icon: icon, tint: tint,
@@ -258,7 +258,7 @@ struct MenuBarView: View {
         .buttonStyle(.plain)
     }
 
-    private func controlPillLabel(_ title: String, icon: String, tint: OmiStyle.TileTint,
+    private func controlPillLabel(_ title: LocalizedStringKey, icon: String, tint: OmiStyle.TileTint,
                                   filled: Bool = false) -> some View {
         HStack(spacing: 6) {
             Image(systemName: icon).font(.system(size: 12, weight: .semibold))
@@ -329,7 +329,7 @@ struct MenuBarView: View {
 
     /// 显示器列表磁贴（多显示器选择语义保留）。命名同旧菜单：本地化屏名 + points，
     /// 主屏追加「（主）」。标签与 OmiTileButton 共用 `OmiTileLabel`（逐字同构）。
-    private func displayMenuTile(_ title: String, icon: String, tint: OmiStyle.TileTint,
+    private func displayMenuTile(_ title: LocalizedStringKey, icon: String, tint: OmiStyle.TileTint,
                                  action: @escaping (CGDirectDisplayID) -> Void) -> some View {
         DisplayMenuTile(
             title: title, icon: icon, tint: tint, isIdle: isIdle,
@@ -389,7 +389,7 @@ struct MenuBarView: View {
     }
 
     /// 功能行（列表卡内的小行钮；OmiRowIcon 磁贴 + 文本）。
-    private func functionRow(icon: String, tint: OmiStyle.TileTint, title: String,
+    private func functionRow(icon: String, tint: OmiStyle.TileTint, title: LocalizedStringKey,
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
@@ -437,7 +437,7 @@ struct MenuBarView: View {
 /// 列表窗的 `RetainingMenu`/`MenuActionProxy`（target 弱引用 → 菜单子类强持有同寿命）。
 /// 磁贴视觉与 `OmiTileButton` 共用 `OmiTileLabel`。
 private struct DisplayMenuTile: View {
-    let title: String
+    let title: LocalizedStringKey
     let icon: String
     let tint: OmiStyle.TileTint
     let isIdle: Bool

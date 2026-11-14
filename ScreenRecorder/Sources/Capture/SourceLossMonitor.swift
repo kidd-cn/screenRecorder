@@ -21,8 +21,8 @@ struct SourceLossError: LocalizedError {
     let removedDisplayID: CGDirectDisplayID?
 
     var errorDescription: String? {
-        guard let removedDisplayID else { return "被采集的显示器已断开连接" }
-        return "被采集的显示器（id=\(removedDisplayID)）已断开连接"
+        guard let removedDisplayID else { return NSLocalizedString("被采集的显示器已断开连接", comment: "msg") }
+        return String(format: NSLocalizedString("被采集的显示器（id=%u）已断开连接", comment: "msg"), removedDisplayID)
     }
 }
 
@@ -32,14 +32,14 @@ struct AppSourceLostError: LocalizedError {
     let bundleID: String
 
     var errorDescription: String? {
-        "被采集的应用（bundle id=\(bundleID)）的窗口已全部关闭"
+        String(format: NSLocalizedString("被采集的应用（bundle id=%@）的窗口已全部关闭", comment: "msg"), bundleID)
     }
 }
 
 /// 摄像头源丢失错误（pip-swap 批，用户裁决 (a)）：录制中摄像头断源 → 会话级失败
 /// 自动保存（同屏幕丢源收场语义）。
 struct CameraSourceLostError: LocalizedError {
-    var errorDescription: String? { "前置摄像头已断开或停止出帧" }
+    var errorDescription: String? { NSLocalizedString("前置摄像头已断开或停止出帧", comment: "msg") }
 }
 
 /// 源丢失监视器（Task 18）：录制期监听显示器断连，被采集显示器消失时经 `onSourceLost`

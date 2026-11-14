@@ -58,7 +58,7 @@ final class AboutWindowController {
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false)
-            window.title = "关于 蜂鸟录屏"
+            window.title = NSLocalizedString("关于 蜂鸟录屏", comment: "About window title")
             window.isReleasedWhenClosed = false
             window.center()
             self.window = window

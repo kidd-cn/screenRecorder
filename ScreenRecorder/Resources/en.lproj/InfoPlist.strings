@@ -1,0 +1,4 @@
+"CFBundleDisplayName" = "Hummingbird";
+"NSMicrophoneUsageDescription" = "Used to record meeting and tutorial audio.";
+"NSCameraUsageDescription" = "Used to record meeting and tutorial video.";
+"NSScreenRecordingUsageDescription" = "Used to record meetings and tutorials.";

@@ -45,33 +45,33 @@ final class AssetWriterSession {
         var errorDescription: String? {
             switch self {
             case .outputAlreadyExists(let url):
-                return "输出文件已存在，拒绝覆盖：\(url.path)"
+                return String(format: NSLocalizedString("输出文件已存在，拒绝覆盖：%@", comment: "msg"), url.path)
             case .outputBusy(let url):
-                return "目标被其他录制会话占用（claim 已存在）：\(url.path).claim（若为上次异常退出的残留可手动删除）"
+                return String(format: NSLocalizedString("目标被其他录制会话占用（claim 已存在）：%@.claim（若为上次异常退出的残留可手动删除）", comment: "msg"), url.path)
             case .cannotCreateOutputFile(let path, let errnoCode):
-                return "无法排他创建 \(path)（errno=\(errnoCode)，输出目录未创建？）"
+                return String(format: NSLocalizedString("无法排他创建 %@（errno=%lld，输出目录未创建？）", comment: "msg"), path, errnoCode)
             case .cannotCreateWriter(let underlying):
-                return "AVAssetWriter 创建失败：\(underlying)"
+                return String(format: NSLocalizedString("AVAssetWriter 创建失败：%@", comment: "msg"), String(describing: underlying))
             case .cannotAddVideoInput:
-                return "AVAssetWriter 拒绝添加视频输入"
+                return NSLocalizedString("AVAssetWriter 拒绝添加视频输入", comment: "msg")
             case .cannotAddAudioInput:
-                return "AVAssetWriter 拒绝添加音频输入"
+                return NSLocalizedString("AVAssetWriter 拒绝添加音频输入", comment: "msg")
             case .cannotMakeAudioFormatHint(let status):
-                return "构造音频格式提示失败（status=\(status)）"
+                return String(format: NSLocalizedString("构造音频格式提示失败（status=%lld）", comment: "msg"), status)
             case .noVideoInput:
-                return "视频输入未装配（appendVideo 早于 addVideoInput/startWriting）"
+                return NSLocalizedString("视频输入未装配（appendVideo 早于 addVideoInput/startWriting）", comment: "msg")
             case .noAudioInput:
-                return "音频输入未装配（appendAudio 早于 addAudioInput）"
+                return NSLocalizedString("音频输入未装配（appendAudio 早于 addAudioInput）", comment: "msg")
             case .writerNotWriting(let status, let underlying):
-                return "AVAssetWriter 不在写入状态（status=\(status.rawValue)）：\(underlying.map(String.init(describing:)) ?? "无底层错误")"
+                return String(format: NSLocalizedString("AVAssetWriter 不在写入状态（status=%lld）：%@", comment: "msg"), status.rawValue, underlying.map(String.init(describing:)) ?? NSLocalizedString("无底层错误", comment: "msg"))
             case .appendFailedVideo(let underlying):
-                return "视频帧写入失败：\(underlying.map(String.init(describing:)) ?? "未知原因")"
+                return String(format: NSLocalizedString("视频帧写入失败：%@", comment: "msg"), underlying.map(String.init(describing:)) ?? NSLocalizedString("未知原因", comment: "msg"))
             case .appendFailedAudio(let underlying):
-                return "音频样本写入失败：\(underlying.map(String.init(describing:)) ?? "未知原因")"
+                return String(format: NSLocalizedString("音频样本写入失败：%@", comment: "msg"), underlying.map(String.init(describing:)) ?? NSLocalizedString("未知原因", comment: "msg"))
             case .nothingWritten:
-                return "本次录制未写入任何样本，无成片"
+                return NSLocalizedString("本次录制未写入任何样本，无成片", comment: "msg")
             case .finishFailed(let status, let underlying):
-                return "收尾失败（status=\(status.rawValue)）：\(underlying.map(String.init(describing:)) ?? "未知原因")"
+                return String(format: NSLocalizedString("收尾失败（status=%lld）：%@", comment: "msg"), status.rawValue, underlying.map(String.init(describing:)) ?? NSLocalizedString("未知原因", comment: "msg"))
             }
         }
     }

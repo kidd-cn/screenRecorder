@@ -52,13 +52,13 @@ final class SCStreamRecorder: NSObject {
         var errorDescription: String? {
             switch self {
             case .displayNotFound(let id):
-                return "SCShareableContent 中找不到显示器 id=\(id)"
+                return String(format: NSLocalizedString("SCShareableContent 中找不到显示器 id=%lld", comment: "msg"), id)
             case .windowNotFound(let id):
-                return "SCShareableContent 中找不到窗口 id=\(id)（窗口可能已关闭）"
+                return String(format: NSLocalizedString("SCShareableContent 中找不到窗口 id=%lld（窗口可能已关闭）", comment: "msg"), id)
             case .appNotFound(let bundleID):
-                return "找不到应用（bundle id=\(bundleID)）的可录制窗口（应用可能已退出或窗口已全部关闭）"
+                return String(format: NSLocalizedString("找不到应用（bundle id=%@）的可录制窗口（应用可能已退出或窗口已全部关闭）", comment: "msg"), bundleID)
             case .windowRegionClippedEmpty(let id):
-                return "窗口（id=\(id)）已缩小到上次所选区域之外，无内容可录，请重新选择窗口区域"
+                return String(format: NSLocalizedString("窗口（id=%lld）已缩小到上次所选区域之外，无内容可录，请重新选择窗口区域", comment: "msg"), id)
             }
         }
     }

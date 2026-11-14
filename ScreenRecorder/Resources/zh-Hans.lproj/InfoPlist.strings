@@ -1,0 +1,4 @@
+"CFBundleDisplayName" = "蜂鸟录屏";
+"NSMicrophoneUsageDescription" = "用于录制会议和教程";
+"NSCameraUsageDescription" = "用于录制会议和教程";
+"NSScreenRecordingUsageDescription" = "用于录制会议和教程";

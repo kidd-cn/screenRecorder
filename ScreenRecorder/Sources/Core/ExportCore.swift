@@ -79,11 +79,11 @@ enum ExportError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptySource:
-            return "导出失败：源文件没有可用的视频内容"
+            return NSLocalizedString("导出失败：源文件没有可用的视频内容", comment: "Export empty source")
         case .incompatiblePreset(let presetName):
-            return "导出失败：压缩预设与源不兼容（\(presetName)）"
+            return String(format: NSLocalizedString("导出失败：压缩预设与源不兼容（%@）", comment: "Export incompatible preset"), presetName)
         case .gifEncodingFailed:
-            return "导出失败：GIF 编码失败，请重试"
+            return NSLocalizedString("导出失败：GIF 编码失败，请重试", comment: "Export GIF failed")
         }
     }
 }
@@ -331,7 +331,7 @@ enum ExportCore {
 
     /// 压缩输出 URL：源同目录 `<原名>_压缩.mp4`，冲突追加 " (n)"。
     static func compressedDestinationURL(for sourceURL: URL) -> URL {
-        conflictFreeURL(for: destinationURL(sourceURL, suffix: "_压缩", ext: "mp4"))
+        conflictFreeURL(for: destinationURL(sourceURL, suffix: NSLocalizedString("_压缩", comment: "Compressed suffix"), ext: "mp4"))
     }
 
     private static func destinationURL(_ sourceURL: URL, suffix: String, ext: String) -> URL {

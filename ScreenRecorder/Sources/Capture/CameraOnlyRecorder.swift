@@ -59,15 +59,15 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         var errorDescription: String? {
             switch self {
             case .cameraPermissionNotDetermined:
-                return "摄像头尚未授权：已发起系统授权请求，本次录制未能开始；授权后重新开始录制即可"
+                return NSLocalizedString("摄像头尚未授权：已发起系统授权请求，本次录制未能开始；授权后重新开始录制即可", comment: "msg")
             case .cameraPermissionDenied:
-                return "摄像头权限被拒绝：请在系统设置 > 隐私与安全性 > 摄像头中允许本应用后重新开始录制"
+                return NSLocalizedString("摄像头权限被拒绝：请在系统设置 > 隐私与安全性 > 摄像头中允许本应用后重新开始录制", comment: "msg")
             case .cameraNotFound:
-                return "未找到可用的前置摄像头，无法开始仅摄像头录制"
+                return NSLocalizedString("未找到可用的前置摄像头，无法开始仅摄像头录制", comment: "msg")
             case .sessionConfigurationFailed(let reason):
-                return "摄像头会话装配失败：\(reason)"
+                return String(format: NSLocalizedString("摄像头会话装配失败：%@", comment: "msg"), reason)
             case .sessionDidNotStart:
-                return "摄像头会话启动失败（设备可能被其他应用占用或已断开）"
+                return NSLocalizedString("摄像头会话启动失败（设备可能被其他应用占用或已断开）", comment: "msg")
             case .frameDimensionMismatch(let expected, let actual):
                 return "摄像头交付尺寸与预期不符（预期 \(Int(expected.width))×\(Int(expected.height))，"
                     + "实际 \(Int(actual.width))×\(Int(actual.height))），本次录制未能开始"
@@ -181,7 +181,7 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     /// 对维度硬约束，错配会在逐帧 append 上低可诊断地失败；首帧显式比对给出可行动错误。
     static func validateFrameDimensions(_ format: CMFormatDescription?, expected: CGSize) throws {
         guard let format else {
-            throw CameraOnlyRecorderError.sessionConfigurationFailed("首帧缺少格式描述")
+            throw CameraOnlyRecorderError.sessionConfigurationFailed(NSLocalizedString("首帧缺少格式描述", comment: "msg"))
         }
         let dims = CMVideoFormatDescriptionGetDimensions(format)
         guard Int(dims.width) == Int(expected.width), Int(dims.height) == Int(expected.height) else {
@@ -275,7 +275,7 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<CapturePlan, Error>) in
             sessionQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(throwing: CameraOnlyRecorderError.sessionConfigurationFailed("会话已被释放"))
+                    continuation.resume(throwing: CameraOnlyRecorderError.sessionConfigurationFailed(NSLocalizedString("会话已被释放", comment: "msg")))
                     return
                 }
                 do {
@@ -295,10 +295,10 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
             do {
                 input = try AVCaptureDeviceInput(device: device)
             } catch {
-                throw CameraOnlyRecorderError.sessionConfigurationFailed("无法连接摄像头设备：\(error)")
+                throw CameraOnlyRecorderError.sessionConfigurationFailed(String(format: NSLocalizedString("无法连接摄像头设备：%@", comment: "msg"), String(describing: error)))
             }
             guard session.canAddInput(input) else {
-                throw CameraOnlyRecorderError.sessionConfigurationFailed("会话拒绝摄像头输入")
+                throw CameraOnlyRecorderError.sessionConfigurationFailed(NSLocalizedString("会话拒绝摄像头输入", comment: "msg"))
             }
             session.addInput(input)
             // 预设谈判在设备输入在位后进行（canSetSessionPreset 反映实际设备能力）；
@@ -313,7 +313,7 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
             output.alwaysDiscardsLateVideoFrames = true // 实时语义：宁丢帧不积压（CameraPiPController 同款）
             output.setSampleBufferDelegate(self, queue: videoQueue)
             guard session.canAddOutput(output) else {
-                throw CameraOnlyRecorderError.sessionConfigurationFailed("会话拒绝帧输出")
+                throw CameraOnlyRecorderError.sessionConfigurationFailed(NSLocalizedString("会话拒绝帧输出", comment: "msg"))
             }
             session.addOutput(output)
             if let connection = output.connection(with: .video), connection.isVideoMirroringSupported {
@@ -365,7 +365,7 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sessionQueue.async { [weak self] in
                 guard let self else {
-                    continuation.resume(throwing: CameraOnlyRecorderError.sessionConfigurationFailed("会话已被释放"))
+                    continuation.resume(throwing: CameraOnlyRecorderError.sessionConfigurationFailed(NSLocalizedString("会话已被释放", comment: "msg")))
                     return
                 }
                 self.session.startRunning()
@@ -585,7 +585,7 @@ extension CameraOnlyRecorder {
             }
         }
         guard let writer: AssetWriterSession = stateLock.withStateLock({ writerSession }) else {
-            throw CameraOnlyRecorderError.sessionConfigurationFailed("首帧装配时 writer 已被收走")
+            throw CameraOnlyRecorderError.sessionConfigurationFailed(NSLocalizedString("首帧装配时 writer 已被收走", comment: "msg"))
         }
         try Self.validateFrameDimensions(
             formatHint, expected: stateLock.withStateLock { expectedPixelSize })

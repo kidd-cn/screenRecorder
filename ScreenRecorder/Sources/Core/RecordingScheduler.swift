@@ -37,11 +37,11 @@ final class RecordingScheduler: ObservableObject {
     // MARK: 错过/跳过文案（错过标题为简报钉定文案；其余自拟，简报未钉定）
 
     /// 错过补通知标题（简报钉定）。
-    static let missedTitle = "定时录制已错过"
+    static let missedTitle = NSLocalizedString("定时录制已错过", comment: "msg")
     /// 忙/锁屏跳过通知标题（共用）。
-    static let skipTitle = "定时录制未开始"
-    static let busyBody = "已有录制正在进行，本次定时录制已跳过。"
-    static let lockedBody = "屏幕处于锁定状态，本次定时录制已跳过。"
+    static let skipTitle = NSLocalizedString("定时录制未开始", comment: "msg")
+    static let busyBody = NSLocalizedString("已有录制正在进行，本次定时录制已跳过。", comment: "msg")
+    static let lockedBody = NSLocalizedString("屏幕处于锁定状态，本次定时录制已跳过。", comment: "msg")
 
     // MARK: 注入缝（测试全量注入假值；生产接线见 AppAssembly）
 
@@ -227,8 +227,7 @@ final class RecordingScheduler: ObservableObject {
     private static func missedBody(_ schedule: Schedule) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm"
-        return "原定 \(formatter.string(from: schedule.startAt)) 的定时录制未能开始"
-            + "（可能因 Mac 睡眠错过），可点按通知上的「开始录制」立即开始。"
+        return String(format: NSLocalizedString("原定 %@ 的定时录制未能开始（可能因 Mac 睡眠错过），可点按通知上的「开始录制」立即开始。", comment: "msg"), formatter.string(from: schedule.startAt))
     }
 
     // MARK: 锁屏判定（系统惯例）
