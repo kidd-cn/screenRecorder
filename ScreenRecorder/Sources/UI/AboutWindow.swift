@@ -60,6 +60,9 @@ struct AboutView: View {
                 shortcutPair("⇧⌘W", "窗口录制")
                 shortcutPair("⇧⌘M", "标记工具")
             }
+            Text("每个录制模式与截图操作均有独立快捷键（⇧⌃ 系列），见偏好设置 → 快捷键。")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
     }
 

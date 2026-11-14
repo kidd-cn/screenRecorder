@@ -26,6 +26,44 @@ extension KeyboardShortcuts.Name {
     static let toggleMarkingTools = Self(
         "toggleMarkingTools",
         default: .init(.m, modifiers: [.shift, .command]))
+
+    // MARK: 逐操作快捷键（2026-11-14 用户要求「每个录屏/截图操作都配快捷键」）
+    //
+    // 档位设计：统一 ⇧⌃（Shift+Control）系列——避开系统截图三键（⇧⌘3/4/5，会被
+    // SystemUIServer 抢占）与各 App 常用 ⌥⌘ 组合；全局注册（Carbon），冲突面最小。
+
+    /// 全屏录制（主显示器）：⇧⌃F。多显示器选屏仍走面板/菜单。
+    static let startFullScreenRecording = Self(
+        "startFullScreenRecording",
+        default: .init(.f, modifiers: [.shift, .control]))
+    /// App 录制（打开 App 选择器）：⇧⌃A。
+    static let startAppRecording = Self(
+        "startAppRecording",
+        default: .init(.a, modifiers: [.shift, .control]))
+    /// 区域录制（拖框选区）：⇧⌃R。
+    static let startRegionRecordingShortcut = Self(
+        "startRegionRecordingShortcut",
+        default: .init(.r, modifiers: [.shift, .control]))
+    /// 窗口区域录制（选窗口 → 窗内拖框）：⇧⌃B。
+    static let startWindowRegionRecordingShortcut = Self(
+        "startWindowRegionRecordingShortcut",
+        default: .init(.b, modifiers: [.shift, .control]))
+    /// 仅声音录制（m4a）：⇧⌃U。
+    static let startAudioOnlyRecordingShortcut = Self(
+        "startAudioOnlyRecordingShortcut",
+        default: .init(.u, modifiers: [.shift, .control]))
+    /// 仅摄像头录制（mp4 + 预览窗）：⇧⌃V。
+    static let startCameraOnlyRecordingShortcut = Self(
+        "startCameraOnlyRecordingShortcut",
+        default: .init(.v, modifiers: [.shift, .control]))
+    /// 区域截图（拖框裁剪 PNG）：⇧⌃S。
+    static let takeRegionScreenshotShortcut = Self(
+        "takeRegionScreenshotShortcut",
+        default: .init(.s, modifiers: [.shift, .control]))
+    /// 全屏截图（主显示器整屏）：⇧⌃D。
+    static let takeFullScreenScreenshotShortcut = Self(
+        "takeFullScreenScreenshotShortcut",
+        default: .init(.d, modifiers: [.shift, .control]))
 }
 
 // MARK: - HEVC 硬件编码能力（裁定 5）
@@ -311,11 +349,25 @@ private struct ShortcutsTab: View {
     var body: some View {
         ScrollView(.vertical) {
             Form {
-                KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
-                KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
-                KeyboardShortcuts.Recorder("录制所选窗口：", name: .startWindowRecording)
-                KeyboardShortcuts.Recorder("边录边标记：", name: .toggleMarkingTools)
-                Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）。")
+                Section("录制控制") {
+                    KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
+                    KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
+                    KeyboardShortcuts.Recorder("边录边标记：", name: .toggleMarkingTools)
+                }
+                Section("录制模式（逐操作，2026-11-14）") {
+                    KeyboardShortcuts.Recorder("全屏录制（主显示器）：", name: .startFullScreenRecording)
+                    KeyboardShortcuts.Recorder("窗口录制：", name: .startWindowRecording)
+                    KeyboardShortcuts.Recorder("App 录制：", name: .startAppRecording)
+                    KeyboardShortcuts.Recorder("区域录制：", name: .startRegionRecordingShortcut)
+                    KeyboardShortcuts.Recorder("窗口区域录制：", name: .startWindowRegionRecordingShortcut)
+                    KeyboardShortcuts.Recorder("仅声音录制：", name: .startAudioOnlyRecordingShortcut)
+                    KeyboardShortcuts.Recorder("仅摄像头录制：", name: .startCameraOnlyRecordingShortcut)
+                }
+                Section("截图") {
+                    KeyboardShortcuts.Recorder("区域截图：", name: .takeRegionScreenshotShortcut)
+                    KeyboardShortcuts.Recorder("全屏截图（主显示器）：", name: .takeFullScreenScreenshotShortcut)
+                }
+                Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）；可点按右侧录制器改写。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }

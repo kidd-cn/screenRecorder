@@ -851,6 +851,35 @@ final class AppAssembly: ObservableObject {
         KeyboardShortcuts.onKeyUp(for: .toggleMarkingTools) { [weak self] in
             Task { @MainActor in self?.toggleMarkingTools() }
         }
+        // 逐操作快捷键（2026-11-14）：全部复用面板/菜单同一入口——idle 预检、倒计时、
+        // 装配编排单点不变（非 idle 时各入口内建守卫会拒绝/静默）。
+        KeyboardShortcuts.onKeyUp(for: .startFullScreenRecording) { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.startDisplayRecording(on: CGMainDisplayID())
+            }
+        }
+        KeyboardShortcuts.onKeyUp(for: .startAppRecording) { [weak self] in
+            Task { @MainActor in self?.openAppPicker() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .startRegionRecordingShortcut) { [weak self] in
+            Task { @MainActor in self?.startRegionRecording() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .startWindowRegionRecordingShortcut) { [weak self] in
+            Task { @MainActor in self?.startWindowRegionRecording() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .startAudioOnlyRecordingShortcut) { [weak self] in
+            Task { @MainActor in self?.startAudioOnlyRecording() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .startCameraOnlyRecordingShortcut) { [weak self] in
+            Task { @MainActor in self?.startCameraOnlyRecording() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .takeRegionScreenshotShortcut) { [weak self] in
+            Task { @MainActor in self?.takeRegionScreenshot() }
+        }
+        KeyboardShortcuts.onKeyUp(for: .takeFullScreenScreenshotShortcut) { [weak self] in
+            Task { @MainActor in self?.takeFullScreenScreenshot(on: CGMainDisplayID()) }
+        }
     }
 
     // MARK: 边录边标记装配与开关（P2）
