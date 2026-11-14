@@ -115,6 +115,23 @@ struct OmiCard<Content: View>: View {
     }
 }
 
+/// 功能行图标磁贴（列表卡行首统一件：22×22 浅底色块 + 符号——文本行与开关行共用，
+/// 行首视觉不分叉）。
+struct OmiRowIcon: View {
+    let icon: String
+    let tint: OmiStyle.TileTint
+
+    var body: some View {
+        Image(systemName: icon)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Color(nsColor: OmiStyle.tintNS(tint)))
+            .frame(width: 22, height: 22)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(nsColor: OmiStyle.tintNS(tint)).opacity(0.14)))
+    }
+}
+
 /// 表格行视觉（Omi 化）：选中高亮 = 主绿柔光圆角块（替代系统蓝），悬停不加装饰。
 /// 供文件列表 / 分段列表的 NSTableView delegate `rowViewForRow` 返回。
 @MainActor

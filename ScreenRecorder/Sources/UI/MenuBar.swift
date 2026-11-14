@@ -235,12 +235,17 @@ struct MenuBarView: View {
                         onCancelScheduled()
                     }
                 }
+                // 开关行与 functionRow 同构（OmiRowIcon 磁贴 + 文字 + 尾随开关）——修
+                // 「画中画行裸符号+小号开关、开关不靠右」的风格漂移（2026-11-14 目验反馈）。
                 Toggle(isOn: $settings.pipEnabled) {
-                    Label("摄像头画中画", systemImage: "person.crop.rectangle")
-                        .font(.callout)
+                    HStack(spacing: 8) {
+                        OmiRowIcon(icon: "person.crop.rectangle", tint: .blue)
+                        Text("摄像头画中画").font(.callout)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
                 }
                 .toggleStyle(.switch)
-                .controlSize(.small)
                 .padding(.vertical, 4)
                 .accessibilityLabel("摄像头画中画开关：翻转只影响下一场录制")
                 Divider()
@@ -264,18 +269,12 @@ struct MenuBarView: View {
         }
     }
 
-    /// 功能行（列表卡内的小行钮；图标磁贴化 + 文本）。
+    /// 功能行（列表卡内的小行钮；OmiRowIcon 磁贴 + 文本）。
     private func functionRow(icon: String, tint: OmiStyle.TileTint, title: String,
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color(nsColor: OmiStyle.tintNS(tint)))
-                    .frame(width: 22, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6)
-                            .fill(Color(nsColor: OmiStyle.tintNS(tint)).opacity(0.14)))
+                OmiRowIcon(icon: icon, tint: tint)
                 Text(title).font(.callout)
                     .foregroundStyle(.primary)
                 Spacer()
