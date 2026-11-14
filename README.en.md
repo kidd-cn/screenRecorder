@@ -1,6 +1,6 @@
 [简体中文](README.md) ｜ **English**
 
-# ScreenRecorder
+# Hummingbird
 
 A macOS screen recording app for tutorials and meetings. Built from scratch on ScreenCaptureKit, with interaction design modeled on OmniRecorder.
 
@@ -43,29 +43,30 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 ## Build & Run
 
 ```bash
-xcodegen generate          # generates ScreenRecorder.xcodeproj (not checked in)
-open ScreenRecorder.xcodeproj   # option 1: ⌘R in Xcode
+xcodegen generate          # generates Hummingbird.xcodeproj (not checked in)
+open Hummingbird.xcodeproj     # option 1: ⌘R in Xcode
 # option 2: command line
-xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
+xcodebuild -project Hummingbird.xcodeproj -scheme Hummingbird \
   -configuration Debug -derivedDataPath .build build
-open .build/Build/Products/Debug/ScreenRecorder.app
+open .build/Build/Products/Debug/Hummingbird.app
 ```
 
 > If `xcode-select` points at the CLT rather than Xcode.app, prefix xcodebuild with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`.
+> The app displays as “蜂鸟录屏” (Hummingbird); the built bundle/executable is `Hummingbird`. The bundle id stays `com.screenrecorder.app` (permissions and settings are anchored to it).
 
 First use prompts for **Screen Recording / Microphone / Camera** permissions as needed. Global hotkeys use Carbon `RegisterEventHotKey` — no Accessibility permission required.
 
 ## Usage Notes
 
 - The app is menu-bar-only (`LSUIElement`); there is no Dock icon
-- Recordings land in `~/Movies/ScreenRecorder/录屏_*.mp4` by default; the output directory is configurable
+- Recordings land in `~/Movies/Hummingbird/录屏_*.mp4` by default; the output directory is configurable
 - Window capture: pick a target window once under Preferences → Sources → Window Capture, then `⇧⌘W` starts recording it directly; a stale target prompts re-selection
 - For stereo meeting captures, enable both system audio and microphone — output is stereo AAC
 
 ## Tests
 
 ```bash
-xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
+xcodebuild -project Hummingbird.xcodeproj -scheme Hummingbird \
   -configuration Debug -derivedDataPath .build test
 ```
 

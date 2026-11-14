@@ -1,6 +1,6 @@
 **简体中文** ｜ [English](README.en.md)
 
-# ScreenRecorder
+# 蜂鸟录屏（Hummingbird）
 
 macOS 录屏应用：为录制教程与会议而生。基于 ScreenCaptureKit，参考 OmniRecorder 的交互设计从零实现。
 
@@ -43,29 +43,30 @@ macOS 录屏应用：为录制教程与会议而生。基于 ScreenCaptureKit，
 ## 构建与运行
 
 ```bash
-xcodegen generate          # 生成 ScreenRecorder.xcodeproj（工程文件不入库）
-open ScreenRecorder.xcodeproj   # 方式一：Xcode 里 ⌘R
+xcodegen generate          # 生成 Hummingbird.xcodeproj（工程文件不入库）
+open Hummingbird.xcodeproj     # 方式一：Xcode 里 ⌘R
 # 方式二：命令行
-xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
+xcodebuild -project Hummingbird.xcodeproj -scheme Hummingbird \
   -configuration Debug -derivedDataPath .build build
-open .build/Build/Products/Debug/ScreenRecorder.app
+open .build/Build/Products/Debug/Hummingbird.app
 ```
 
 > 命令行构建用 Xcode.app 全量 SDK 时需前缀 `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`（若 `xcode-select` 已指向 Xcode 则可省）。
+> 应用显示名为「蜂鸟录屏」，编译产物/可执行文件名为 `Hummingbird`；bundle id 保持 `com.screenrecorder.app`（权限与设置锚定）。
 
 首次使用会依次请求 **屏幕录制 / 麦克风 / 摄像头** 权限（按需，用到才弹）；全局快捷键基于 Carbon `RegisterEventHotKey`，不需要辅助功能授权。
 
 ## 使用说明
 
 - 应用无常驻 Dock 图标（`LSUIElement`），一切从**菜单栏图标**进入
-- 成片默认落在 `~/Movies/ScreenRecorder/录屏_*.mp4`，输出目录可在偏好设置修改
+- 成片默认落在 `~/Movies/Hummingbird/录屏_*.mp4`，输出目录可在偏好设置修改
 - 「录制指定窗口」：先在 偏好设置 → 录制源 → 窗口捕获 中选择目标窗口，之后按 `⇧⌘W` 直接开录；目标窗口关闭会提示重选
 - 双声道会议场景：系统声音 + 麦克风全开即可，成片为立体声 AAC
 
 ## 运行测试
 
 ```bash
-xcodebuild -project ScreenRecorder.xcodeproj -scheme ScreenRecorder \
+xcodebuild -project Hummingbird.xcodeproj -scheme Hummingbird \
   -configuration Debug -derivedDataPath .build test
 ```
 
