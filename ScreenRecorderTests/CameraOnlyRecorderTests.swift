@@ -167,8 +167,8 @@ final class CameraOnlyRecorderTests: XCTestCase {
     }
 
     /// 采集装配纯逻辑缝：预设与 writer 画布成对定格（HD 可用 → 720p 档；不可用 → VGA 档
-    /// ——CameraPiPController 既有惯例档），两档尺寸恒定是「writer pixelSize 与交付档一致」
-    /// 的机制前提；帧率就近支持档钳制边界。
+    /// ——CameraPiPController 既有惯例档）；交付尺寸脱节由首帧自适应重建兜住（2026-11-14
+    /// 「仅摄像头录制闪退」热修：preset 谈判 macOS 26 实测可能谎报）；帧率就近档钳制边界。
     func testCapturePlanPairsPresetWithPixelSizeAndClampsFPS() {
         let hd = CameraOnlyRecorder.capturePlan(supportsHD: true)
         XCTAssertEqual(hd.preset, .hd1280x720)
@@ -183,6 +183,23 @@ final class CameraOnlyRecorderTests: XCTestCase {
         XCTAssertEqual(CameraOnlyRecorder.clampedFPS(90, deviceMin: 30, deviceMax: 60), 60, "远超上限 → 取上限")
         XCTAssertEqual(CameraOnlyRecorder.clampedFPS(60, deviceMin: 60, deviceMax: 60), 60, "单档设备")
         XCTAssertEqual(CameraOnlyRecorder.clampedFPS(0, deviceMin: 24, deviceMax: 60), 24, "野值防御（≥1 后落钳制区间）")
+    }
+
+    /// 首帧尺寸自适应判定（2026-11-14「仅摄像头录制闪退」热修）：交付与假定不符且实际
+    /// 有效 → 重建 writer；一致不重建；实际尺寸退化（0）不重建（走原校验报错路径）。
+    func testShouldRebuildWriterDecision() {
+        XCTAssertTrue(CameraOnlyRecorder.shouldRebuildWriter(
+            expected: CGSize(width: 1280, height: 720),
+            actual: CGSize(width: 1920, height: 1080)),
+            "preset 谈判脱节（谎报 720p 实交 1080p）→ 重建")
+        XCTAssertFalse(CameraOnlyRecorder.shouldRebuildWriter(
+            expected: CGSize(width: 1280, height: 720),
+            actual: CGSize(width: 1280, height: 720)),
+            "交付一致 → 不重建")
+        XCTAssertFalse(CameraOnlyRecorder.shouldRebuildWriter(
+            expected: CGSize(width: 1280, height: 720),
+            actual: .zero),
+            "实际尺寸退化 → 不重建（原校验失败路径处理）")
     }
 }
 

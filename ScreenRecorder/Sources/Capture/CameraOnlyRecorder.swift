@@ -139,6 +139,11 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
         stateLock.withStateLock { writerSession?.writerStatus }
     }
 
+    /// 预览会话（摄像头预览窗用，2026-11-14）：cameraOnly 录制中唯一画面反馈——
+    /// 装配层经 `CaptureController.cameraPreviewSession` 取到后挂 AVCaptureVideoPreviewLayer。
+    /// 会话生命周期仍归本 recorder；预览层只读引用。
+    var previewSession: AVCaptureSession { session }
+
     // MARK: - 纯逻辑钉测缝
 
     /// 采集计划：会话预设与 writer 画布尺寸成对定格（单一真源，装配与钉测共用）。
@@ -149,12 +154,21 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
 
     /// 预设决策（纯逻辑，无头钉测缝）：HD 档可用 → 720p（仅摄像头成片是主画面，VGA 偏低）；
     /// 不可用 → VGA 档（CameraPiPController 既有惯例档）。两档交付尺寸恒定（hd1280x720 →
-    /// 1280×720；vga640x480 → 640×480），writer pixelSize 按同值挂载——adaptor append 对
-    /// 维度硬约束，尺寸与交付档一致的机制前提。
+    /// 1280×720；vga640x480 → 640×480），writer pixelSize 按同值挂载。
+    /// 注：preset 谈判在 macOS 26 实测可能脱节（canSetSessionPreset 返回 true 而实际交付
+    /// 其它尺寸）——交付不符由首帧 `shouldRebuildWriter` 自适应重建 writer 兜住
+    ///（2026-11-14「仅摄像头录制闪退」热修）。
     static func capturePlan(supportsHD: Bool) -> CapturePlan {
         supportsHD
             ? CapturePlan(preset: .hd1280x720, pixelSize: CGSize(width: 1280, height: 720))
             : CapturePlan(preset: .vga640x480, pixelSize: CGSize(width: 640, height: 480))
+    }
+
+    /// 首帧尺寸与装配假定不符的处置判定（纯逻辑，可钉）：actual 有效且不等于 expected
+    /// → 按实际尺寸重建 writer 继续录制（不中断、不抛错）。断言「同尺寸」用精确比较
+    ///（交付尺寸是整像素，无浮点误差源）。
+    static func shouldRebuildWriter(expected: CGSize, actual: CGSize) -> Bool {
+        actual.width > 0 && actual.height > 0 && actual != expected
     }
 
     /// 设置 fps 的设备就近支持档（纯逻辑，无头钉测缝）：高于设备格式全档上限取上限、低于
@@ -288,7 +302,8 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
             }
             session.addInput(input)
             // 预设谈判在设备输入在位后进行（canSetSessionPreset 反映实际设备能力）；
-            // preset 与 writer 画布成对定格（capturePlan 单一真源）。
+            // preset 与 writer 画布成对定格（capturePlan 单一真源）。交付尺寸与假定
+            // 脱节（macOS 26 实测）由首帧 handleVideoSample 自适应重建 writer 兜住。
             let plan = Self.capturePlan(supportsHD: session.canSetSessionPreset(.hd1280x720))
             session.sessionPreset = plan.preset
             let output = AVCaptureVideoDataOutput()
@@ -525,33 +540,63 @@ extension CameraOnlyRecorder {
         guard CMSampleBufferDataIsReady(sampleBuffer),
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         let writer: AssetWriterSession? = stateLock.withStateLock { writerSession }
-        guard let writer else { return } // stop() 已收走会话：丢弃尾部帧
+        guard writer != nil else { return } // stop() 已收走会话：丢弃尾部帧
         let rawPTS = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         // 暂停门控 + 平移 + 视频轨单调护栏（clock 决策 nil = 丢弃，含暂停中的全部帧）
         guard let shiftedPTS = stateLock.withStateLock({ mediaClock.shiftedPTS(rawPTS, for: .video) }) else { return }
         do {
             let didArm = !writerArmed
             if didArm {
-                let formatHint = CMSampleBufferGetFormatDescription(sampleBuffer)
-                try Self.validateFrameDimensions(formatHint, expected: expectedPixelSize)
-                try writer.addVideoInput(with: formatHint)
-                let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
-                if let mixer {
-                    try writer.addAudioInput(with: mixer.masterFormat)
-                }
-                writer.startWriting()
-                writerArmed = true
-            }
-            try writer.appendVideo(pixelBuffer, at: shiftedPTS)
-            if didArm {
+                let armed = try armedWriter(for: sampleBuffer)
+                try armed.appendVideo(pixelBuffer, at: shiftedPTS)
                 // gate 用首帧原始采集 PTS（host 时基）：混音侧初筛「锚点前的内容」；
                 // 文件基（平移后）锚点兜底由 handleMixedAudio 负责（SCStreamRecorder 同款双保险）。
                 let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
                 mixer?.setGatePTS(rawPTS)
+                return
             }
+            try writer?.appendVideo(pixelBuffer, at: shiftedPTS)
         } catch {
             recordFailure(error)
         }
+    }
+
+    /// 首帧装配（含尺寸自适应，2026-11-14「仅摄像头录制闪退」热修）：设备实际交付尺寸
+    /// 与装配假定不符时（macOS 26 实测 preset 谈判脱节：canSetSessionPreset 返回 true
+    /// 而交付 1920×1080），丢弃未写入内容的旧 writer（discardIfNoContent 清输出与
+    /// claim 占位）→ 按实际尺寸重建 → 继续，录制不中断、不抛错。尺寸一致走原路。
+    /// 返回装配完成的 writer（video 队列串行调用，writerArmed 单线程）。
+    private func armedWriter(for sampleBuffer: CMSampleBuffer) throws -> AssetWriterSession {
+        let formatHint = CMSampleBufferGetFormatDescription(sampleBuffer)
+        if let formatHint {
+            let dims = CMVideoFormatDescriptionGetDimensions(formatHint)
+            let actual = CGSize(width: Int(dims.width), height: Int(dims.height))
+            let expected = stateLock.withStateLock { expectedPixelSize }
+            if Self.shouldRebuildWriter(expected: expected, actual: actual) {
+                NSLog("CameraOnlyRecorder: 首帧尺寸 \(actual) 与装配假定 \(expected) 不符，按实际尺寸重建 writer")
+                let replaced: AssetWriterSession? = stateLock.withStateLock {
+                    let owned = writerSession
+                    writerSession = nil
+                    expectedPixelSize = .zero
+                    return owned
+                }
+                replaced?.discardIfNoContent()
+                try mountWriterSession(pixelSize: actual)
+            }
+        }
+        guard let writer: AssetWriterSession = stateLock.withStateLock({ writerSession }) else {
+            throw CameraOnlyRecorderError.sessionConfigurationFailed("首帧装配时 writer 已被收走")
+        }
+        try Self.validateFrameDimensions(
+            formatHint, expected: stateLock.withStateLock { expectedPixelSize })
+        try writer.addVideoInput(with: formatHint)
+        let mixer: SystemAudioMixer? = stateLock.withStateLock { mixer }
+        if let mixer {
+            try writer.addAudioInput(with: mixer.masterFormat)
+        }
+        writer.startWriting()
+        writerArmed = true
+        return writer
     }
 
     /// delivery 串行队列回调：混音器输出（masterFormat）→ 平移 → 视频锚点兜底门控 →

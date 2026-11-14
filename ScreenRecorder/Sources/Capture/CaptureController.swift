@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import CoreGraphics
 import Foundation
@@ -21,6 +22,13 @@ protocol CaptureSessionManaging {
     func pause()
     func resume()
     func finish() async -> URL?
+}
+
+/// cameraOnly 预览会话读缝（UI 预览窗用，2026-11-14）：与录制生命周期语义解耦——
+/// 独立协议而非并入 `CaptureSessionManaging`，无头测试 spy 无需实现。nil = 当前场
+/// 非 cameraOnly（或 recorder 未就绪）。
+protocol CameraPreviewSessionProviding {
+    var cameraPreviewSession: AVCaptureSession? { get }
 }
 
 /// 通知出口抽象（本任务新增的注入缝）：生产实现 `UNRecordingNotifier`（App 层），
@@ -107,6 +115,13 @@ enum CaptureSessionError: Equatable, LocalizedError {
 /// 均由 DiskSpaceMonitor 保证主队列投递，装配层接至 CaptureController。
 /// 「stop-supersedes-warn」：warn 出口只通知不改状态，收尾优先级与去重由控制器状态机
 /// 把守（见 `CaptureController.showDiskSpaceWarning` / `handleSessionFailure`）。
+extension RecordingSessionCoordinator: CameraPreviewSessionProviding {
+    /// 当前场 recorder 为 cameraOnly 时透出其预览会话（预览窗用）。
+    var cameraPreviewSession: AVCaptureSession? {
+        (recorder as? CameraOnlyRecorder)?.previewSession
+    }
+}
+
 final class RecordingSessionCoordinator: CaptureSessionManaging {
     /// 会话中断出口（流失败 / 磁盘停阈值），主队列保证。
     /// 装配层接至 `CaptureController.handleSessionFailure`（onStreamFailure 的 T18 台账指针）。
@@ -554,6 +569,12 @@ final class CaptureController: ObservableObject {
     /// 此后 discard 路径 `store.delete` 作用于新目录内的成片；既有测试不受影响（默认不换）。
     func updateStore(_ newStore: RecordingFileStore) {
         store = newStore
+    }
+
+    /// cameraOnly 场预览会话（UI 预览窗用，2026-11-14）：nil = 当前场非 cameraOnly
+    /// （或 recorder 未就绪）。装配层按 state 订阅刷新预览窗显隐。
+    var cameraPreviewSession: AVCaptureSession? {
+        (session as? CameraPreviewSessionProviding)?.cameraPreviewSession
     }
 
     // MARK: 启动

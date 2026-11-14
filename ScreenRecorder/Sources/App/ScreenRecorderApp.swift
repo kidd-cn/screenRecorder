@@ -90,6 +90,10 @@ final class AppAssembly: ObservableObject {
     /// 文件列表窗口控制器（T18）：窗口与控制器归装配容器（装配红线），懒建单例复用；
     /// 列表模型经 store 取数缝读当前 `fileStore`（换输出目录后刷新即见新目录）。
     private var recordingListWindowController: NSWindowController?
+    /// 摄像头预览窗（2026-11-14）：仅 cameraOnly 场显示（state 订阅驱动，装配红线归本容器）。
+    private let cameraPreviewWindow = CameraPreviewWindow()
+    /// 预览窗订阅保活（与容器同寿）。
+    private var cameraPreviewCancellables: Set<AnyCancellable> = []
 
     /// 全局快捷键已挂载的进程级闸（T17 裁定 4）：KeyboardShortcuts 的 onKeyUp 把动作
     /// 追加进包内静态注册表，重挂（assembly init 重跑）会双触发——挂载恰好一次。
@@ -255,6 +259,23 @@ final class AppAssembly: ObservableObject {
                 }
             }
             .store(in: &keyboardCancellables)
+        // 摄像头预览窗（2026-11-14）：cameraOnly 场 recording/paused 显示（source 是
+        // 摄像头，预览会话由控制器透出——屏幕类场 nil → 隐藏），其余态隐藏。
+        // 注：sink 在 @Published willSet 同步回拉可能读旧值——预览会话此时已由 begin
+        // 装配完成（state 置 recording 晚于 recorder.start 返回），回拉安全。
+        controller.$state
+            .sink { [weak self] state in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if state == .recording || state == .paused,
+                       let session = self.controller.cameraPreviewSession {
+                        self.cameraPreviewWindow.show(session: session)
+                    } else {
+                        self.cameraPreviewWindow.hide()
+                    }
+                }
+            }
+            .store(in: &cameraPreviewCancellables)
         // 终审 F1：装配容器向退出保护登记（弱引用——容器由 App 的 @StateObject 强持有，
         // AppDelegate 不得反向持强）。登记时序与装配单例的论证见 AppDelegate.registeredAssembly。
         AppDelegate.registeredAssembly = self
