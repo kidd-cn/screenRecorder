@@ -49,18 +49,31 @@ struct OmiTileButton: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 6) {
-                tileIcon(icon: icon, tint: tint, size: 40)
-                Text(title)
-                    .font(.caption2)
-                    .foregroundStyle(.primary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .opacity(isEnabled ? 1 : 0.35)
+            OmiTileLabel(title: title, icon: icon, tint: tint, isEnabled: isEnabled)
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
+    }
+}
+
+/// 磁贴标签（宫格钮与 Menu 弹层磁贴**共用同一视觉**——主面板「全屏」「全屏截图」是
+/// 多显示器 Menu 弹层，标签必须与 OmiTileButton 逐字同构，样式不许分叉漂移）。
+struct OmiTileLabel: View {
+    let title: String
+    let icon: String
+    let tint: OmiStyle.TileTint
+    var isEnabled = true
+
+    var body: some View {
+        VStack(spacing: 6) {
+            OmiTileIcon(icon: icon, tint: tint, tileSize: 40)
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .opacity(isEnabled ? 1 : 0.35)
     }
 }
 

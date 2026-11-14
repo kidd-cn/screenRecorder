@@ -204,6 +204,8 @@ struct MenuBarView: View {
 
     /// 显示器列表磁贴（多显示器选择语义保留：Menu 弹层 = 系统 scene 弹层，AppKit 呈现；
     /// 单显示器时点选直出唯一项）。命名同旧菜单：本地化屏名 + points，主屏追加「（主）」。
+    /// 标签与 OmiTileButton 共用 `OmiTileLabel`（逐字同构）；`.button`+`.plain` 零底衬，
+    /// 修「全屏/全屏截图磁贴底衬与其它磁贴不一致」（2026-11-14 用户目验反馈）。
     private func displayMenuTile(_ title: String, icon: String, tint: OmiStyle.TileTint,
                                  action: @escaping (CGDirectDisplayID) -> Void) -> some View {
         Menu {
@@ -213,21 +215,10 @@ struct MenuBarView: View {
                 }
             }
         } label: {
-            VStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 17, weight: .medium))
-                    .foregroundStyle(Color(nsColor: OmiStyle.tintNS(tint)))
-                    .frame(width: 40, height: 36)
-                    .background(
-                        RoundedRectangle(cornerRadius: OmiStyle.tileRadius)
-                            .fill(Color(nsColor: OmiStyle.tintNS(tint)).opacity(0.14)))
-                Text(title).font(.caption2).foregroundStyle(.primary).lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .opacity(isIdle ? 1 : 0.35)
+            OmiTileLabel(title: title, icon: icon, tint: tint, isEnabled: isIdle)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
+        .menuStyle(.button)
+        .buttonStyle(.plain)
         .disabled(!isIdle)
     }
 
