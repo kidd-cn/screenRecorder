@@ -354,20 +354,22 @@ private struct ShortcutsTab: View {
                     KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
                     KeyboardShortcuts.Recorder("边录边标记：", name: .toggleMarkingTools)
                 }
-                Section("录制模式（逐操作，2026-11-14）") {
-                    KeyboardShortcuts.Recorder("全屏录制（主显示器）：", name: .startFullScreenRecording)
+                Section("录制模式") {
+                    // 标签一律短文案（2026-11-14 用户目验：长标签在 520 宽窗口被截断）；
+                    // 「主显示器」语义见注释与提示，不进标签。
+                    KeyboardShortcuts.Recorder("全屏录制：", name: .startFullScreenRecording)
                     KeyboardShortcuts.Recorder("窗口录制：", name: .startWindowRecording)
                     KeyboardShortcuts.Recorder("App 录制：", name: .startAppRecording)
                     KeyboardShortcuts.Recorder("区域录制：", name: .startRegionRecordingShortcut)
-                    KeyboardShortcuts.Recorder("窗口区域录制：", name: .startWindowRegionRecordingShortcut)
-                    KeyboardShortcuts.Recorder("仅声音录制：", name: .startAudioOnlyRecordingShortcut)
-                    KeyboardShortcuts.Recorder("仅摄像头录制：", name: .startCameraOnlyRecordingShortcut)
+                    KeyboardShortcuts.Recorder("窗口区域：", name: .startWindowRegionRecordingShortcut)
+                    KeyboardShortcuts.Recorder("仅声音：", name: .startAudioOnlyRecordingShortcut)
+                    KeyboardShortcuts.Recorder("仅摄像头：", name: .startCameraOnlyRecordingShortcut)
                 }
                 Section("截图") {
                     KeyboardShortcuts.Recorder("区域截图：", name: .takeRegionScreenshotShortcut)
-                    KeyboardShortcuts.Recorder("全屏截图（主显示器）：", name: .takeFullScreenScreenshotShortcut)
+                    KeyboardShortcuts.Recorder("全屏截图：", name: .takeFullScreenScreenshotShortcut)
                 }
-                Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）；可点按右侧录制器改写。")
+                Text("全局生效，可点按右侧键位修改。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
