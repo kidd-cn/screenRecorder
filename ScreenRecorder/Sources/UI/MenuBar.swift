@@ -528,7 +528,15 @@ struct MenuBarStatusIcon: View {
     var body: some View {
         switch controller.state {
         case .idle:
-            Image(systemName: scheduler.active != nil ? "timer" : "record.circle")
+            if scheduler.active != nil {
+                Image(systemName: "timer") // 排程等待期（P6b 语义）
+            } else {
+                // idle 身份图标（2026-11-14 用户目验终版）：白色摄像机符号、无底版——
+                // 模板渲染随菜单栏深浅自适应。手绘写实剪影曾被否（「不像摄像机」），
+                // SF video.fill 是用户认可的形态；font 定 15pt 保证辨识度。
+                Image(systemName: "video.fill")
+                    .font(.system(size: 15, weight: .semibold))
+            }
         case .countdown:
             Image(systemName: "timer")
         case .recording:
@@ -542,3 +550,4 @@ struct MenuBarStatusIcon: View {
         }
     }
 }
+
