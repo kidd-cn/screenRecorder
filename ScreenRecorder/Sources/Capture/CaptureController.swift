@@ -617,6 +617,7 @@ final class CaptureController: ObservableObject {
             try await session.begin(config)
         } catch {
             // begin 失败：无会话可收尾（占位/claim 清理由 recorder 内部完成），回 idle 并通知
+            NSLog("CaptureController: session.begin 失败回 idle（\(error.localizedDescription)，\(error)）")
             state = .idle
             notifier?.notifyFailure(message: failureMessage(for: error, savedFile: nil, didStart: false))
             return

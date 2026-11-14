@@ -1431,3 +1431,4 @@ private struct PermissionOnboardingWindowContent: View {
         PermissionOnboardingView(onAllGranted: { dismiss() })
     }
 }
+

@@ -103,6 +103,8 @@ struct FloatingControlBar: View {
                     Text("再次点击确认重录")
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(Capsule().fill(Color.red))
@@ -123,6 +125,8 @@ struct FloatingControlBar: View {
                     Text("再次点击确认丢弃")
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
                         .background(Capsule().fill(Color.red))
@@ -136,11 +140,14 @@ struct FloatingControlBar: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 8)
+        // 描边并入 background 同一 Capsule（stroke 外缘）：overlay(strokeBorder) 在
+        // 武装换装宽度变化时触发 NSPanel 约束更新循环（NSGenericException layout-loop
+        // fault，2026-11-14 探针二分定位），background 内一次成型无此问题。
         .background(
             Capsule()
                 .fill(OmiStyle.cardBackground)
+                .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
                 .shadow(color: .black.opacity(0.18), radius: 5, y: 1))
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.08)))
         // 交互热区汇总上报（按钮 frame 变化——如武装换装后丢弃按钮变宽——即重报）。
         .onPreferenceChange(InteractiveRegionPreferenceKey.self) { regions in
             regionRegistry.replace(regions: regions)
