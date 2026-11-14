@@ -313,3 +313,12 @@
 /* 窗口标题补键 */
 "文件列表" = "Recordings";
 "偏好设置" = "Preferences";
+
+/* 补漏键（2026-11-14） */
+"即将开始录制 · 点击屏幕或按 ESC 取消" = "Starting soon · Click the screen or press ESC to cancel";
+"正在录制中，确定退出吗？" = "A recording is in progress. Quit anyway?";
+"「退出并保存录制」将停止录制并保留成片；「退出并丢弃」将停止录制并删除未保存的内容。" = "“Quit and Save Recording” stops and keeps the video. “Quit and Discard” stops and deletes the unsaved recording.";
+"退出并保存录制" = "Quit and Save Recording";
+"退出并丢弃" = "Quit and Discard";
+"摄像头交付尺寸与预期不符（预期 %lld×%lld，实际 %lld×%lld），本次录制未能开始" = "Camera delivered an unexpected size (expected %lld×%lld, got %lld×%lld); recording did not start";
+"点击音效 wav 不可用（%@，帧数 %lld）：须为非空且 ≤%lld 帧的短促样本" = "Click sound wav is unusable (%@, %lld frames); it must be a non-empty short sample of at most %lld frames";

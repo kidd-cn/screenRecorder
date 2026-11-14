@@ -50,7 +50,11 @@ final class SystemAudioMixer {
             case .cannotCreateMasterFormatDescription(let status):
                 return String(format: NSLocalizedString("masterFormat 的 CMFormatDescription 创建失败（status=%lld）", comment: "msg"), status)
             case .clickEffectWavUnusable(let url, let frames):
-                return "点击音效 wav 不可用（\(url.path)，帧数 \(frames)）：须为非空且 ≤\(SystemAudioMixer.clickEffectMaxFrames) 帧的短促样本"
+                return String(
+                    format: NSLocalizedString(
+                        "点击音效 wav 不可用（%@，帧数 %lld）：须为非空且 ≤%lld 帧的短促样本",
+                        comment: "Click effect wav invalid"),
+                    url.path, frames, SystemAudioMixer.clickEffectMaxFrames)
             }
         }
     }

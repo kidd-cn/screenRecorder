@@ -69,8 +69,12 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
             case .sessionDidNotStart:
                 return NSLocalizedString("摄像头会话启动失败（设备可能被其他应用占用或已断开）", comment: "msg")
             case .frameDimensionMismatch(let expected, let actual):
-                return "摄像头交付尺寸与预期不符（预期 \(Int(expected.width))×\(Int(expected.height))，"
-                    + "实际 \(Int(actual.width))×\(Int(actual.height))），本次录制未能开始"
+                return String(
+                    format: NSLocalizedString(
+                        "摄像头交付尺寸与预期不符（预期 %lld×%lld，实际 %lld×%lld），本次录制未能开始",
+                        comment: "Camera dimension mismatch"),
+                    Int(expected.width), Int(expected.height),
+                    Int(actual.width), Int(actual.height))
             }
         }
     }
