@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- App Store 强制项（2026-11-14 上架适配） -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<!-- 摄像头：画中画 / 仅摄像头录制 / 预览窗 -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<!-- 麦克风：混音音轨 -->
+	<key>com.apple.security.device.microphone</key>
+	<true/>
+	<!-- 输出目录：用户经 NSOpenPanel 选定的目录（security-scoped bookmark 持久化） -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
+</dict>
+</plist>

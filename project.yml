@@ -34,6 +34,10 @@ targets:
         # Hummingbird；界面显示名仍是 CFBundleDisplayName「蜂鸟录屏」。
         PRODUCT_NAME: Hummingbird
         PRODUCT_MODULE_NAME: Hummingbird
+        # 上架适配（2026-11-14）：App Sandbox entitlements + 版本号（App Store 上传必需）。
+        CODE_SIGN_ENTITLEMENTS: ScreenRecorder/Hummingbird.entitlements
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
     info:
       path: ScreenRecorder/Info.plist
       properties:

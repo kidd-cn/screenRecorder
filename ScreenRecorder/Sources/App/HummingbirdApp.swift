@@ -314,6 +314,16 @@ final class AppAssembly: ObservableObject {
         // Q3 重录按钮接线（attachMarkingToggle 先例同款装配缝）：两击确认后走 restartRecording
         // 编排（丢弃 + 有界等待 idle + 绕倒计时重开，全在装配层）。
         floatingBarPanel.attachRestartRecording { [weak self] in self?.restartRecording() }
+        // 沙盒首次启动：无输出目录书签（用户尚未选择保存位置）→ 引导选择（2026-11-14
+        // 上架适配）。非沙盒构建（开发调试）不打扰——历史路径照常可用。
+        if ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                if OutputDirectoryAccess.resolve() == nil {
+                    self.presentOutputDirectoryPicker()
+                }
+            }
+        }
         // T5 pip-swap 对调按钮接线（attachRestartRecording 装配行旁）：provider 供 attach
         // 时刻初值（此后可见性/对调态一律 refreshPipSwapSurfaces 发射值直传）；toggle 翻转
         // 对调态（旗标 + 浮窗换装一体）并全面重估。
@@ -549,10 +559,33 @@ final class AppAssembly: ObservableObject {
         }
     }
 
+    /// 沙盒首次启动的输出目录引导（NSOpenPanel，仅目录）：选定后登记书签并换装
+    /// fileStore/控制器（`updateOutputDirectory` 同一出口）；取消则维持默认路径，
+    /// 后续起录/截图会因权限失败——设置页可随时重选。
+    private func presentOutputDirectoryPicker() {
+        let panel = NSOpenPanel()
+        panel.title = NSLocalizedString("选择录制保存位置", comment: "Choose output folder title")
+        panel.message = NSLocalizedString(
+            "「蜂鸟录屏」需要在您选择的文件夹中保存录像与截图。", comment: "Choose output folder message")
+        panel.prompt = NSLocalizedString("选择", comment: "Choose")
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        let movies = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask).first
+        if let movies { panel.directoryURL = movies }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in self?.updateOutputDirectory(to: url) }
+        }
+    }
+
     /// 偏好设置改输出目录（T17 验收）：settings 真源更新 + 换装 fileStore + 同步换入
     /// 控制器 store（此后 discard 删除作用于新目录成片）。
     func updateOutputDirectory(to url: URL) {
-        settings.outputDirectory = url
+        // 沙盒：经 SettingsStore 登记 security-scoped bookmark（访问权真源）。
+        settings.setOutputDirectory(url)
         // Q4：换装 store 携带同一只移出账本（记账按绝对路径跨目录存续——旧目录的已移出
         // 记录不因换目录丢失或重现）。
         let newStore = RecordingFileStore(baseDirectory: url, removedList: removedListStore)

@@ -45,9 +45,21 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(micMuted, forKey: Self.micMutedKey) }
     }
 
-    /// 默认 ~/Movies/Hummingbird（目录创建由 RecordingFileStore.ensureDirectory 负责）
+    /// 默认 ~/Movies/Hummingbird（目录创建由 RecordingFileStore.ensureDirectory 负责）。
+    /// 沙盒下访问权来自 `OutputDirectoryAccess` 的 security-scoped bookmark——变更目录
+    /// 一律经 `setOutputDirectory(_:)`（此处仅路径落库，供展示与历史迁移）。
     @Published var outputDirectory: URL {
         didSet { defaults.set(outputDirectory.path, forKey: Self.outputDirectoryKey) }
+    }
+
+    /// 换输出目录（含沙盒书签登记；测试/非沙盒同样适用——无作用域时自动降级）。
+    func setOutputDirectory(_ url: URL) {
+        do {
+            try OutputDirectoryAccess.storeBookmark(for: url, defaults: defaults)
+        } catch {
+            NSLog("SettingsStore: 输出目录书签登记失败（\(error)），本次仍切换目录")
+        }
+        outputDirectory = url
     }
 
     /// 合法值 0/3/5/10
@@ -230,7 +242,11 @@ final class SettingsStore: ObservableObject {
         self.captureMicrophone = userDefaults.object(forKey: Self.captureMicrophoneKey) as? Bool ?? true
         self.micVolume = userDefaults.object(forKey: Self.micVolumeKey) as? Double ?? 1.0
         self.micMuted = userDefaults.object(forKey: Self.micMutedKey) as? Bool ?? false
-        if let path = userDefaults.string(forKey: Self.outputDirectoryKey) {
+        // 沙盒优先：解析 security-scoped bookmark（访问权真源）；无书签回退旧路径
+        //（非沙盒历史安装），再无则默认 ~/Movies/Hummingbird（沙盒下首次启动会引导重选）。
+        if let bookmarked = OutputDirectoryAccess.resolve(defaults: userDefaults) {
+            self.outputDirectory = bookmarked
+        } else if let path = userDefaults.string(forKey: Self.outputDirectoryKey) {
             self.outputDirectory = URL(fileURLWithPath: path)
         } else {
             self.outputDirectory = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
