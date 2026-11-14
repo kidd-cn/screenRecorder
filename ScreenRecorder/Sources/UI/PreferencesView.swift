@@ -84,7 +84,11 @@ struct PreferencesView: View {
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
         }
         .padding()
-        .frame(width: 480, height: 320)
+        // 尺寸（2026-11-14 用户目验：录制源页内容装不下）：原 480×320 固定尺寸早于
+        // 三期/二期后期设置项的增长，录制源页（麦克风/画中画/光标/高亮/缩放/音效/键帽/
+        // 窗口捕获）整体溢出且无滚动。三页各自包 ScrollView（见各 tab），窗口放大到
+        // 520×560——内容仍超出时滚动可达。
+        .frame(width: 520, height: 560)
     }
 }
 
@@ -96,8 +100,9 @@ private struct GeneralTab: View {
     var onOutputDirectoryChange: (URL) -> Void
 
     var body: some View {
-        Form {
-            outputDirectoryRow
+        ScrollView(.vertical) { // 溢出可滚（窗口尺寸见 PreferencesView）
+            Form {
+                outputDirectoryRow
             Picker("倒计时", selection: $settings.countdownSeconds) {
                 Text("无").tag(0)
                 Text("3 秒").tag(3)
@@ -126,6 +131,7 @@ private struct GeneralTab: View {
             Section("编辑导出完成后（缩放分段编辑器）") {
                 Toggle("打开文件所在目录", isOn: $settings.editorPostExportRevealInFinder)
                 Toggle("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
+            }
             }
         }
     }
@@ -185,7 +191,8 @@ private struct RecordingSourcesTab: View {
     var onPickWindowTarget: () -> Void
 
     var body: some View {
-        Form {
+        ScrollView(.vertical) { // 溢出可滚（本页内容最多，2026-11-14 用户目验）
+            Form {
             Toggle("系统声音", isOn: $settings.captureSystemAudio)
             Section("麦克风") {
                 Toggle("包含麦克风", isOn: $settings.captureMicrophone)
@@ -271,6 +278,7 @@ private struct RecordingSourcesTab: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+            }
         }
     }
 
@@ -301,14 +309,16 @@ private struct RecordingSourcesTab: View {
 /// 「默认 ⇧⌘M 且可改」的用户面落点——与其他三键同款 Recorder 行。
 private struct ShortcutsTab: View {
     var body: some View {
-        Form {
-            KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
-            KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
-            KeyboardShortcuts.Recorder("录制所选窗口：", name: .startWindowRecording)
-            KeyboardShortcuts.Recorder("边录边标记：", name: .toggleMarkingTools)
-            Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+        ScrollView(.vertical) {
+            Form {
+                KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
+                KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
+                KeyboardShortcuts.Recorder("录制所选窗口：", name: .startWindowRecording)
+                KeyboardShortcuts.Recorder("边录边标记：", name: .toggleMarkingTools)
+                Text("快捷键在任意应用前台时生效（系统级注册，无需额外权限）。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

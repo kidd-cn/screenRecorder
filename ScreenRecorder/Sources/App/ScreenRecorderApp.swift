@@ -729,8 +729,10 @@ final class AppAssembly: ObservableObject {
     /// 需激活再前置，避免窗口落在其他应用后面。
     func openPreferences() {
         if preferencesWindowController == nil {
+            // 520×560（2026-11-14 用户目验：原 480×320 装不下录制源页全部设置项；
+            // 三页已各自加 ScrollView，窗口按内容主档放大）。
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 480, height: 320),
+                contentRect: NSRect(x: 0, y: 0, width: 520, height: 560),
                 styleMask: [.titled, .closable],
                 backing: .buffered,
                 defer: false
