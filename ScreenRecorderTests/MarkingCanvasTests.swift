@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// MarkingStroke / MarkingCanvas 纯逻辑钉测（Task 4 简报 Step 1）。
 /// 全部纯值逻辑驱动（无 Date、无屏幕 API——headless 硬纪律）；逆映射用

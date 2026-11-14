@@ -62,10 +62,10 @@ final class SystemAudioMixer {
     private let ring: RingBuffer
     private let stateLock = NSLock()
     /// 打包与交付专用串行队列：单消费者，保证样本与时间轴顺序；stop() 围栏排空。
-    private let deliveryQueue = DispatchQueue(label: "screenRecorder.SystemAudioMixer.delivery", qos: .userInitiated)
+    private let deliveryQueue = DispatchQueue(label: "hummingbird.SystemAudioMixer.delivery", qos: .userInitiated)
     /// 麦克风转换段交付专用串行队列：mic tap（渲染线程）只转换 + 入队，ring 写入（ring 自带锁）
     /// 在此执行——与 deliveryQueue 同构；stop()/setMicMuted 围栏排空。
-    private let micDeliveryQueue = DispatchQueue(label: "screenRecorder.SystemAudioMixer.micDelivery", qos: .userInitiated)
+    private let micDeliveryQueue = DispatchQueue(label: "hummingbird.SystemAudioMixer.micDelivery", qos: .userInitiated)
 
     /// 混音总增益封顶（简报 Step 3 削波封顶）：mainMixer tap 在 fader 之后，该值同时缩放系统声
     /// 与麦克风的录制冷平；监听静音由下游音量 0 的 silencer 负责，与本增益无关（T8 裁决）。

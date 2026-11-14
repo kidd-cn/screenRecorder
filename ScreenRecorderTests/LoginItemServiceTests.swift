@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// LaunchAtLoginCoordinator 地板钉测（Task 11 简报 Step 1）：fake 注入走
 /// `LoginItemRegistering` 缝——SMAppService 注册是进程级副作用，测试绝不触真；

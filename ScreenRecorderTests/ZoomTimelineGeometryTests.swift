@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// 时间线条几何钉测（交互层修复）：时间 → 像素映射、把手/段体/背景命中分区、
 /// 播放头钳制。旧版这些常量埋在 SwiftUI 视图里（DragGesture 坐标换算），

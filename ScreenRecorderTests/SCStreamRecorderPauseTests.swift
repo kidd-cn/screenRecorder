@@ -4,7 +4,7 @@ import CoreMedia
 import CoreVideo
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// SCStreamRecorder 暂停/恢复生命周期边界（Task 10）。不启动真实采集（SCStream 需要
 /// 屏幕录制权限，无头不可用），只验证「未开始录制」的边界语义；暂停门控/平移/单调

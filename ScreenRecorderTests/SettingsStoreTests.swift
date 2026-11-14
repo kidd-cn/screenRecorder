@@ -2,7 +2,7 @@ import XCTest
 import AVFoundation
 import CoreGraphics
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 final class SettingsStoreTests: XCTestCase {
     private static let suiteName = "test.settings"
@@ -307,6 +307,6 @@ final class SettingsStoreTests: XCTestCase {
 
     private var defaultOutputDirectory: URL {
         FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("ScreenRecorder", isDirectory: true)
+            .appendingPathComponent("Hummingbird", isDirectory: true)
     }
 }

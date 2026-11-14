@@ -2,7 +2,7 @@ import Combine
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// ZoomEditor（P9/T18 缩放分段编辑器）逻辑层无头钉测：brief Step 1 四测试
 /// （testDraftRoundTrip / testDraftDeletedWithMovie / testEstimateFormula /

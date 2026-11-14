@@ -3,7 +3,7 @@ import CoreMedia
 import CoreVideo
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 像素缓冲夹具（32BGRA 纯色填充 + 采样，PiPCompositorTests 同款口径）
 

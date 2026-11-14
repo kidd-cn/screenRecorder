@@ -1,7 +1,7 @@
 import AppKit
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 测试夹具
 

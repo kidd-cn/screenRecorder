@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 夹具（无头可构造中性快照，同 WindowPickerTests 纪律）
 

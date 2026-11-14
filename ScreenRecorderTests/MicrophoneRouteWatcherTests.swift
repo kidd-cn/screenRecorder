@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// MicrophoneRouteWatcher 内部分发逻辑钉测（与 SourceLossMonitorTests 同型：AVAudioEngine
 /// 配置变化通知无法无头伪造，经 `simulateConfigurationChange()` 测分发——与生产通知观察者

@@ -3,7 +3,7 @@ import CoreMedia
 import CoreVideo
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// CameraOnlyRecorder（P7b 仅摄像头录制）无头钉测：真 writer 会话 + 假帧源（照
 /// AssetWriterSessionTests / CameraPiPTests 的假源惯例，参考 T13

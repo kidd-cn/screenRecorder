@@ -1,7 +1,7 @@
 import AppKit
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 测试夹具（与 CaptureControllerTests 同款：受控门闩 + FakeSession）
 

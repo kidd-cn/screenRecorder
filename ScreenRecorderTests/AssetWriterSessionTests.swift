@@ -1,7 +1,7 @@
 import AVFoundation
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// AssetWriterSession 无头回归：真实 AVFoundation，不依赖 SCStream / 权限。
 /// 焦点是「绝不覆盖既有录像」的预检 + claim 双保险与 macOS 27 writer 拒写已存在文件的适配。

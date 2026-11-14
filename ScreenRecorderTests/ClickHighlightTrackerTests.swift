@@ -3,7 +3,7 @@ import CoreGraphics
 import Foundation
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - ClickOverlayState（简报 Produces 钉测）
 

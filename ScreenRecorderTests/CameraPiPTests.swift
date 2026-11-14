@@ -5,7 +5,7 @@ import CoreMedia
 import CoreVideo
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - CameraPiPController（可诊断错误 + 锁保护 latestPixelBuffer 语义）
 

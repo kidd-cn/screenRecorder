@@ -1,7 +1,7 @@
 import XCTest
 import CoreMedia
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 final class PauseTimeTrackerTests: XCTestCase {
     // MARK: - Brief Step 1 四条断言

@@ -1,7 +1,7 @@
 import AppKit
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// 文件列表右键菜单规格钉测（交互层修复）：条目/顺序/置灰语义与原 SwiftUI
 /// `contextMenu(forSelectionType:)` 菜单逐字一致；NSMenu 组装须镜像规格。

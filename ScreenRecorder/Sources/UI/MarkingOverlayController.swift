@@ -99,7 +99,7 @@ final class MarkingOverlayView: NSView {
 /// - **点击系抑制**（spec §5 P2：绘图拖拽不得触发点击高亮/缩放/音效）：覆盖层是本 App
 ///   自己的窗口，全局 monitor 收不到（计划钉定假设成立）；但 tracker 的**本地 monitor
 ///   收得到**本 App 窗口的 mouseDown——经 `ClickHighlightTracker.isLocalClickSuppressed`
-///   缝按窗口 identifier 过滤（装配层接线，见 ScreenRecorderApp）。
+///   缝按窗口 identifier 过滤（装配层接线，见 HummingbirdApp）。
 @MainActor
 final class MarkingOverlayController: ObservableObject {
     /// 覆盖层窗口标识（点击系抑制缝按此识别本类面板）。

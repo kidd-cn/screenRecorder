@@ -1,7 +1,7 @@
 import Combine
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// RecordingScheduler 地板钉测（P6b，Task 12 简报 Step 1 七条）：全部依赖走 init 注入缝
 /// ——now / timerFactory / start / stop / notify / notifyMissed / isLocked / isBusy 均为

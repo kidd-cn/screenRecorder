@@ -2,7 +2,7 @@ import AVFoundation
 import CoreMedia
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// SystemAudioMixer 可无头验证的纯逻辑回归：环形缓冲溢出丢旧 / 欠载、gate 裁剪决策、
 /// PCM ↔ CMSampleBuffer 往返。AVAudioEngine 本体（实时渲染）不在此覆盖——走 T11 后的

@@ -1,7 +1,7 @@
 import XCTest
 import ScreenCaptureKit
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 测试夹具
 
@@ -933,7 +933,7 @@ final class CaptureControllerTests: XCTestCase {
     /// Fix A 装配级断源失败钉测（spec §5 缺口）：摄像头断源全链真驱动——CameraPiPController
     /// 看门狗真判定路径（armSourceLossWatchdog + watchdogTickForTesting，越 3s 阈值 fire-once）
     /// → window 侧会话级转发（beginRecording 接线 camera.onSourceLost）→ 装配层
-    /// `onCameraSourceLost` 闭包（ScreenRecorderApp.swift 同款复刻）→
+    /// `onCameraSourceLost` 闭包（HummingbirdApp.swift 同款复刻）→
     /// `handleSessionFailure(CameraSourceLostError())` → 失败收场自动保存。镜像
     /// `testDisplayLossDuringRecordingAutoSavesAndNotifies` 模式（装配层闭包无头不可经
     /// AppAssembly 构造，测试内复刻同款接线——披露于报告）。
@@ -947,7 +947,7 @@ final class CaptureControllerTests: XCTestCase {
             windowFactory: { CameraPiPWindow.makeDefault() },
             startCamera: { capturedCamera = $0 },
             stopCamera: { _ in })
-        // 装配层接线复刻（ScreenRecorderApp.swift:229 同款）：window 侧断源 → 失败收场。
+        // 装配层接线复刻（HummingbirdApp.swift:229 同款）：window 侧断源 → 失败收场。
         pipController.onCameraSourceLost = { [weak controller] in
             Task { @MainActor in controller?.handleSessionFailure(CameraSourceLostError()) }
         }

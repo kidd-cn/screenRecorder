@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// 可编程假 provider：直接返回预设字节数；置 nil 模拟卷查询失败（路径不存在等）。
 private final class FakeFreeSpaceProvider: DiskFreeSpaceProviding {

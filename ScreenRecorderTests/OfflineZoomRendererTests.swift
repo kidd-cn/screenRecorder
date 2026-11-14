@@ -4,7 +4,7 @@ import CoreMedia
 import CoreVideo
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// OfflineZoomRenderer（P9 离线缩放渲染引擎）无头钉测：
 /// - `ZoomSegment.validate`（排序 + 钳制 + 去重叠保留先者 + 非法段丢弃）；

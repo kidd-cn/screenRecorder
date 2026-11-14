@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - DiscardConfirmation（验收修复缺陷②抽出逻辑）无头单测
 

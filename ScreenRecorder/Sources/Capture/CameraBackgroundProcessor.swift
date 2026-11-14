@@ -30,7 +30,7 @@ final class VisionPersonSegmenter: PersonSegmenting {
     static let shared = VisionPersonSegmenter()
 
     private let queue = DispatchQueue(
-        label: "screenRecorder.CameraBackground.vision", qos: .userInitiated)
+        label: "hummingbird.CameraBackground.vision", qos: .userInitiated)
 
     func segmentationMask(for pixelBuffer: CVPixelBuffer) async -> CIImage? {
         await withCheckedContinuation { continuation in

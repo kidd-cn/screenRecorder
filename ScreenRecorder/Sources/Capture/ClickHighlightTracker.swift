@@ -68,7 +68,7 @@ final class ClickHighlightTracker: NSObject {
     /// 的共同上游，掐住记录即全链静默。背景（Task 5 调查结论）：标记覆盖层/工具条是本 App
     /// 自己的窗口，其按下事件不达全局 monitor（全局监听收不到被本 App 处理的事件）；但
     /// **本地 monitor 收得到**本 App 窗口的 mouseDown——须按事件目标窗口显式过滤（装配层
-    /// 注入按 `NSWindow.identifier` 判定的闭包，见 ScreenRecorderApp）。本地 monitor 主线程
+    /// 注入按 `NSWindow.identifier` 判定的闭包，见 HummingbirdApp）。本地 monitor 主线程
     /// 调用，读写与 `onClick` 同一锁纪律（锁内读、锁外调）。
     var isLocalClickSuppressed: ((NSEvent) -> Bool)? {
         get {

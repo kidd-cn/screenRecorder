@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 final class RecordingFileStoreTests: XCTestCase {
     private var directory: URL!

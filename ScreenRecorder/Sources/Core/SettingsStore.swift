@@ -45,7 +45,7 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(micMuted, forKey: Self.micMutedKey) }
     }
 
-    /// 默认 ~/Movies/ScreenRecorder（目录创建由 RecordingFileStore.ensureDirectory 负责）
+    /// 默认 ~/Movies/Hummingbird（目录创建由 RecordingFileStore.ensureDirectory 负责）
     @Published var outputDirectory: URL {
         didSet { defaults.set(outputDirectory.path, forKey: Self.outputDirectoryKey) }
     }
@@ -234,7 +234,7 @@ final class SettingsStore: ObservableObject {
             self.outputDirectory = URL(fileURLWithPath: path)
         } else {
             self.outputDirectory = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("ScreenRecorder", isDirectory: true)
+                .appendingPathComponent("Hummingbird", isDirectory: true)
         }
         self.countdownSeconds = Self.normalizedCountdown(userDefaults.object(forKey: Self.countdownSecondsKey) as? Int)
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false

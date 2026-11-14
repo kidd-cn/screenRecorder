@@ -41,11 +41,11 @@ final class DiskSpaceMonitor {
     private let hysteresis: Int64 = 500_000_000
 
     /// 全部可变状态只在 stateQueue 上触碰；回调在 sync 块外投递，不会死锁。
-    private let stateQueue = DispatchQueue(label: "screenRecorder.DiskSpaceMonitor.state")
+    private let stateQueue = DispatchQueue(label: "hummingbird.DiskSpaceMonitor.state")
     private var warnArmed = true
     private var stopArmed = true
     private var timer: DispatchSourceTimer?
-    private let timerQueue = DispatchQueue(label: "screenRecorder.DiskSpaceMonitor.timer", qos: .utility)
+    private let timerQueue = DispatchQueue(label: "hummingbird.DiskSpaceMonitor.timer", qos: .utility)
 
     init(provider: DiskFreeSpaceProviding,
          url: URL,

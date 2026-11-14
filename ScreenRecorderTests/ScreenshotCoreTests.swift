@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// `ScreenshotCore` 无头钉测（Q1）：合成位图（CGContext 画纯色），断言裁剪尺寸与 PNG
 /// 魔数。裁剪契约钉定（审查轮 1 修正，规格 §Q1「与区域录制同一套换算」优先）：region

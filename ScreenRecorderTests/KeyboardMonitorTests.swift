@@ -1,7 +1,7 @@
 import AppKit
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 假事件源（EventSource 缝：测试经假源发事件，不触真实 NSEvent monitor）
 

@@ -1,7 +1,7 @@
 import AppKit
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 夹具
 
@@ -212,7 +212,7 @@ final class WindowPickerEnumeratedAppsTests: XCTestCase {
             makeWindow(id: 2, title: "表格", appName: "Alpha", bundleID: "com.alpha.app"),
             makeWindow(id: 3, title: "终端", appName: "Beta", bundleID: "com.beta.app"),
             makeWindow(id: 4, title: "编辑器", appName: "Beta", bundleID: "com.beta.app"),
-            makeWindow(id: 5, title: "浮条", appName: "ScreenRecorder", bundleID: "com.screenrecorder.app"),
+            makeWindow(id: 5, title: "浮条", appName: "Hummingbird", bundleID: "com.screenrecorder.app"),
         ]
         let apps = try await WindowPicker.enumeratedApps(
             preflight: { true },

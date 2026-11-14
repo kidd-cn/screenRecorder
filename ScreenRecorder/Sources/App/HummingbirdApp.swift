@@ -1255,9 +1255,9 @@ private struct WindowPickerHostView: View {
 @MainActor
 private final class ScheduledMissedNotifyDelegate: NSObject, @MainActor UNUserNotificationCenterDelegate {
     /// 错过通知的 category 标识（内容侧 `categoryIdentifier` 与此对齐）。
-    static let categoryID = "screenRecorder.scheduledMissed"
+    static let categoryID = "hummingbird.scheduledMissed"
     /// 「开始录制」动作标识。
-    static let startActionID = "screenRecorder.scheduledMissed.start"
+    static let startActionID = "hummingbird.scheduledMissed.start"
     /// 最近一条错过通知挂载的「开始录制」动作（主 actor 内挂载与调用；后投递覆盖前投递——
     /// 两动作同源同语义，覆盖无行为差异）。
     var startAction: (() -> Void)?
@@ -1438,7 +1438,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct ScreenRecorderApp: App {
+struct HummingbirdApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var assembly: AppAssembly
 

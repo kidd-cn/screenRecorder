@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// AutoZoomState 时间线 + ZoomTransforms 钳制钉测（Task 1 简报 Step 1）。
 /// 全部经注入 now 驱动（headless 硬规矩：逻辑内不读墙钟），断言走「放大窗口 =

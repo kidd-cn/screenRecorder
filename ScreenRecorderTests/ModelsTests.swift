@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// CaptureMode 序列化钉测（P3a）：`lastCaptureMode` 以 JSON 整只落 UserDefaults
 ///（T17，⇧⌘R 上次使用模式）——新增 `.app(bundleID:)` 后 Codable 往返必须无损。

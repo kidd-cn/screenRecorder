@@ -117,8 +117,8 @@ final class SCStreamRecorder: NSObject {
     private(set) var lastError: Error?
 
     private let config: RecordingConfiguration
-    private let videoQueue = DispatchQueue(label: "screenRecorder.SCStreamRecorder.video", qos: .userInteractive)
-    private let audioQueue = DispatchQueue(label: "screenRecorder.SCStreamRecorder.audio", qos: .userInitiated)
+    private let videoQueue = DispatchQueue(label: "hummingbird.SCStreamRecorder.video", qos: .userInteractive)
+    private let audioQueue = DispatchQueue(label: "hummingbird.SCStreamRecorder.audio", qos: .userInitiated)
     private let stateLock = NSLock()
     private var stream: SCStream?
     private var writerSession: AssetWriterSession?

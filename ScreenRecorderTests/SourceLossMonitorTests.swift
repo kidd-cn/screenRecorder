@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// SourceLossMonitor 内部分发逻辑钉测（brief Step 1：Fake 通知中心不便测，经
 /// `simulateDisplayRemoved()` 测内部分发——与生产 CGDisplayReconfigurationCallBack

@@ -1,7 +1,7 @@
 import Combine
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 @MainActor
 final class RecordingListViewModelTests: XCTestCase {

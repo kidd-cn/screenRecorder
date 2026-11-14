@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// Q6 编辑导出后动作「计划面」钉测（纯函数）：动作顺序（reveal 在前钉定）、删除
 /// 三重校验（开关开 && 成片在盘 && 字节 > 0）、草稿随删搭载（draftURL nil 则不带）。

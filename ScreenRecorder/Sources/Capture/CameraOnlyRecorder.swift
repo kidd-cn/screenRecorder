@@ -109,8 +109,8 @@ final class CameraOnlyRecorder: NSObject, AVCaptureVideoDataOutputSampleBufferDe
     private let config: RecordingConfiguration
     private let session = AVCaptureSession()
     /// start/stop 的会话装配与启停专用串行队列（startRunning/stopRunning 阻塞式，不占调用线程）。
-    private let sessionQueue = DispatchQueue(label: "screenRecorder.CameraOnlyRecorder.session", qos: .userInitiated)
-    private let videoQueue = DispatchQueue(label: "screenRecorder.CameraOnlyRecorder.video", qos: .userInteractive)
+    private let sessionQueue = DispatchQueue(label: "hummingbird.CameraOnlyRecorder.session", qos: .userInitiated)
+    private let videoQueue = DispatchQueue(label: "hummingbird.CameraOnlyRecorder.video", qos: .userInteractive)
     private let stateLock = NSLock()
     private var writerSession: AssetWriterSession?
     /// 混音器（含 engine；captureMicrophone 且启动成功时非 nil）。

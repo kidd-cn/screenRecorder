@@ -2,7 +2,7 @@ import AVFoundation
 import CoreMedia
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// 暂停媒体时钟（Task 10）无头单测：暂停门控、时间平移、每轨单调护栏，
 /// 以及音频 CMSampleBuffer 的平移复制（recorder 音频 append 的落盘口径）。

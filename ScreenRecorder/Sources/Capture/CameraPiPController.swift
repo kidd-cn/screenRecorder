@@ -71,9 +71,9 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     /// FIFO 排队——「旧 stopRunning 落在新 startRunning 之后」的乱序不可能发生（那会使摄像头
     /// 在新一场录制中途被静默关停、成片 PiP 冻结在最后一帧且无错误）。串行序即 happens-before。
     private let lifecycleQueue = DispatchQueue(
-        label: "screenRecorder.CameraPiP.lifecycle", qos: .userInitiated)
+        label: "hummingbird.CameraPiP.lifecycle", qos: .userInitiated)
     /// 样本回调专用串行队列（简报钉死；与屏幕采集的 video 队列互不干扰）。
-    private let videoQueue = DispatchQueue(label: "screenRecorder.CameraPiP.video", qos: .userInitiated)
+    private let videoQueue = DispatchQueue(label: "hummingbird.CameraPiP.video", qos: .userInitiated)
     /// `latestFrame` 的锁（帧写在自有 video 队列，读在 SCStream video 队列——跨队列锁保护；
     /// P5 起同锁保护背景处理器与处理流水线序号——装配主线程写、video/协作线程读写）。
     private let frameLock = NSLock()
@@ -157,7 +157,7 @@ final class CameraPiPController: NSObject, AVCaptureVideoDataOutputSampleBufferD
     private var watchdogTimer: DispatchSourceTimer?
     /// 看门狗节拍队列（utility，SourceLossMonitor appPollQueue 同款）。
     private let watchdogQueue = DispatchQueue(
-        label: "screenRecorder.CameraPiP.watchdog", qos: .utility)
+        label: "hummingbird.CameraPiP.watchdog", qos: .utility)
 
     /// 预览层（`start()` 成功后非 nil；浮窗安装，浮窗负责 frame 与圆角裁切）。
     private(set) var previewLayer: AVCaptureVideoPreviewLayer?

@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 // MARK: - 测试夹具（与 CountdownOverlayControllerTests 同款：注入 provider + 记录面板）
 

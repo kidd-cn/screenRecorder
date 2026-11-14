@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// 可编程假 provider（同 DiskSpaceMonitorTests 模式）：直接返回预设字节数。
 private final class FakeFreeSpaceProvider: DiskFreeSpaceProviding {

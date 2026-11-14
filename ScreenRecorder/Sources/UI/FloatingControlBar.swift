@@ -401,7 +401,7 @@ final class FloatingBarHostingView: NSHostingView<FloatingControlBar> {
 }
 
 /// 浮条的 NSPanel 承载（简报：`styleMask: [.borderless, .nonactivatingPanel]`、
-/// `level: .floating`、默认屏幕顶部居中、可拖动）。由 ScreenRecorderApp 装配点创建并持有；
+/// `level: .floating`、默认屏幕顶部居中、可拖动）。由 HummingbirdApp 装配点创建并持有；
 /// 显隐随 `CaptureController.state`：`.recording`/`.paused` 显示，其余（idle/countdown/
 /// finishing）隐藏。附加裁定：`canJoinAllSpaces + fullScreenAuxiliary`——全屏应用录制时浮条
 /// 仍可见且不抢占全屏空间；`orderFrontRegardless` 不夺焦点（配合 nonactivatingPanel）。

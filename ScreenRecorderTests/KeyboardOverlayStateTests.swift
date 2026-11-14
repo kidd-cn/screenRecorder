@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// KeyboardOverlayState 键帽聚合状态机钉测（Task 8 简报 Step 1）。
 /// 全部经注入 `now` 驱动（headless 硬规矩：逻辑内不读墙钟，与 AutoZoomStateTests

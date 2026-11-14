@@ -86,7 +86,7 @@ final class SourceLossMonitor {
     private var registered = false
     /// App 模式窗口计数轮询 timer（P3a；仅 appBundleID 非 nil 时在位，状态锁内换装）。
     private var appPollTimer: DispatchSourceTimer?
-    private let appPollQueue = DispatchQueue(label: "screenRecorder.SourceLossMonitor.appPoll", qos: .utility)
+    private let appPollQueue = DispatchQueue(label: "hummingbird.SourceLossMonitor.appPoll", qos: .utility)
     /// App 模式窗口计数轮询间隔（秒）。窗口关闭是用户可感知操作（比磁盘耗尽更频繁），
     /// 间隔取 2s：全关自动保存的延迟可感知但不抖动。
     private static let appPollInterval: TimeInterval = 2

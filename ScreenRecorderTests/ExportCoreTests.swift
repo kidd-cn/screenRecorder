@@ -5,7 +5,7 @@ import ImageIO
 import UniformTypeIdentifiers
 import XCTest
 
-@testable import ScreenRecorder
+@testable import Hummingbird
 
 /// ExportCore（P8 导出核心）无头钉测：`gifData` 纯函数（均匀抽帧/钳制/缩放/GIF 编码/
 /// loop 属性）、输出命名冲突惯例（nextFileURL 同款 `名 (n)` 递增）、压缩预设枚举到
