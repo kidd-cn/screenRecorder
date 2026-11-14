@@ -294,6 +294,7 @@ struct MenuBarView: View {
                 onTakeRegionScreenshot()
             }
             displayMenuTile("全屏截图", icon: "photo", tint: .green) {
+                dismissPanelWindow() // 整屏截图不收面板会把自己拍进去（CG 路径即刻取帧）
                 onTakeFullScreenScreenshot($0)
             }
         }
@@ -459,7 +460,9 @@ private struct DisplayMenuTile: View {
 
 /// 面板窗口标识器：随本视图挂进 MenuBarExtra 面板窗口，给窗口打上
 /// `SRMenuBarPanel` identifier——`dismissPanelWindow` 据此定位（`.window` 面板无
-/// 编程关闭 API，窗口也不便按宿主泛型名识别）。
+/// 编程关闭 API，窗口也不便按宿主泛型名识别）。同窗口补 `sharingType = .none`
+/// 显式采集排除（二期教训：SCK 不隐式排除本进程窗口；面板是浮窗/浮条/全屏视图
+/// 之外的第四类悬浮 UI——否则面板入成片/入整屏截图，2026-11-14 用户目验）。
 private struct PanelWindowMarker: NSViewRepresentable {
     static let identifier = NSUserInterfaceItemIdentifier("SRMenuBarPanel")
 
@@ -467,12 +470,14 @@ private struct PanelWindowMarker: NSViewRepresentable {
         let view = NSView()
         DispatchQueue.main.async { [weak view] in
             view?.window?.identifier = Self.identifier
+            view?.window?.sharingType = .none
         }
         return view
     }
 
     func updateNSView(_ view: NSView, context: Context) {
         view.window?.identifier = Self.identifier
+        view.window?.sharingType = .none
     }
 }
 
