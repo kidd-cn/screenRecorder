@@ -234,16 +234,17 @@ private struct RecordingSourcesTab: View {
             Toggle("系统声音", isOn: $settings.captureSystemAudio)
             Section("麦克风") {
                 Toggle("包含麦克风", isOn: $settings.captureMicrophone)
-                Toggle("录制中静音麦克风", isOn: $settings.micMuted)
+                Toggle("录制中静音", isOn: $settings.micMuted)
                 HStack {
-                    Text("麦克风音量")
+                    Text("音量")
                     Slider(value: $settings.micVolume, in: 0...1)
                         .disabled(!settings.captureMicrophone)
                     Text("\(Int((settings.micVolume * 100).rounded()))%")
                         .monospacedDigit()
                         .frame(minWidth: 44, alignment: .trailing)
                 }
-                Text("「包含麦克风」在开始录制时生效；「录制中静音麦克风」与音量在录制中改动实时生效。")
+                // 文案精简（2026-11-14 用户要求与快捷键页同法）：原两句全句改为两短语。
+                Text("包含麦克风：开录时生效；静音与音量：实时生效。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -259,12 +260,12 @@ private struct RecordingSourcesTab: View {
                 Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
             }
             .disabled(!settings.pipEnabled)
-            Text("摄像头背景实时生效：录制中切换，画中画与成片立即跟随。")
+            Text("实时生效。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             // Q2 录制鼠标光标：默认开（既有行为）；开录快照语义（同点击高亮——下一场录制生效）。
-            Toggle("录制鼠标光标", isOn: $settings.captureMouseCursor)
-            Toggle("鼠标点击高亮", isOn: $settings.clickHighlightEnabled)
+            Toggle("录制光标", isOn: $settings.captureMouseCursor)
+            Toggle("点击高亮", isOn: $settings.clickHighlightEnabled)
             // P1a 点击自动缩放：opt-in 默认关（快照语义同点击高亮——下一场录制生效）；
             // 档位三选与 SettingsStore 的钳制档位一一对应。
             Toggle("点击自动缩放", isOn: $settings.autoZoomEnabled)
@@ -280,7 +281,7 @@ private struct RecordingSourcesTab: View {
             // P4 键盘按键可视化：opt-in 默认关。enabled 是开录快照语义（下一场录制生效）；
             // 颜色/字号/停留时长是 live 语义（键帽样式逐帧经 provider 读当前设置，改动对
             // 进行中的录制即时生效，SettingsStore 载入野值钳回默认档）。
-            Section("键盘按键可视化") {
+            Section("按键可视化") {
                 Toggle("启用", isOn: $settings.keyboardOverlayEnabled)
                 Picker("颜色", selection: $settings.keyboardOverlayColorIsAlternate) {
                     Text("主色").tag(false)
@@ -302,10 +303,10 @@ private struct RecordingSourcesTab: View {
                 }
                 .disabled(!settings.keyboardOverlayEnabled)
                 // 说明行（简报钉定原文两行，逐字）。
-                Text("拼音输入法组合期显示原始字母")
+                Text("拼音组合期显示原始字母")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                Text("检测到安全输入时暂停显示")
+                Text("安全输入时暂停显示")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
