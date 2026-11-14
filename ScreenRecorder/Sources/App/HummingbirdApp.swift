@@ -415,6 +415,8 @@ final class AppAssembly: ObservableObject {
     ///（session finish 先摘窗再回调），此处再留一次短暂让步（brief 认可的工程缓解）——
     /// 防窗口服务器合成滞后把遮罩残影拍进整屏图（全屏路径无遮罩，让步无害）。
     func takeScreenshot(displayID: CGDirectDisplayID, regionInGlobalPoints: CGRect?) async {
+        // 沙盒兜底：保存目录无访问权时引导重选（截图写盘同样受沙盒约束）。
+        guard ensureOutputAccess() else { return }
         // 菜单项已按状态置灰，此 guard 兜非菜单路径：截图不与录制会话并发。
         guard controller.state == .idle else {
             NSLog("Screenshot: 忽略截图入口（当前状态非 idle：\(controller.state)）")
@@ -470,6 +472,8 @@ final class AppAssembly: ObservableObject {
     /// `startScheduledRecording` await 真实 begin 结果（其余调用方 @discardableResult 不变）。
     @discardableResult
     private func startRecording(mode: CaptureMode, bypassCountdown: Bool = false) -> Task<Void, Never> {
+        // 沙盒兜底（2026-11-14）：保存目录无访问权时引导重选，而非静默起录失败。
+        guard ensureOutputAccess() else { return Task {} }
         settings.lastCaptureMode = mode
         // 标记会话态复位（计划钉定「每次录制重新开关」——非持久化、跨录制不保留）：
         // 关闭开关（显隐订阅随之收起覆盖层/工具条）+ 画布清空（新录制从空白开始，
@@ -557,6 +561,28 @@ final class AppAssembly: ObservableObject {
         case .idle, .countdown, .finishing:
             break
         }
+    }
+
+    /// 保存目录可用性检查（沙盒兜底）：非沙盒恒 true；沙盒内目录/其父目录不可写
+    /// （无书签或书签失效）→ 弹目录选择并返回 false（调用方放弃本次操作）。
+    @discardableResult
+    private func ensureOutputAccess() -> Bool {
+        guard ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil else {
+            return true
+        }
+        let fm = FileManager.default
+        let dir = settings.outputDirectory
+        if fm.fileExists(atPath: dir.path) {
+            if fm.isWritableFile(atPath: dir.path) { return true }
+        } else {
+            let parent = dir.deletingLastPathComponent()
+            if fm.fileExists(atPath: parent.path), fm.isWritableFile(atPath: parent.path) {
+                return true
+            }
+        }
+        NSLog("Hummingbird: 保存目录不可写（沙盒未授权），引导重选：\(dir.path)")
+        presentOutputDirectoryPicker()
+        return false
     }
 
     /// 沙盒首次启动的输出目录引导（NSOpenPanel，仅目录）：选定后登记书签并换装
