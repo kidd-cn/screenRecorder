@@ -1,9 +1,10 @@
 name: Hummingbird
 options:
   createIntermediateGroups: true
-  # 本地化（2026-11-14）：源语言简体中文，资源含 zh-Hans/en 两套 .lproj。
-  developmentLanguage: zh-Hans
-  knownRegions: [zh-Hans, en, Base]
+  # 本地化（2026-11-14）：资源含 zh-Hans/en 两套 .lproj；开发语言设为 en，
+  # 使「系统为其他语言」时回退英文（而非中文）。
+  developmentLanguage: en
+  knownRegions: [en, zh-Hans, Base]
 packages:
   KeyboardShortcuts:
     url: https://github.com/sindresorhus/KeyboardShortcuts
