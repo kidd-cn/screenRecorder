@@ -92,6 +92,8 @@ final class AppAssembly: ObservableObject {
     private var recordingListWindowController: NSWindowController?
     /// 摄像头预览窗（2026-11-14）：仅 cameraOnly 场显示（state 订阅驱动，装配红线归本容器）。
     private let cameraPreviewWindow = CameraPreviewWindow()
+    /// 关于窗（2026-11-14）：自建内容窗替代系统标准面板（后者信息量过低）。
+    private let aboutWindow = AboutWindowController()
     /// 预览窗订阅保活（与容器同寿）。
     private var cameraPreviewCancellables: Set<AnyCancellable> = []
 
@@ -727,6 +729,11 @@ final class AppAssembly: ObservableObject {
 
     /// 打开偏好设置窗口（菜单「偏好设置…」入口）：懒建单实例、复用；LSUIElement 应用
     /// 需激活再前置，避免窗口落在其他应用后面。
+    /// 菜单「关于」入口：自建关于窗（图标/名称/版本/功能清单/快捷键/版权）。
+    func openAbout() {
+        aboutWindow.show()
+    }
+
     func openPreferences() {
         if preferencesWindowController == nil {
             // 520×560（2026-11-14 用户目验：原 480×320 装不下录制源页全部设置项；
@@ -1429,7 +1436,8 @@ struct ScreenRecorderApp: App {
                 onOpenRecordingList: { assembly.openRecordingList() },
                 onOpenScheduledPanel: { assembly.openScheduledRecordingPanel() },
                 onCancelScheduled: { assembly.scheduler.cancel() },
-                onOpenPreferences: { assembly.openPreferences() }
+                onOpenPreferences: { assembly.openPreferences() },
+                onOpenAbout: { assembly.openAbout() }
             )
         } label: {
             // T19：状态图标（idle/countdown/recording/paused/finishing 逐态换装），

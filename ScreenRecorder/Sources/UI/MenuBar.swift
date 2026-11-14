@@ -51,6 +51,9 @@ struct MenuBarView: View {
     let onCancelScheduled: () -> Void
     /// 打开偏好设置窗口（窗口与控制器归 AppAssembly，见 T17 装配红线）。
     let onOpenPreferences: () -> Void
+    /// 打开关于窗（2026-11-14：自建关于窗替代系统标准面板——后者只有名称/版本，
+    /// 用户反馈「点关于无任何内容」）。
+    let onOpenAbout: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: OmiStyle.sectionSpacing) {
@@ -373,8 +376,8 @@ struct MenuBarView: View {
                 Divider()
                 HStack(spacing: 16) {
                     functionRow(icon: "info.circle", tint: .gray, title: "关于") {
-                        dismissPanelWindow() // 关于面板同为普通层窗口，先收面板
-                        NSApplication.shared.orderFrontStandardAboutPanel(nil)
+                        dismissPanelWindow() // 关于窗同为普通层窗口，先收面板
+                        onOpenAbout()
                     }
                     functionRow(icon: "power", tint: .red, title: "退出") {
                         NSApplication.shared.terminate(nil)
