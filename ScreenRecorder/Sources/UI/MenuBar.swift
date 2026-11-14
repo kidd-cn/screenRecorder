@@ -72,6 +72,33 @@ struct MenuBarView: View {
         .padding(12)
         .frame(width: 312)
         .background(OmiStyle.panelBackground)
+        .background(PanelWindowMarker()) // 面板窗口标识（dismissPanelWindow 定位用）
+        // 起录自动收面板（2026-11-14 用户目验裁定「开始录制后只留浮条」）：状态离开
+        // idle 即收起——覆盖宫格各入口与全局快捷键/定时起录（面板开着时）。收起只对
+        // 本面板窗口 orderOut，不触碰其它窗口。
+        .onChange(of: controller.state) { newState in
+            if newState != .idle {
+                dismissPanelWindow()
+            }
+        }
+    }
+
+    /// 收起本面板（MenuBarExtra `.window` 无编程关闭 API）。面板窗口由
+    /// `PanelWindowMarker` 打上 `SRMenuBarPanel` identifier（不依赖宿主泛型名），
+    /// 面板未开时为无操作。先投 Escape（优先原生取消路径），orderOut 兜底。
+    private func dismissPanelWindow() {
+        guard let panel = NSApp.windows.first(where: {
+            $0.identifier?.rawValue == "SRMenuBarPanel"
+        }) else { return }
+        if let escape = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: panel.windowNumber, context: nil,
+            characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
+            isARepeat: false, keyCode: 53) {
+            NSApp.postEvent(escape, atStart: false)
+        }
+        panel.orderOut(nil)
     }
 
     // MARK: 状态头卡（裁定 2：面板反映状态机）
@@ -240,9 +267,15 @@ struct MenuBarView: View {
             OmiTileButton(title: "App", icon: "square.grid.2x2", tint: .indigo,
                           isEnabled: isIdle) { onStartAppPicker() }
             OmiTileButton(title: "区域", icon: "crop", tint: .teal,
-                          isEnabled: isIdle) { onStartRegion() }
+                          isEnabled: isIdle) {
+                dismissPanelWindow() // 全屏选区遮罩不被面板遮挡
+                onStartRegion()
+            }
             OmiTileButton(title: "窗口区域", icon: "rectangle.on.rectangle", tint: .teal,
-                          isEnabled: isIdle) { onStartWindowRegion() }
+                          isEnabled: isIdle) {
+                dismissPanelWindow() // 窗口选择→窗内拖框，遮罩链不被面板遮挡
+                onStartWindowRegion()
+            }
                 .accessibilityLabel("窗口区域录制：选择一个窗口后，在其内部拖框选定录制范围")
             OmiTileButton(title: "仅声音", icon: "waveform", tint: .purple,
                           isEnabled: isIdle) { onStartAudioOnly() }
@@ -256,7 +289,10 @@ struct MenuBarView: View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
                   spacing: 10) {
             OmiTileButton(title: "区域截图", icon: "viewfinder", tint: .green,
-                          isEnabled: isIdle) { onTakeRegionScreenshot() }
+                          isEnabled: isIdle) {
+                dismissPanelWindow() // 全屏选区遮罩不被面板遮挡
+                onTakeRegionScreenshot()
+            }
             displayMenuTile("全屏截图", icon: "photo", tint: .green) {
                 onTakeFullScreenScreenshot($0)
             }
@@ -372,6 +408,25 @@ struct MenuBarView: View {
     /// 与 `RegionSelector` 同口径的 displayID 读取（deviceDescription NSScreenNumber）。
     private static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+}
+
+/// 面板窗口标识器：随本视图挂进 MenuBarExtra 面板窗口，给窗口打上
+/// `SRMenuBarPanel` identifier——`dismissPanelWindow` 据此定位（`.window` 面板无
+/// 编程关闭 API，窗口也不便按宿主泛型名识别）。
+private struct PanelWindowMarker: NSViewRepresentable {
+    static let identifier = NSUserInterfaceItemIdentifier("SRMenuBarPanel")
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async { [weak view] in
+            view?.window?.identifier = Self.identifier
+        }
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        view.window?.identifier = Self.identifier
     }
 }
 
