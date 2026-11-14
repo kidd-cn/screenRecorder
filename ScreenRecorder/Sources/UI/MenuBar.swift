@@ -62,11 +62,11 @@ struct MenuBarView: View {
                 sessionControlsCard
             }
             OmiCard {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("开始录制").font(.caption).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    OmiSectionHeader(icon: "record.circle", title: "开始录制", tint: .red)
                     modeGrid
-                    Text("截图").font(.caption).foregroundStyle(.secondary)
-                        .padding(.top, 4)
+                    OmiSectionHeader(icon: "camera.viewfinder", title: "截图", tint: .green)
+                        .padding(.top, 6)
                     screenshotGrid
                 }
             }
@@ -292,7 +292,7 @@ struct MenuBarView: View {
 
     private var modeGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
-                  spacing: 10) {
+                  spacing: 12) {
             displayMenuTile("全屏", icon: "display", tint: .blue) { onStartDisplay($0) }
             OmiTileButton(title: "窗口", icon: "macwindow", tint: .blue,
                           isEnabled: isIdle) {
@@ -325,7 +325,7 @@ struct MenuBarView: View {
 
     private var screenshotGrid: some View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
-                  spacing: 10) {
+                  spacing: 12) {
             OmiTileButton(title: "区域截图", icon: "viewfinder", tint: .green,
                           isEnabled: isIdle) {
                 dismissPanelWindow() // 全屏选区遮罩不被面板遮挡

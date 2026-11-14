@@ -32,13 +32,17 @@ struct RecordingListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            RecordingListTable(
-                items: viewModel.items,
-                menuProvider: { selection in self.makeMenu(for: selection) },
-                onDoubleClick: { item in NSWorkspace.shared.open(item.url) } // 双击行：播放
-            )
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
+            if viewModel.items.isEmpty {
+                emptyState
+            } else {
+                RecordingListTable(
+                    items: viewModel.items,
+                    menuProvider: { selection in self.makeMenu(for: selection) },
+                    onDoubleClick: { item in NSWorkspace.shared.open(item.url) } // 双击行：播放
+                )
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+            }
             bottomBar
         }
         .background(OmiStyle.panelBackground) // Omi 化（2026-11-14）：面板底 + 卡片留白
@@ -62,6 +66,22 @@ struct RecordingListView: View {
         .task { await viewModel.refresh() } // 窗口首开刷新（复用窗口下仅生命周期首帧一次；后续激活刷新由窗口 didBecomeKeyNotification 承担）
     }
 
+    /// 空列表占位（2026-11-14 UI 精修）：图标 + 文案 + 提示，替代空白表格。
+    private var emptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "film.stack")
+                .font(.system(size: 36, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text("暂无录制")
+                .font(.callout.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text("开始录制后，成片会出现在这里。")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
     /// 内容区底部刷新栏（审查修复轮 1 #1）：macOS 13 可渲染的窗口内控件——刷新药丸 +
     /// 条目计数（Omi 化：主绿柔底胶囊）。
     private var bottomBar: some View {
@@ -78,6 +98,11 @@ struct RecordingListView: View {
             }
             .buttonStyle(.plain)
             Spacer()
+            if !viewModel.items.isEmpty {
+                Text("双击播放 · 右键更多操作")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
             Text("\(viewModel.items.count) 个录制")
                 .font(.callout)
                 .foregroundStyle(.secondary)

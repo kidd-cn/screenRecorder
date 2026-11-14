@@ -39,18 +39,32 @@ struct ScheduledRecordingPanelView: View {
     }
 
     var body: some View {
-        Form {
-            DatePicker("开始时刻", selection: $startAt)
-            Stepper(value: $minutesFromNow, in: Self.leadMinutesRange) {
-                Text("快速设定：\(minutesFromNow) 分钟后")
+        VStack(alignment: .leading, spacing: 14) {
+            // 头卡（Omi 化，2026-11-14 UI 精修）：图标 + 标题 + 一行说明。
+            HStack(spacing: 10) {
+                OmiTileIcon(icon: "timer", tint: .orange, tileSize: 40, symbolSize: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("定时录制").font(.callout.weight(.semibold))
+                    Text("到点自动开始录制。").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
             }
-            .onChange(of: minutesFromNow) { newValue in
-                startAt = Date().addingTimeInterval(TimeInterval(newValue) * 60)
-            }
-            Toggle("限制录制时长", isOn: $limitEnabled)
-            if limitEnabled {
-                Stepper(value: $limitMinutes, in: Self.limitMinutesRange) {
-                    Text("时长上限：\(limitMinutes) 分钟")
+            OmiCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    OmiSectionHeader(icon: "clock", title: "开始时刻", tint: .orange)
+                    DatePicker("", selection: $startAt)
+                        .labelsHidden()
+                    Stepper(value: $minutesFromNow, in: Self.leadMinutesRange) {
+                        Text("快速设定：\(minutesFromNow) 分钟后")
+                    }
+                    Divider()
+                    OmiSectionHeader(icon: "hourglass", title: "时长上限", tint: .teal)
+                    Toggle("限制录制时长", isOn: $limitEnabled)
+                    if limitEnabled {
+                        Stepper(value: $limitMinutes, in: Self.limitMinutesRange) {
+                            Text("时长上限：\(limitMinutes) 分钟")
+                        }
+                    }
                 }
             }
             if isStartAtPast || expiredRejected {
@@ -62,7 +76,7 @@ struct ScheduledRecordingPanelView: View {
                 Spacer()
                 Button("取消", action: onClose)
                     .keyboardShortcut(.cancelAction)
-                Button("排定") {
+                OmiPrimaryButton(title: "排定", icon: "calendar.badge.clock") {
                     // 排定时刻复验（R1 Minor 3 ②）：以动作执行时刻为准，过期拒绝排定且
                     // 不关面板（防排定即触发调度器错过路径）。
                     guard startAt >= Date() else {
@@ -75,8 +89,12 @@ struct ScheduledRecordingPanelView: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(isStartAtPast)
+                .opacity(isStartAtPast ? 0.45 : 1)
             }
         }
+        .padding(20)
+        .frame(width: 420)
+        .background(OmiStyle.panelBackground)
         .onChange(of: startAt) { _ in
             expiredRejected = false // 重选时刻即复位过期拒绝提示
         }

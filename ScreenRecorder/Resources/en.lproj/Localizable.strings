@@ -322,3 +322,9 @@
 "退出并丢弃" = "Quit and Discard";
 "摄像头交付尺寸与预期不符（预期 %lld×%lld，实际 %lld×%lld），本次录制未能开始" = "Camera delivered an unexpected size (expected %lld×%lld, got %lld×%lld); recording did not start";
 "点击音效 wav 不可用（%@，帧数 %lld）：须为非空且 ≤%lld 帧的短促样本" = "Click sound wav is unusable (%@, %lld frames); it must be a non-empty short sample of at most %lld frames";
+
+/* UI 精修（2026-11-14） */
+"暂无录制" = "No Recordings";
+"开始录制后，成片会出现在这里。" = "New recordings will appear here once you start.";
+"双击播放 · 右键更多操作" = "Double-click to play · Right-click for more";
+"到点自动开始录制。" = "Starts automatically at the set time.";

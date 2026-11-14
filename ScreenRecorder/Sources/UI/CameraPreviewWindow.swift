@@ -28,6 +28,8 @@ final class CameraPreviewWindow {
         contentView.layer?.backgroundColor = NSColor.black.cgColor
         contentView.layer?.cornerRadius = 10
         contentView.layer?.masksToBounds = true
+        contentView.layer?.borderWidth = 1
+        contentView.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         self.contentView = contentView
 
         panel = NSPanel(

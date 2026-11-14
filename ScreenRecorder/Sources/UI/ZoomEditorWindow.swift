@@ -346,6 +346,7 @@ struct ZoomEditorView: View {
             OmiCard {
                 ZoomTimelineStrip(model: model)
                     .frame(height: 64) // 时间线条高（旧 64pt）
+                    .clipShape(RoundedRectangle(cornerRadius: 8)) // 圆角贴合卡面
             }
             OmiCard { segmentSection }
             selectedSegmentSection
@@ -382,7 +383,15 @@ struct ZoomEditorView: View {
     @ViewBuilder
     private var segmentSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("缩放分段").font(.headline)
+            HStack(spacing: 6) {
+                Text("缩放分段").font(.headline)
+                Text("\(model.segments.count)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Capsule().fill(Color.secondary.opacity(0.14)))
+            }
             if model.segments.isEmpty {
                 Text("暂无分段——播放到目标位置后点「在播放头添加分段」，或在时间线上拖段块两端调整入出点。")
                     .font(.footnote)

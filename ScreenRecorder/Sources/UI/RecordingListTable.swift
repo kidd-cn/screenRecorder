@@ -106,6 +106,14 @@ struct RecordingListTable: NSViewRepresentable {
             ) as? NSTableCellView ?? Self.makeCell()
             cell.identifier = NSUserInterfaceItemIdentifier("cell-\(tableColumn?.identifier.rawValue ?? "")")
             cell.textField?.stringValue = Self.text(for: item, column: tableColumn?.identifier.rawValue)
+            if tableColumn?.identifier.rawValue == "name" {
+                // 名称列前置媒体类型图标（视频/音频；2026-11-14 UI 精修）。
+                let isAudio = item.url.pathExtension.lowercased() == "m4a"
+                cell.imageView?.image = NSImage(
+                    systemSymbolName: isAudio ? "music.note" : "film",
+                    accessibilityDescription: nil)
+                cell.imageView?.contentTintColor = .secondaryLabelColor
+            }
             return cell
         }
 
@@ -124,13 +132,22 @@ struct RecordingListTable: NSViewRepresentable {
 
         private static func makeCell() -> NSTableCellView {
             let cell = NSTableCellView()
+            let icon = NSImageView()
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(icon)
+            cell.imageView = icon
             let field = NSTextField(labelWithString: "")
             field.lineBreakMode = .byTruncatingTail
             field.translatesAutoresizingMaskIntoConstraints = false
             cell.addSubview(field)
             cell.textField = field
             NSLayoutConstraint.activate([
-                field.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+                icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 16),
+                icon.heightAnchor.constraint(equalToConstant: 16),
+                field.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
                 field.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -6),
                 field.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
             ])

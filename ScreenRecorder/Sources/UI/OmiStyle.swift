@@ -66,7 +66,7 @@ struct OmiTileLabel: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            OmiTileIcon(icon: icon, tint: tint, tileSize: 40)
+            OmiTileIcon(icon: icon, tint: tint, tileSize: 44)
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.primary)
@@ -140,5 +140,49 @@ final class OmiTableRowView: NSTableRowView {
         guard selectionHighlightStyle != .none else { return }
         NSColor.systemGreen.withAlphaComponent(0.16).setFill()
         NSBezierPath(roundedRect: bounds.insetBy(dx: 4, dy: 2), xRadius: 6, yRadius: 6).fill()
+    }
+}
+
+/// 区块标题（面板/小窗通用）：小图标 + 标题，强调层级一致。
+struct OmiSectionHeader: View {
+    let icon: String
+    let title: LocalizedStringKey
+    var tint: OmiStyle.TileTint = .gray
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Color(nsColor: OmiStyle.tintNS(tint)))
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// 主操作按钮（绿药丸；与导出/刷新按钮同一视觉家族）。
+struct OmiPrimaryButton: View {
+    let title: LocalizedStringKey
+    var icon: String? = nil
+    var isEnabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let icon {
+                    Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+                }
+                Text(title).font(.callout.weight(.semibold))
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(OmiStyle.accent))
+            .foregroundStyle(.white)
+            .opacity(isEnabled ? 1 : 0.45)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
     }
 }
