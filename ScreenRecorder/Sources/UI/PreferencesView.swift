@@ -231,7 +231,9 @@ private struct RecordingSourcesTab: View {
     var body: some View {
         ScrollView(.vertical) { // 溢出可滚（本页内容最多，2026-11-14 用户目验）
             Form {
-            Toggle("系统声音", isOn: $settings.captureSystemAudio)
+            Section("系统声音") {
+                Toggle("系统声音", isOn: $settings.captureSystemAudio)
+            }
             Section("麦克风") {
                 Toggle("包含麦克风", isOn: $settings.captureMicrophone)
                 Toggle("录制中静音", isOn: $settings.micMuted)
@@ -244,33 +246,34 @@ private struct RecordingSourcesTab: View {
                         .frame(minWidth: 44, alignment: .trailing)
                 }
             }
-            Toggle("摄像头画中画", isOn: $settings.pipEnabled)
-            // P5 摄像头背景：off=原画面、blur=模糊、builtin=三内置（程序生成，零素材）。
-            // live 语义（验收裁定：录制中改动实时生效）；开录初值按当时设置装配，无画中画
-            // 时背景无意义，随画中画开关联动禁用。
-            Picker("摄像头背景", selection: $settings.cameraBackground) {
-                Text("原画面").tag(CameraBackgroundMode.off)
-                Text("模糊").tag(CameraBackgroundMode.blur)
-                Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
-                Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
-                Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+            Section("摄像头") {
+                Toggle("画中画", isOn: $settings.pipEnabled)
+                // P5 摄像头背景：off=原画面、blur=模糊、builtin=三内置（程序生成，零素材）；
+                // live 语义；无画中画时背景无意义，随画中画开关联动禁用。
+                Picker("背景", selection: $settings.cameraBackground) {
+                    Text("原画面").tag(CameraBackgroundMode.off)
+                    Text("模糊").tag(CameraBackgroundMode.blur)
+                    Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
+                    Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
+                    Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+                }
+                .disabled(!settings.pipEnabled)
             }
-            .disabled(!settings.pipEnabled)
-            // Q2 录制鼠标光标：默认开（既有行为）；开录快照语义（同点击高亮——下一场录制生效）。
-            Toggle("录制光标", isOn: $settings.captureMouseCursor)
-            Toggle("点击高亮", isOn: $settings.clickHighlightEnabled)
-            // P1a 点击自动缩放：opt-in 默认关（快照语义同点击高亮——下一场录制生效）；
-            // 档位三选与 SettingsStore 的钳制档位一一对应。
-            Toggle("点击自动缩放", isOn: $settings.autoZoomEnabled)
-            Picker("缩放档位", selection: $settings.autoZoomLevel) {
-                Text("1.35x").tag(1.35)
-                Text("1.6x").tag(1.6)
-                Text("1.9x").tag(1.9)
+            Section("点击与光标") {
+                // Q2 录制光标：默认开（既有行为）；开录快照语义（下一场录制生效）。
+                Toggle("录制光标", isOn: $settings.captureMouseCursor)
+                Toggle("点击高亮", isOn: $settings.clickHighlightEnabled)
+                // P1a 点击自动缩放：opt-in 默认关；档位三选与 SettingsStore 钳制档位一致。
+                Toggle("点击自动缩放", isOn: $settings.autoZoomEnabled)
+                Picker("缩放档位", selection: $settings.autoZoomLevel) {
+                    Text("1.35x").tag(1.35)
+                    Text("1.6x").tag(1.6)
+                    Text("1.9x").tag(1.9)
+                }
+                .disabled(!settings.autoZoomEnabled)
+                // P1b 点击音效：opt-in 默认关；音量固定内置，只进录制音轨、绝无实时外放。
+                Toggle("点击音效", isOn: $settings.clickSoundEnabled)
             }
-            .disabled(!settings.autoZoomEnabled)
-            // P1b 点击音效：opt-in 默认关（快照语义同点击高亮/自动缩放——下一场录制生效）；
-            // 音量固定内置（spec 钉不设滑杆），只进录制音轨、绝无实时外放。
-            Toggle("点击音效", isOn: $settings.clickSoundEnabled)
             // P4 键盘按键可视化：opt-in 默认关。enabled 是开录快照语义（下一场录制生效）；
             // 颜色/字号/停留时长是 live 语义（键帽样式逐帧经 provider 读当前设置，改动对
             // 进行中的录制即时生效，SettingsStore 载入野值钳回默认档）。
