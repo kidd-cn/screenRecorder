@@ -323,8 +323,12 @@ private struct RecordingSourcesTab: View {
                 }
                 settingSection("窗口捕获") {
                     windowTargetRow
-                    Button("选择窗口…") { onPickWindowTarget() }
-                        .padding(.leading, 96 + 8)
+                    // 选择按钮与值同列（空标签占位 96pt，2026-11-15 与行构造对齐）。
+                    HStack(spacing: 8) {
+                        Color.clear.frame(width: 96, height: 0)
+                        Button("选择窗口…") { onPickWindowTarget() }
+                        Spacer(minLength: 0)
+                    }
                 }
             }
             .padding(.vertical, 8)
@@ -367,9 +371,8 @@ private struct RecordingSourcesTab: View {
     /// bundle id（ownerName 兜底），无独立展示名字段（Produces 三字段钉死），原样展示；
     /// 无标题窗口显示「（无标题）」（与选择器行文案同款）。
     private var windowTargetRow: some View {
-        HStack {
-            Text("当前目标")
-            Spacer()
+        HStack(spacing: 8) {
+            rowLabel("当前目标")
             if let target = settings.windowCaptureTarget {
                 let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? NSLocalizedString("（无标题）", comment: "Untitled window") : target.windowTitle)"
                 Text(display)
@@ -381,6 +384,7 @@ private struct RecordingSourcesTab: View {
                 Text("未设置")
                     .foregroundStyle(OmiStyle.subtleText)
             }
+            Spacer(minLength: 0)
         }
     }
 }
