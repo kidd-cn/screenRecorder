@@ -238,7 +238,7 @@ private struct RecordingSourcesTab: View {
             Section("麦克风") {
                 Toggle("包含麦克风", isOn: $settings.captureMicrophone)
                 Toggle("录制中静音", isOn: $settings.micMuted)
-                LabeledContent("音量") {
+                LabeledContent {
                     HStack(spacing: 8) {
                         // 定宽 160（与背景/缩放档位等选择器同宽）——全宽滑杆会显得
                         // 突出，定宽后整行与其余控件列对齐（2026-11-14 用户目验）。
@@ -249,6 +249,12 @@ private struct RecordingSourcesTab: View {
                             .monospacedDigit()
                             .frame(minWidth: 44, alignment: .trailing)
                     }
+                    // 音量标签右移（用户目验）：LabeledContent 尾参放在标签列并右对齐，
+                    // 与「背景/缩放档位」等文字尾部总体对齐。
+                } label: {
+                    // 无定宽——columns 样式自动把标签右对齐到全表标签列右缘
+                    //（与「背景/缩放档位」同位；72pt 定宽框反而把两字短标签推左）。
+                    Text("音量")
                 }
             }
             Section("摄像头") {
