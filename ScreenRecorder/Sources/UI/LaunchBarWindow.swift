@@ -139,6 +139,9 @@ final class LaunchBarPanel: NSPanel {
         level = .floating
         isOpaque = false
         backgroundColor = .clear
+        // 恒深色 HUD（Omi 49.png 观感；hudWindow 跟随系统外观——浅色模式白底会吞掉
+        // 白色标题/图标，2026-11-16 用户反馈，钉死 darkAqua）。
+        appearance = NSAppearance(named: .darkAqua)
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
         isMovableByWindowBackground = false
