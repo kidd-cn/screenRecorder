@@ -32,7 +32,7 @@ struct RecordingListTable: NSViewRepresentable {
         // 无排序交互（纯展示）。
         table.headerView = NSTableHeaderView()
         table.usesAlternatingRowBackgroundColors = false // Omi 卡面：白卡行 + 绿柔光选中（OmiTableRowView）
-        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.allowsEmptySelection = true
         table.usesAutomaticRowHeights = false
         table.rowHeight = 28
@@ -61,15 +61,19 @@ struct RecordingListTable: NSViewRepresentable {
     /// 列定义：名称（弹性）/ 大小 / 时长 / 创建时间——与原 SwiftUI Table 四列对齐。
     private static func makeColumns() -> [NSTableColumn] {
         let specs: [(id: String, title: String, width: CGFloat)] = [
-            ("name", NSLocalizedString("名称", comment: "Column name"), 260),
-            ("size", NSLocalizedString("大小", comment: "Column size"), 100),
-            ("duration", NSLocalizedString("时长", comment: "Column duration"), 80),
-            ("createdAt", NSLocalizedString("创建时间", comment: "Column created"), 200)
+            ("name", NSLocalizedString("名称", comment: "Column name"), 276),
+            ("size", NSLocalizedString("大小", comment: "Column size"), 104),
+            ("duration", NSLocalizedString("时长", comment: "Column duration"), 84),
+            ("createdAt", NSLocalizedString("创建时间", comment: "Column created"), 232)
         ]
         return specs.map { spec in
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(spec.id))
             column.title = spec.title
-            column.width = spec.width // 窗宽变化由表级 .lastColumnOnlyAutoresizingStyle 吸收（表头隐藏，无手动拖列）
+            column.width = spec.width
+            // 表头与单元格同对齐（2026-11-15 用户目验「内容没有与 title 对齐」）：
+            // 文本列左对齐；数值列（大小/时长）右对齐。
+            let numeric = spec.id == "size" || spec.id == "duration"
+            column.headerCell.alignment = numeric ? .right : .left
             return column
         }
     }
@@ -108,6 +112,8 @@ struct RecordingListTable: NSViewRepresentable {
             ) as? NSTableCellView ?? Self.makeCell()
             cell.identifier = NSUserInterfaceItemIdentifier("cell-\(tableColumn?.identifier.rawValue ?? "")")
             cell.textField?.stringValue = Self.text(for: item, column: tableColumn?.identifier.rawValue)
+            let id = tableColumn?.identifier.rawValue ?? ""
+            cell.textField?.alignment = (id == "size" || id == "duration") ? .right : .left
             if tableColumn?.identifier.rawValue == "name" {
                 // 名称列前置媒体类型图标（视频/音频；2026-11-14 UI 精修）。
                 let isAudio = item.url.pathExtension.lowercased() == "m4a"
