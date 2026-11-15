@@ -340,3 +340,9 @@
 
 /* 录制源分区（2026-11-14 简化） */
 "点击与光标" = "Clicks & Cursor";
+
+/* 通用页分区（2026-11-15） */
+"录制选项" = "Recording Options";
+"提醒间隔" = "Reminder Interval";
+"编辑导出完成后" = "After Editor Export";
+"打开所在目录" = "Reveal Output Folder";

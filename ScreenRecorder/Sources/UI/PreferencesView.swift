@@ -99,6 +99,56 @@ enum HEVCEncoderCapability {
     }
 }
 
+
+// MARK: - 偏好设置行构造（两页共享同一几何，2026-11-15）
+
+/// 分区容器（粗体标题 + 行栈）。
+private func settingSection<Content: View>(
+    _ title: LocalizedStringKey,
+    @ViewBuilder content: () -> Content
+) -> some View {
+    VStack(alignment: .leading, spacing: 8) {
+        Text(title)
+            .font(.callout.weight(.semibold))
+            .foregroundStyle(.primary)
+        content()
+    }
+    .padding(.horizontal, 4)
+}
+
+/// 行标签（96pt 右对齐——容纳最长标签「点击自动缩放」，全页统一列宽）。
+private func rowLabel(_ title: LocalizedStringKey) -> some View {
+    Text(title)
+        .lineLimit(1)
+        .frame(width: 96, alignment: .trailing)
+}
+
+/// 开关行（checkbox 在内容列）。
+private func toggleRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
+    HStack(spacing: 8) {
+        rowLabel(title)
+        Toggle("", isOn: isOn)
+            .toggleStyle(.checkbox)
+            .labelsHidden()
+        Spacer(minLength: 0)
+    }
+}
+
+/// 选择器行（标签 + 菜单/下拉，内容列定宽）。
+private func pickerRow<S: Hashable, C: View>(
+    _ title: LocalizedStringKey,
+    selection: Binding<S>,
+    width: CGFloat = 160,
+    @ViewBuilder content: () -> C
+) -> some View {
+    HStack(spacing: 8) {
+        rowLabel(title)
+        Picker("", selection: selection) { content() }
+            .labelsHidden()
+            .frame(width: width, alignment: .leading)
+    }
+}
+
 // MARK: - 偏好设置界面
 
 /// 偏好设置（T17）：TabView 三页——通用（输出目录/倒计时/帧率/编码）、录制源（系统声音/
@@ -138,60 +188,64 @@ private struct GeneralTab: View {
     var onOutputDirectoryChange: (URL) -> Void
 
     var body: some View {
-        ScrollView(.vertical) { // 溢出可滚（窗口尺寸见 PreferencesView）
-            Form {
-                outputDirectoryRow
-            Picker("倒计时", selection: $settings.countdownSeconds) {
-                Text("无").tag(0)
-                Text("3 秒").tag(3)
-                Text("5 秒").tag(5)
-                Text("10 秒").tag(10)
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 18) {
+                settingSection("录制选项") {
+                    outputDirectoryRow
+                    pickerRow("倒计时", selection: $settings.countdownSeconds) {
+                        Text("无").tag(0)
+                        Text("3 秒").tag(3)
+                        Text("5 秒").tag(5)
+                        Text("10 秒").tag(10)
+                    }
+                    pickerRow("帧率", selection: $settings.fps) {
+                        Text("30 fps").tag(30)
+                        Text("60 fps").tag(60)
+                    }
+                    // 编码行：HEVC 硬件编码器不可用时禁用并标注（能力进程内缓存）。
+                    HStack(spacing: 8) {
+                        rowLabel("编码")
+                        codecPicker
+                            .labelsHidden()
+                    }
+                    // Q5 长录提醒间隔：「从不」关闭；开录快照语义。
+                    pickerRow("提醒间隔", selection: $settings.recordingReminderIntervalHours, width: 180) {
+                        Text("1 小时（默认）").tag(1)
+                        Text("2 小时").tag(2)
+                        Text("3 小时").tag(3)
+                        Text("从不").tag(0)
+                    }
+                    // P6a 开机自启：副作用在装配层 sink，视图不做装配动作。
+                    toggleRow("开机自启", isOn: $settings.launchAtLogin)
+                }
+                settingSection("编辑导出完成后") {
+                    toggleRow("打开所在目录", isOn: $settings.editorPostExportRevealInFinder)
+                    toggleRow("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
+                }
             }
-            Picker("帧率", selection: $settings.fps) {
-                Text("30 fps").tag(30)
-                Text("60 fps").tag(60)
-            }
-            codecPicker
-            // Q5 长录时长提醒：净录时长（不含暂停）跨设定间隔整数倍时系统提醒一条
-            //（每倍数恰一条）；「从不」关闭。开录快照语义（同诸开关——下一场录制生效）。
-            Picker("录制提醒间隔", selection: $settings.recordingReminderIntervalHours) {
-                Text("1 小时（默认）").tag(1)
-                Text("2 小时").tag(2)
-                Text("3 小时").tag(3)
-                Text("从不").tag(0)
-            }
-            // P6a 开机自启：只有开关本身——副作用（SMAppService 注册/注销、失败回翻
-            // + 失败通知）在装配层 sink（LaunchAtLoginCoordinator），视图不做装配副作用。
-            Toggle("开机自启", isOn: $settings.launchAtLogin)
-            // Q6 编辑导出后动作（opt-in 默认关，仅缩放分段编辑器导出挂钩）：完成通知
-            // 之外的自动动作——Finder 定位新成片 / 删除原始文件（删除带三重校验：开关
-            // 开 + 新成片在盘 + 字节 > 0，防误删；删除会在完成通知中向用户注明）。
-            Section("编辑导出完成后（缩放分段编辑器）") {
-                Toggle("打开文件所在目录", isOn: $settings.editorPostExportRevealInFinder)
-                Toggle("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
-            }
-            }
-            .formStyle(.columns) // 两列对齐：标签列/内容列全表统一
+            .padding(.vertical, 8)
         }
     }
 
+    /// 输出目录行（统一行构造）：路径两行截断 + 选择按钮均在内容列。
     private var outputDirectoryRow: some View {
-        HStack(alignment: .top) {
-            Text("输出目录")
-            Spacer()
-            VStack(alignment: .trailing, spacing: 6) {
+        HStack(alignment: .top, spacing: 8) {
+            rowLabel("输出目录")
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 6) {
                 Text(settings.outputDirectory.path)
                     .lineLimit(2)
                     .truncationMode(.middle)
                     .help(settings.outputDirectory.path)
                 Button("选择…") { chooseOutputDirectory() }
             }
+            Spacer(minLength: 0)
         }
     }
 
     /// HEVC 硬件编码器不可用时：HEVC 选项禁用并标注（硬件能力进程内缓存，读取零开销）。
     private var codecPicker: some View {
-        Picker("编码", selection: $settings.videoCodec) {
+        Picker("", selection: $settings.videoCodec) {
             Text("H.264").tag(SettingsStore.VideoCodec.h264)
             if HEVCEncoderCapability.hevcHardwareEncodingAvailable {
                 Text("HEVC").tag(SettingsStore.VideoCodec.hevc)
@@ -332,38 +386,6 @@ private struct RecordingSourcesTab: View {
                 }
             }
             .padding(.vertical, 8)
-        }
-    }
-
-    // MARK: - 行构造（统一几何：标签列 64pt 右对齐）
-
-    private func settingSection<Content: View>(
-        _ title: LocalizedStringKey,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(.primary)
-            content()
-        }
-        .padding(.horizontal, 4)
-    }
-
-    private func rowLabel(_ title: LocalizedStringKey) -> some View {
-        Text(title)
-            .lineLimit(1)
-            .frame(width: 96, alignment: .trailing) // 容纳最长标签「点击自动缩放」
-    }
-
-    /// 开关行（checkbox 在内容列，标签列同宽右对齐）。
-    private func toggleRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
-        HStack(spacing: 8) {
-            rowLabel(title)
-            Toggle("", isOn: isOn)
-                .toggleStyle(.checkbox)
-                .labelsHidden()
-            Spacer(minLength: 0)
         }
     }
 
