@@ -337,3 +337,6 @@
 "选择录制保存位置" = "Choose Where to Save Recordings";
 "「蜂鸟录屏」需要在您选择的文件夹中保存录像与截图。" = "Hummingbird saves recordings and screenshots in a folder you choose.";
 "选择" = "Choose";
+
+/* 录制源分区（2026-11-14 简化） */
+"点击与光标" = "Clicks & Cursor";
