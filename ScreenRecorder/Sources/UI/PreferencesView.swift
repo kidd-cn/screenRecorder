@@ -164,12 +164,17 @@ struct PreferencesView: View {
 
     var body: some View {
         TabView {
-            GeneralTab(settings: settings, onOutputDirectoryChange: onOutputDirectoryChange)
+            GeneralTab(
+                settings: settings,
+                onOutputDirectoryChange: onOutputDirectoryChange,
+                onPickWindowTarget: onPickWindowTarget)
                 .tabItem { Label("通用", systemImage: "gearshape") }
-            RecordingSourcesTab(settings: settings, onPickWindowTarget: onPickWindowTarget)
-                .tabItem { Label("录制源", systemImage: "slider.horizontal.3") }
             ShortcutsTab()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
+            KeyboardTab(settings: settings)
+                .tabItem { Label("键盘事件", systemImage: "keyboard.badge.ellipsis") }
+            BackgroundTab(settings: settings)
+                .tabItem { Label("虚拟背景", systemImage: "person.crop.rectangle.badge.plus") }
         }
         .padding()
         // 尺寸（2026-11-14 用户目验：录制源页内容装不下）：原 480×320 固定尺寸早于
@@ -186,12 +191,22 @@ struct PreferencesView: View {
 private struct GeneralTab: View {
     @ObservedObject var settings: SettingsStore
     var onOutputDirectoryChange: (URL) -> Void
+    /// 打开窗口选择器（窗口捕获区「选择窗口…」入口）：选定只持久化、不开录。
+    var onPickWindowTarget: () -> Void
 
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 18) {
-                settingSection("录制选项") {
+                // Omi「通用」页同构：保存目录（含副标题）→ 默认录制参数 → 录制时 →
+                // 录制提醒 → 编辑完成后 → 窗口捕获。
+                settingSection("保存位置") {
                     outputDirectoryRow
+                    Text("所有录制的文件会默认保存到该目录下。")
+                        .font(.footnote)
+                        .foregroundStyle(OmiStyle.subtleText)
+                        .padding(.leading, 96 + 8)
+                }
+                settingSection("默认录制") {
                     pickerRow("倒计时", selection: $settings.countdownSeconds) {
                         Text("无").tag(0)
                         Text("3 秒").tag(3)
@@ -202,31 +217,57 @@ private struct GeneralTab: View {
                         Text("30 fps").tag(30)
                         Text("60 fps").tag(60)
                     }
-                    // 录制清晰度（2026-11-15，参考 Omi）：开录快照，下一场生效。
+                    // 录制清晰度（2026-11-15，参考 Omi 的默认分辨率档）：开录快照。
                     pickerRow("清晰度", selection: $settings.captureQuality, width: 160) {
                         Text("原始分辨率").tag(CaptureQuality.source)
                         Text("1080p").tag(CaptureQuality.p1080)
                         Text("720p").tag(CaptureQuality.p720)
                     }
-                    // 编码行：HEVC 硬件编码器不可用时禁用并标注（能力进程内缓存）。
-                    HStack(spacing: 8) {
-                        rowLabel("编码")
-                        codecPicker
-                            .labelsHidden()
+                }
+                settingSection("录制时") {
+                    toggleRow("录制光标", isOn: $settings.captureMouseCursor)
+                    toggleRow("点击高亮", isOn: $settings.clickHighlightEnabled)
+                    toggleRow("点击自动缩放", isOn: $settings.autoZoomEnabled)
+                    pickerRow("缩放档位", selection: $settings.autoZoomLevel) {
+                        Text("1.35x").tag(1.35)
+                        Text("1.6x").tag(1.6)
+                        Text("1.9x").tag(1.9)
                     }
-                    // Q5 长录提醒间隔：「从不」关闭；开录快照语义。
-                    pickerRow("提醒间隔", selection: $settings.recordingReminderIntervalHours, width: 180) {
+                    .disabled(!settings.autoZoomEnabled)
+                    toggleRow("点击音效", isOn: $settings.clickSoundEnabled)
+                    toggleRow("系统声音", isOn: $settings.captureSystemAudio)
+                    toggleRow("包含麦克风", isOn: $settings.captureMicrophone)
+                    toggleRow("录制中静音", isOn: $settings.micMuted)
+                    HStack(spacing: 8) {
+                        rowLabel("麦克风音量")
+                        Slider(value: $settings.micVolume, in: 0...1)
+                            .disabled(!settings.captureMicrophone)
+                        Text("\(Int((settings.micVolume * 100).rounded()))%")
+                            .monospacedDigit()
+                            .frame(minWidth: 40, alignment: .trailing)
+                    }
+                }
+                settingSection("提醒与应用") {
+                    pickerRow("录制提醒间隔", selection: $settings.recordingReminderIntervalHours, width: 180) {
                         Text("1 小时（默认）").tag(1)
                         Text("2 小时").tag(2)
                         Text("3 小时").tag(3)
                         Text("从不").tag(0)
                     }
-                    // P6a 开机自启：副作用在装配层 sink，视图不做装配动作。
                     toggleRow("开机自启", isOn: $settings.launchAtLogin)
                 }
                 settingSection("编辑导出完成后") {
                     toggleRow("打开所在目录", isOn: $settings.editorPostExportRevealInFinder)
                     toggleRow("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
+                }
+                settingSection("窗口捕获") {
+                    windowTargetRow
+                    // 选择按钮与值同列（96pt 空占位对齐内容列）。
+                    HStack(spacing: 8) {
+                        Color.clear.frame(width: 96, height: 0)
+                        Button("选择窗口…") { onPickWindowTarget() }
+                        Spacer(minLength: 0)
+                    }
                 }
             }
             .padding(.vertical, 8)
@@ -265,6 +306,25 @@ private struct GeneralTab: View {
         .horizontalRadioGroupLayout()
     }
 
+    /// 当前目标行（窗口捕获）：App 名 + 窗口标题，未配置「未设置」。
+    private var windowTargetRow: some View {
+        HStack(spacing: 8) {
+            rowLabel("当前目标")
+            if let target = settings.windowCaptureTarget {
+                let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? NSLocalizedString("（无标题）", comment: "Untitled window") : target.windowTitle)"
+                Text(display)
+                    .foregroundStyle(OmiStyle.subtleText)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(display)
+            } else {
+                Text("未设置")
+                    .foregroundStyle(OmiStyle.subtleText)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
     /// 输出目录选择：仅目录、可新建；确认后交装配层换装（真源仍是 SettingsStore）。
     private func chooseOutputDirectory() {
         let panel = NSOpenPanel()
@@ -280,71 +340,14 @@ private struct GeneralTab: View {
     }
 }
 
-/// 录制源页：系统声音 / 麦克风区（终审 F2：包含麦克风=开始时刻快照；录制中静音=live 下发；
-/// 音量滑杆=live 增益）、摄像头画中画（T15）、录制鼠标光标（Q2，默认开）、鼠标点击高亮（T16，默认关）、
-/// 点击自动缩放（P1a，默认关；档位三选）、点击音效（P1b，默认关）、
-/// 「键盘按键可视化」组（P4：开关 + 两色单选 + 字号档位 + 停留时长档位 + 两行说明）、
-/// 「窗口捕获」组（T20：当前目标 + 选择器入口 + 快捷键提示）。
-private struct RecordingSourcesTab: View {
+/// 键盘事件页（Omi Tab 名「键盘事件」）：按键可视化全部行——启用 / 面板颜色 / 字号 /
+/// 停留时长（live 语义：键帽样式逐帧经 provider 读当前设置）。
+private struct KeyboardTab: View {
     @ObservedObject var settings: SettingsStore
-    var onPickWindowTarget: () -> Void
 
     var body: some View {
         ScrollView(.vertical) {
-            // 控件行统一构造（2026-11-15）：Form 的 columns 布局是**按 Section 各自
-            // 成网格**（标签列宽随各分区最长标签变化，跨分区永远对不齐）。故放弃
-            // Form/LabeledContent，全部行用同一自绘结构——固定 64pt 右对齐标签列 +
-            // 可控内容列，任何分区的任何行都严格同列。
             VStack(alignment: .leading, spacing: 18) {
-                settingSection("系统声音") {
-                    toggleRow("系统声音", isOn: $settings.captureSystemAudio)
-                }
-                settingSection("麦克风") {
-                    toggleRow("包含麦克风", isOn: $settings.captureMicrophone)
-                    toggleRow("录制中静音", isOn: $settings.micMuted)
-                    HStack(spacing: 8) {
-                        rowLabel("音量")
-                        Slider(value: $settings.micVolume, in: 0...1)
-                            .frame(width: 160)
-                            .disabled(!settings.captureMicrophone)
-                        Text("\(Int((settings.micVolume * 100).rounded()))%")
-                            .monospacedDigit()
-                            .frame(minWidth: 40, alignment: .trailing)
-                    }
-                }
-                settingSection("摄像头") {
-                    toggleRow("画中画", isOn: $settings.pipEnabled)
-                    HStack(spacing: 8) {
-                        rowLabel("背景")
-                        Picker("", selection: $settings.cameraBackground) {
-                            Text("原画面").tag(CameraBackgroundMode.off)
-                            Text("模糊").tag(CameraBackgroundMode.blur)
-                            Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
-                            Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
-                            Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
-                        }
-                        .labelsHidden()
-                        .frame(width: 160, alignment: .leading)
-                        .disabled(!settings.pipEnabled)
-                    }
-                }
-                settingSection("点击与光标") {
-                    toggleRow("录制光标", isOn: $settings.captureMouseCursor)
-                    toggleRow("点击高亮", isOn: $settings.clickHighlightEnabled)
-                    toggleRow("点击自动缩放", isOn: $settings.autoZoomEnabled)
-                    HStack(spacing: 8) {
-                        rowLabel("缩放档位")
-                        Picker("", selection: $settings.autoZoomLevel) {
-                            Text("1.35x").tag(1.35)
-                            Text("1.6x").tag(1.6)
-                            Text("1.9x").tag(1.9)
-                        }
-                        .labelsHidden()
-                        .frame(width: 160, alignment: .leading)
-                        .disabled(!settings.autoZoomEnabled)
-                    }
-                    toggleRow("点击音效", isOn: $settings.clickSoundEnabled)
-                }
                 settingSection("按键可视化") {
                     toggleRow("启用", isOn: $settings.keyboardOverlayEnabled)
                     HStack(spacing: 8) {
@@ -381,38 +384,42 @@ private struct RecordingSourcesTab: View {
                         .disabled(!settings.keyboardOverlayEnabled)
                     }
                 }
-                settingSection("窗口捕获") {
-                    windowTargetRow
-                    // 选择按钮与值同列（空标签占位 96pt，2026-11-15 与行构造对齐）。
-                    HStack(spacing: 8) {
-                        Color.clear.frame(width: 96, height: 0)
-                        Button("选择窗口…") { onPickWindowTarget() }
-                        Spacer(minLength: 0)
-                    }
-                }
             }
             .padding(.vertical, 8)
         }
     }
+}
 
-    /// 当前目标显示（简报文案：App 名 + 窗口标题，未配置「未设置」）。持久化标识是
-    /// bundle id（ownerName 兜底），无独立展示名字段（Produces 三字段钉死），原样展示；
-    /// 无标题窗口显示「（无标题）」（与选择器行文案同款）。
-    private var windowTargetRow: some View {
-        HStack(spacing: 8) {
-            rowLabel("当前目标")
-            if let target = settings.windowCaptureTarget {
-                let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? NSLocalizedString("（无标题）", comment: "Untitled window") : target.windowTitle)"
-                Text(display)
+/// 虚拟背景页（Omi Tab 名「虚拟背景」）：摄像头画中画 + 背景模式（live 语义）+
+/// Omi 同款性能提示。
+private struct BackgroundTab: View {
+    @ObservedObject var settings: SettingsStore
+
+    var body: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 18) {
+                settingSection("虚拟背景") {
+                    toggleRow("画中画摄像头", isOn: $settings.pipEnabled)
+                    HStack(spacing: 8) {
+                        rowLabel("背景")
+                        Picker("", selection: $settings.cameraBackground) {
+                            Text("无").tag(CameraBackgroundMode.off)
+                            Text("模糊").tag(CameraBackgroundMode.blur)
+                            Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
+                            Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
+                            Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+                        }
+                        .labelsHidden()
+                        .frame(width: 160, alignment: .leading)
+                        .disabled(!settings.pipEnabled)
+                    }
+                }
+                Text("开启此选项后，由于性能原因，部分设备可能导致录屏失败。")
+                    .font(.footnote)
                     .foregroundStyle(OmiStyle.subtleText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(display)
-            } else {
-                Text("未设置")
-                    .foregroundStyle(OmiStyle.subtleText)
+                    .padding(.leading, 96 + 8)
             }
-            Spacer(minLength: 0)
+            .padding(.vertical, 8)
         }
     }
 }

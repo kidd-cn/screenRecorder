@@ -356,3 +356,13 @@
 "原始分辨率" = "Original Resolution";
 "1080p" = "1080p";
 "720p" = "720p";
+
+/* Omi 四页签重构（2026-11-15） */
+"键盘事件" = "Keyboard Events";
+"虚拟背景" = "Virtual Background";
+"录制时" = "While Recording";
+"提醒与应用" = "Reminders & App";
+"保存位置" = "Save Location";
+"默认录制" = "Default Recording";
+"画中画摄像头" = "Camera PiP";
+"开启此选项后，由于性能原因，部分设备可能导致录屏失败。" = "Enabling this may cause screen recording to fail on some devices due to performance.";
