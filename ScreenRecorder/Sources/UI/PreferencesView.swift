@@ -295,13 +295,6 @@ private struct RecordingSourcesTab: View {
                     Text("3 秒").tag(3.0)
                 }
                 .disabled(!settings.keyboardOverlayEnabled)
-                // 说明行（简报钉定原文两行，逐字）。
-                Text("拼音组合期显示原始字母")
-                    .font(.footnote)
-                    .foregroundStyle(OmiStyle.subtleText)
-                Text("安全输入时暂停显示")
-                    .font(.footnote)
-                    .foregroundStyle(OmiStyle.subtleText)
             }
             Section("窗口捕获") {
                 windowTargetRow
