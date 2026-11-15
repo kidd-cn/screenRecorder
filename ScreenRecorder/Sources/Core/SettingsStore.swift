@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import CoreGraphics
+import AppKit
 import Foundation
 
 /// 录制设置：读写 UserDefaults 并以 `@Published` 暴露给 SwiftUI。
@@ -48,6 +49,22 @@ final class SettingsStore: ObservableObject {
     /// 录制清晰度（2026-11-15）：开录快照语义——下一场录制生效。默认原始分辨率。
     @Published var captureQuality: CaptureQuality {
         didSet { defaults.set(captureQuality.rawValue, forKey: Self.captureQualityKey) }
+    }
+
+    /// 录制完成后显示文件列表（2026-11-15，Omi 同款能力）：成片落盘回调时自动打开
+    /// 录制列表窗。默认 true（Omi 勾选态）。
+    @Published var recordCompletedShowList: Bool {
+        didSet { defaults.set(recordCompletedShowList, forKey: Self.recordCompletedShowListKey) }
+    }
+
+    /// 隐藏 Dock 栏 App 图标（2026-11-15，Omi 同款能力）：true = accessory（纯菜单栏，
+    /// 本应用既有形态）；false = regular（显示 Dock 图标）。经 NSApp.setActivationPolicy
+    /// 运行时切换，LSUIElement 下亦可生效。默认 true。
+    @Published var dockIconHidden: Bool {
+        didSet {
+            defaults.set(dockIconHidden, forKey: Self.dockIconHiddenKey)
+            NSApp.setActivationPolicy(dockIconHidden ? .accessory : .regular)
+        }
     }
 
     /// 默认 ~/Movies/Hummingbird（目录创建由 RecordingFileStore.ensureDirectory 负责）。
@@ -259,6 +276,10 @@ final class SettingsStore: ObservableObject {
         }
         self.captureQuality = CaptureQuality(
             rawValue: userDefaults.string(forKey: Self.captureQualityKey) ?? "") ?? .source
+        self.recordCompletedShowList =
+            userDefaults.object(forKey: Self.recordCompletedShowListKey) as? Bool ?? true
+        self.dockIconHidden =
+            userDefaults.object(forKey: Self.dockIconHiddenKey) as? Bool ?? true
         self.countdownSeconds = Self.normalizedCountdown(userDefaults.object(forKey: Self.countdownSecondsKey) as? Int)
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false
         // P5：摄像头画中画背景（默认 off 原画面）；解码失败（枚举演化）回退默认。
@@ -322,6 +343,8 @@ final class SettingsStore: ObservableObject {
     private static let micMutedKey = "micMuted"
     private static let outputDirectoryKey = "outputDirectory"
     private static let captureQualityKey = "captureQuality"
+    private static let recordCompletedShowListKey = "recordCompletedShowList"
+    private static let dockIconHiddenKey = "dockIconHidden"
     private static let countdownSecondsKey = "countdownSeconds"
     private static let pipEnabledKey = "pipEnabled"
     private static let cameraBackgroundKey = "cameraBackground"

@@ -333,6 +333,13 @@ final class AppAssembly: ObservableObject {
                 (self?.isPipSwapSurfaceAvailable ?? false, self?.cameraPiP.isLayoutSwapped ?? false)
             },
             toggle: { [weak self] in self?.togglePipSwap() })
+        // 录制完成后显示文件列表（Omi 同款能力，2026-11-15）：成片回调在 init 早期无法
+        // 捕获 self（controller 尚未入库），挂到 init 尾部——此处全部存储属性已就绪。
+        controller.onRecordingCompletedToFile = { [weak self] url in
+            if self?.settings.recordCompletedShowList == true {
+                self?.openRecordingList()
+            }
+        }
     }
 
     // MARK: 录制入口（T17：菜单与全局快捷键共用，配置装配单点化）

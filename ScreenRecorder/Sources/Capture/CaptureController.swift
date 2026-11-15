@@ -532,6 +532,9 @@ final class CaptureController: ObservableObject {
     private var store: RecordingFileStore
     private let countdownSeconds: Int
     private let onFinishedFile: (URL) -> Void
+    /// 成片落盘后的补充钩子（2026-11-15，var 缝——init 时尚无法捕获 self）：
+    /// 「录制完成后显示文件列表」经此实现；主队列回调，nil = 未接。
+    var onRecordingCompletedToFile: ((URL) -> Void)?
 
     private var countdownTask: Task<Bool, Never>?
     private var elapsedTimerTask: Task<Void, Never>?
@@ -789,6 +792,7 @@ final class CaptureController: ObservableObject {
                 store.delete(url)
             } else {
                 onFinishedFile(url) // 边界 6：主队列同步回调
+                onRecordingCompletedToFile?(url) // 录制完成后显示文件列表（2026-11-15）
             }
         } else if !discard {
             // 修复轮 1 Minor #1：正常停止但未产出成片（零样本 nothingWritten 等）不再静默；
