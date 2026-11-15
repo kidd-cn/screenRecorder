@@ -346,3 +346,7 @@
 "提醒间隔" = "Reminder Interval";
 "编辑导出完成后" = "After Editor Export";
 "打开所在目录" = "Reveal Output Folder";
+
+/* 快捷键页行标签（2026-11-15） */
+"开始/停止" = "Start/Stop";
+"暂停/恢复" = "Pause/Resume";

@@ -417,31 +417,43 @@ private struct RecordingSourcesTab: View {
 private struct ShortcutsTab: View {
     var body: some View {
         ScrollView(.vertical) {
-            Form {
-                Section("录制控制") {
-                    KeyboardShortcuts.Recorder("开始 / 停止录制：", name: .startStopRecording)
-                    KeyboardShortcuts.Recorder("暂停 / 恢复录制：", name: .pauseResumeRecording)
-                    KeyboardShortcuts.Recorder("边录边标记：", name: .toggleMarkingTools)
+            VStack(alignment: .leading, spacing: 18) {
+                settingSection("录制控制") {
+                    shortcutRow("开始/停止", .startStopRecording)
+                    shortcutRow("暂停/恢复", .pauseResumeRecording)
+                    shortcutRow("边录边标记", .toggleMarkingTools)
                 }
-                Section("录制模式") {
-                    // 标签一律短文案（2026-11-14 用户目验：长标签在 520 宽窗口被截断）；
-                    // 「主显示器」语义见注释与提示，不进标签。
-                    KeyboardShortcuts.Recorder("全屏录制：", name: .startFullScreenRecording)
-                    KeyboardShortcuts.Recorder("窗口录制：", name: .startWindowRecording)
-                    KeyboardShortcuts.Recorder("App 录制：", name: .startAppRecording)
-                    KeyboardShortcuts.Recorder("区域录制：", name: .startRegionRecordingShortcut)
-                    KeyboardShortcuts.Recorder("窗口区域：", name: .startWindowRegionRecordingShortcut)
-                    KeyboardShortcuts.Recorder("仅声音：", name: .startAudioOnlyRecordingShortcut)
-                    KeyboardShortcuts.Recorder("仅摄像头：", name: .startCameraOnlyRecordingShortcut)
+                settingSection("录制模式") {
+                    shortcutRow("全屏", .startFullScreenRecording)
+                    shortcutRow("窗口", .startWindowRecording)
+                    shortcutRow("App", .startAppRecording)
+                    shortcutRow("区域", .startRegionRecordingShortcut)
+                    shortcutRow("窗口区域", .startWindowRegionRecordingShortcut)
+                    shortcutRow("仅声音", .startAudioOnlyRecordingShortcut)
+                    shortcutRow("仅摄像头", .startCameraOnlyRecordingShortcut)
                 }
-                Section("截图") {
-                    KeyboardShortcuts.Recorder("区域截图：", name: .takeRegionScreenshotShortcut)
-                    KeyboardShortcuts.Recorder("全屏截图：", name: .takeFullScreenScreenshotShortcut)
+                settingSection("截图") {
+                    shortcutRow("区域截图", .takeRegionScreenshotShortcut)
+                    shortcutRow("全屏截图", .takeFullScreenScreenshotShortcut)
                 }
                 Text("全局生效，可点按右侧键位修改。")
                     .font(.footnote)
                     .foregroundStyle(OmiStyle.subtleText)
+                    .padding(.leading, 96 + 8)
             }
+            .padding(.vertical, 8)
+        }
+    }
+
+    /// 快捷键行（与其余设置页同几何：96pt 右对齐标签列 + 录制控件在内容列）。
+    private func shortcutRow(
+        _ title: LocalizedStringKey,
+        _ name: KeyboardShortcuts.Name
+    ) -> some View {
+        HStack(spacing: 8) {
+            rowLabel(title)
+            KeyboardShortcuts.Recorder("", name: name)
+            Spacer(minLength: 0)
         }
     }
 }
