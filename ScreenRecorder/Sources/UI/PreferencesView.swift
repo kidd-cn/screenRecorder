@@ -100,53 +100,71 @@ enum HEVCEncoderCapability {
 }
 
 
-// MARK: - 偏好设置行构造（两页共享同一几何，2026-11-15）
+// MARK: - Omi 风格页内行构造（四页共享，2026-11-15 像素级仿制）
 
-/// 分区容器（粗体标题 + 行栈）。
-private func settingSection<Content: View>(
-    _ title: LocalizedStringKey,
+/// Omi 分组行：185pt 右对齐标签（含冒号）+ 内容列；组间距与行距一致。
+private func omiGroup<Content: View>(
+    _ label: LocalizedStringKey,
     @ViewBuilder content: () -> Content
 ) -> some View {
-    VStack(alignment: .leading, spacing: 8) {
-        Text(title)
-            .font(.callout.weight(.semibold))
-            .foregroundStyle(.primary)
-        content()
-    }
-    .padding(.horizontal, 4)
-}
-
-/// 行标签（96pt 右对齐——容纳最长标签「点击自动缩放」，全页统一列宽）。
-private func rowLabel(_ title: LocalizedStringKey) -> some View {
-    Text(title)
-        .lineLimit(1)
-        .frame(width: 96, alignment: .trailing)
-}
-
-/// 开关行（checkbox 在内容列）。
-private func toggleRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
-    HStack(spacing: 8) {
-        rowLabel(title)
-        Toggle("", isOn: isOn)
-            .toggleStyle(.checkbox)
-            .labelsHidden()
+    HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Text(label)
+            .frame(width: 185, alignment: .trailing)
+        VStack(alignment: .leading, spacing: 10) {
+            content()
+        }
         Spacer(minLength: 0)
     }
+    .padding(.vertical, 6)
 }
 
-/// 选择器行（标签 + 菜单/下拉，内容列定宽）。
-private func pickerRow<S: Hashable, C: View>(
-    _ title: LocalizedStringKey,
+/// Omi 勾选行（checkbox + 文字，行高 22 与下拉/滑杆一致）。
+private func omiCheckRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
+    Toggle(isOn: isOn) {
+        Text(title)
+    }
+    .toggleStyle(.checkbox)
+    .frame(height: 22)
+}
+
+/// Omi 下拉行（200pt 菜单选择器）。
+private func omiPickerRow<S: Hashable, C: View>(
+    _ label: LocalizedStringKey,
     selection: Binding<S>,
-    width: CGFloat = 160,
+    width: CGFloat = 200,
     @ViewBuilder content: () -> C
 ) -> some View {
-    HStack(spacing: 8) {
-        rowLabel(title)
-        Picker("", selection: selection) { content() }
-            .labelsHidden()
-            .frame(width: width, alignment: .leading)
+    Picker(selection: selection) {
+        content()
+    } label: {
+        Text(label)
     }
+    .labelsHidden()
+    .frame(width: width, height: 22, alignment: .leading)
+}
+
+/// Omi 快捷键行（右侧 KeyboardShortcuts 录制器）。
+private func omiRecorderRow(
+    _ label: LocalizedStringKey,
+    _ name: KeyboardShortcuts.Name
+) -> some View {
+    HStack(spacing: 8) {
+        Text(label)
+            .frame(width: 185, alignment: .trailing)
+        KeyboardShortcuts.Recorder("", name: name)
+        Spacer(minLength: 0)
+    }
+    .frame(height: 22)
+    // 与 omiGroup 的组内/组间节奏一致（2026-11-15）：行自身承担上下 6pt。
+    .padding(.vertical, 6)
+}
+
+/// Omi 提示文字（内容列缩进 185+8）。
+private func omiNote(_ text: LocalizedStringKey) -> some View {
+    Text(text)
+        .font(.footnote)
+        .foregroundStyle(OmiStyle.subtleText)
+        .padding(.leading, 185 + 8)
 }
 
 // MARK: - 偏好设置界面
@@ -161,20 +179,26 @@ struct PreferencesView: View {
     /// 打开窗口选择器（T20「窗口捕获」区「选择窗口…」入口）：呈现归装配层
     ///（`openWindowPicker`，选定只持久化、不开录），视图不做装配副作用。
     var onPickWindowTarget: () -> Void
+    /// 当前页签（默认通用页）。
+    @State private var selectedTab = 0
 
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             GeneralTab(
                 settings: settings,
                 onOutputDirectoryChange: onOutputDirectoryChange,
                 onPickWindowTarget: onPickWindowTarget)
                 .tabItem { Label("通用", systemImage: "gearshape") }
+                .tag(0)
             ShortcutsTab()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
+                .tag(1)
             KeyboardTab(settings: settings)
                 .tabItem { Label("键盘事件", systemImage: "keyboard.badge.ellipsis") }
+                .tag(2)
             BackgroundTab(settings: settings)
                 .tabItem { Label("虚拟背景", systemImage: "person.crop.rectangle.badge.plus") }
+                .tag(3)
         }
         .padding()
         // 尺寸（2026-11-14 用户目验：录制源页内容装不下）：原 480×320 固定尺寸早于
@@ -197,18 +221,18 @@ private struct GeneralTab: View {
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 0) {
-                generalGroup("录制文件保存目录：") {
+                omiGroup("录制文件保存目录：") {
                     folderPickerButton
                     Text("所有录制的文件会默认保存到该目录下。")
                         .font(.footnote)
                         .foregroundStyle(OmiStyle.subtleText)
                 }
                 Divider()
-                generalGroup("录制时：") {
-                    checkRow("录制光标", isOn: $settings.captureMouseCursor)
-                    checkRow("点击音效", isOn: $settings.clickSoundEnabled)
-                    checkRow("点击高亮", isOn: $settings.clickHighlightEnabled)
-                    checkRow("点击自动缩放", isOn: $settings.autoZoomEnabled)
+                omiGroup("录制时：") {
+                    omiCheckRow("录制光标", isOn: $settings.captureMouseCursor)
+                    omiCheckRow("点击音效", isOn: $settings.clickSoundEnabled)
+                    omiCheckRow("点击高亮", isOn: $settings.clickHighlightEnabled)
+                    omiCheckRow("点击自动缩放", isOn: $settings.autoZoomEnabled)
                     HStack(spacing: 8) {
                         Text("缩放档位")
                             .foregroundStyle(OmiStyle.subtleText)
@@ -222,9 +246,9 @@ private struct GeneralTab: View {
                         .disabled(!settings.autoZoomEnabled)
                     }
                     .frame(height: 22)
-                    checkRow("系统声音", isOn: $settings.captureSystemAudio)
-                    checkRow("包含麦克风", isOn: $settings.captureMicrophone)
-                    checkRow("录制中静音", isOn: $settings.micMuted)
+                    omiCheckRow("系统声音", isOn: $settings.captureSystemAudio)
+                    omiCheckRow("包含麦克风", isOn: $settings.captureMicrophone)
+                    omiCheckRow("录制中静音", isOn: $settings.micMuted)
                     HStack(spacing: 8) {
                         Text("麦克风音量")
                             .foregroundStyle(OmiStyle.subtleText)
@@ -238,21 +262,21 @@ private struct GeneralTab: View {
                     .frame(height: 22)
                 }
                 Divider()
-                generalGroup("录制完成后：") {
-                    checkRow("显示文件列表", isOn: $settings.recordCompletedShowList)
+                omiGroup("录制完成后：") {
+                    omiCheckRow("显示文件列表", isOn: $settings.recordCompletedShowList)
                 }
                 Divider()
-                generalGroup("编辑完成后：") {
-                    checkRow("打开所在目录", isOn: $settings.editorPostExportRevealInFinder)
-                    checkRow("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
+                omiGroup("编辑完成后：") {
+                    omiCheckRow("打开所在目录", isOn: $settings.editorPostExportRevealInFinder)
+                    omiCheckRow("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
                 }
                 Divider()
-                generalGroup("Dock栏App图标：") {
-                    checkRow("隐藏", isOn: $settings.dockIconHidden)
+                omiGroup("Dock栏App图标：") {
+                    omiCheckRow("隐藏", isOn: $settings.dockIconHidden)
                 }
                 Divider()
-                generalGroup("录制提醒间隔：") {
-                    pickerGeneral("录制提醒间隔", selection: $settings.recordingReminderIntervalHours, width: 200) {
+                omiGroup("录制提醒间隔：") {
+                    omiPickerRow("录制提醒间隔", selection: $settings.recordingReminderIntervalHours, width: 200) {
                         Text("1 小时（默认）").tag(1)
                         Text("2 小时").tag(2)
                         Text("3 小时").tag(3)
@@ -260,29 +284,29 @@ private struct GeneralTab: View {
                     }
                 }
                 Divider()
-                generalGroup("默认屏幕录制分辨率：") {
-                    pickerGeneral("分辨率", selection: $settings.captureQuality, width: 200) {
+                omiGroup("默认屏幕录制分辨率：") {
+                    omiPickerRow("分辨率", selection: $settings.captureQuality, width: 200) {
                         Text("原始分辨率").tag(CaptureQuality.source)
                         Text("1080p").tag(CaptureQuality.p1080)
                         Text("720p").tag(CaptureQuality.p720)
                     }
                 }
-                generalGroup("默认屏幕录制帧率：") {
-                    pickerGeneral("帧率", selection: $settings.fps, width: 200) {
+                omiGroup("默认屏幕录制帧率：") {
+                    omiPickerRow("帧率", selection: $settings.fps, width: 200) {
                         Text("30FPS").tag(30)
                         Text("60FPS").tag(60)
                     }
                 }
-                generalGroup("默认屏幕录制倒计时时长：") {
-                    pickerGeneral("倒计时时长", selection: $settings.countdownSeconds, width: 200) {
+                omiGroup("默认屏幕录制倒计时时长：") {
+                    omiPickerRow("倒计时时长", selection: $settings.countdownSeconds, width: 200) {
                         Text("无").tag(0)
                         Text("3 秒").tag(3)
                         Text("5 秒").tag(5)
                         Text("10 秒").tag(10)
                     }
                 }
-                generalGroup("默认视频编码：") {
-                    pickerGeneral("编码", selection: $settings.videoCodec, width: 200) {
+                omiGroup("默认视频编码：") {
+                    omiPickerRow("编码", selection: $settings.videoCodec, width: 200) {
                         Text("H.264").tag(SettingsStore.VideoCodec.h264)
                         if HEVCEncoderCapability.hevcHardwareEncodingAvailable {
                             Text("HEVC").tag(SettingsStore.VideoCodec.hevc)
@@ -294,55 +318,12 @@ private struct GeneralTab: View {
                     }
                 }
                 Divider()
-                generalGroup("窗口捕获：") {
+                omiGroup("窗口捕获：") {
                     windowTargetRow
                     Button("选择窗口…") { onPickWindowTarget() }
                 }
             }
         }
-    }
-
-    /// Omi「通用」页分组行（标签列右对齐 + 内容列，2026-11-15 像素级仿制）。
-    private func generalGroup<Content: View>(
-        _ label: LocalizedStringKey,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label)
-                .frame(width: 185, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 10) {
-                content()
-            }
-            Spacer(minLength: 0)
-        }
-        // 组间距与行距一致（2026-11-15）：组内 10 + 组间 6+6 = 12/12，分隔线居中。
-        .padding(.vertical, 6)
-    }
-
-    /// 勾选行（Omi 同款：checkbox + 文字，堆叠于内容列）。行高统一 22pt（2026-11-15
-    /// 用户目验「行与行间隔不一致」——勾选行/下拉行/滑杆行原生高度不同，混排即参差）。
-    private func checkRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
-        Toggle(isOn: isOn) {
-            Text(title)
-        }
-        .toggleStyle(.checkbox)
-        .frame(height: 22)
-    }
-
-    /// 通用页下拉行（标签 + 200pt 菜单选择器，表单外自绘）。行高 22pt 与勾选行一致。
-    private func pickerGeneral<S: Hashable, C: View>(
-        _ label: LocalizedStringKey,
-        selection: Binding<S>,
-        width: CGFloat,
-        @ViewBuilder content: () -> C
-    ) -> some View {
-        Picker(selection: selection) {
-            content()
-        } label: {
-            Text(label)
-        }
-        .labelsHidden()
-        .frame(width: width, height: 22, alignment: .leading)
     }
 
     /// 保存目录按钮（Omi 同款：文件夹图标 + 路径，点击弹 NSOpenPanel）。
@@ -378,10 +359,9 @@ private struct GeneralTab: View {
             : path as String
     }
 
-    /// 窗口捕获行（96pt 标签列沿用录制源页行构造，当前目标值截断规则同前）。
+    /// 窗口捕获行（Omi 行几何：内容列内单行显示当前目标，超宽中段截断）。
     private var windowTargetRow: some View {
         HStack(spacing: 8) {
-            rowLabel("当前目标")
             if let target = settings.windowCaptureTarget {
                 let display = "\(target.ownerAppIdentifier) — \(target.windowTitle.isEmpty ? NSLocalizedString("（无标题）", comment: "Untitled window") : target.windowTitle)"
                 Text(display)
@@ -390,11 +370,12 @@ private struct GeneralTab: View {
                     .truncationMode(.middle)
                     .help(display)
             } else {
-                Text("未设置")
+                Text("未选择窗口")
                     .foregroundStyle(OmiStyle.subtleText)
             }
             Spacer(minLength: 0)
         }
+        .frame(height: 22)
     }
 
     /// 输出目录选择：仅目录、可新建；确认后交装配层换装（真源仍是 SettingsStore）。
@@ -413,83 +394,86 @@ private struct GeneralTab: View {
 }
 
 /// 键盘事件页（Omi Tab 名「键盘事件」）：按键可视化全部行——启用 / 面板颜色 / 字号 /
-/// 停留时长（live 语义：键帽样式逐帧经 provider 读当前设置）。
+/// 停留时长（live 语义：键帽样式逐帧经 provider 读当前设置）。像素级仿 Omi：
+/// 「标签：」185pt 右对齐 + 内容列，行组之间 Divider。
 private struct KeyboardTab: View {
     @ObservedObject var settings: SettingsStore
 
     var body: some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
-                settingSection("按键可视化") {
-                    toggleRow("启用", isOn: $settings.keyboardOverlayEnabled)
-                    HStack(spacing: 8) {
-                        rowLabel("颜色")
-                        Picker("", selection: $settings.keyboardOverlayColorIsAlternate) {
-                            Text("主色").tag(false)
-                            Text("备选色").tag(true)
-                        }
-                        .pickerStyle(.radioGroup)
-                        .horizontalRadioGroupLayout()
-                        .labelsHidden()
-                        .disabled(!settings.keyboardOverlayEnabled)
-                    }
-                    HStack(spacing: 8) {
-                        rowLabel("字号")
-                        Picker("", selection: $settings.keyboardOverlayFontSize) {
-                            Text("12").tag(12)
-                            Text("14").tag(14)
-                            Text("18").tag(18)
-                        }
-                        .labelsHidden()
-                        .frame(width: 160, alignment: .leading)
-                        .disabled(!settings.keyboardOverlayEnabled)
-                    }
-                    HStack(spacing: 8) {
-                        rowLabel("停留时长")
-                        Picker("", selection: $settings.keyboardOverlayLingerSeconds) {
-                            Text("1 秒").tag(1.0)
-                            Text("2 秒").tag(2.0)
-                            Text("3 秒").tag(3.0)
-                        }
-                        .labelsHidden()
-                        .frame(width: 160, alignment: .leading)
-                        .disabled(!settings.keyboardOverlayEnabled)
-                    }
+            VStack(alignment: .leading, spacing: 0) {
+                omiGroup("按键可视化：") {
+                    omiCheckRow("启用按键可视化", isOn: $settings.keyboardOverlayEnabled)
                 }
+                Divider()
+                omiGroup("面板颜色：") {
+                    panelColorPicker
+                }
+                Divider()
+                omiGroup("字体大小：") {
+                    omiPickerRow("字体大小", selection: $settings.keyboardOverlayFontSize) {
+                        Text("12").tag(12)
+                        Text("14").tag(14)
+                        Text("18").tag(18)
+                    }
+                    .disabled(!settings.keyboardOverlayEnabled)
+                }
+                Divider()
+                omiGroup("停留时间：") {
+                    omiPickerRow("停留时间", selection: $settings.keyboardOverlayLingerSeconds) {
+                        Text("1 秒").tag(1.0)
+                        Text("2 秒").tag(2.0)
+                        Text("3 秒").tag(3.0)
+                    }
+                    .disabled(!settings.keyboardOverlayEnabled)
+                }
+                Divider()
+                omiNote("按键可视化会显示在屏幕录制画面中。")
             }
             .padding(.vertical, 8)
         }
     }
+
+    /// 面板颜色（Omi 同款单选：主色 / 备选色）。
+    private var panelColorPicker: some View {
+        Picker(selection: $settings.keyboardOverlayColorIsAlternate) {
+            Text("主色").tag(false)
+            Text("备选色").tag(true)
+        } label: {
+            Text("面板颜色")
+        }
+        .pickerStyle(.radioGroup)
+        .horizontalRadioGroupLayout()
+        .labelsHidden()
+        .frame(height: 22)
+        .disabled(!settings.keyboardOverlayEnabled)
+    }
 }
 
 /// 虚拟背景页（Omi Tab 名「虚拟背景」）：摄像头画中画 + 背景模式（live 语义）+
-/// Omi 同款性能提示。
+/// Omi 同款性能提示。像素级仿 Omi 行几何。
 private struct BackgroundTab: View {
     @ObservedObject var settings: SettingsStore
 
     var body: some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
-                settingSection("虚拟背景") {
-                    toggleRow("画中画摄像头", isOn: $settings.pipEnabled)
-                    HStack(spacing: 8) {
-                        rowLabel("背景")
-                        Picker("", selection: $settings.cameraBackground) {
-                            Text("无").tag(CameraBackgroundMode.off)
-                            Text("模糊").tag(CameraBackgroundMode.blur)
-                            Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
-                            Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
-                            Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
-                        }
-                        .labelsHidden()
-                        .frame(width: 160, alignment: .leading)
-                        .disabled(!settings.pipEnabled)
-                    }
+            VStack(alignment: .leading, spacing: 0) {
+                omiGroup("画中画摄像头：") {
+                    omiCheckRow("在录制画面中显示摄像头", isOn: $settings.pipEnabled)
                 }
-                Text("开启此选项后，由于性能原因，部分设备可能导致录屏失败。")
-                    .font(.footnote)
-                    .foregroundStyle(OmiStyle.subtleText)
-                    .padding(.leading, 96 + 8)
+                Divider()
+                omiGroup("虚拟背景：") {
+                    omiPickerRow("虚拟背景", selection: $settings.cameraBackground) {
+                        Text("无").tag(CameraBackgroundMode.off)
+                        Text("模糊").tag(CameraBackgroundMode.blur)
+                        Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
+                        Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
+                        Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+                    }
+                    .disabled(!settings.pipEnabled)
+                }
+                Divider()
+                omiNote("开启此选项后，由于性能原因，部分设备可能导致录屏失败。")
             }
             .padding(.vertical, 8)
         }
@@ -499,46 +483,29 @@ private struct BackgroundTab: View {
 /// 快捷键页：四个录制控件（`KeyboardShortcuts.Recorder` 内含 `RecorderCocoa`），
 /// 取值/落库由包自理（UserDefaults）。⇧⌘M（Task 5）：边录边标记工具开关，spec §5 P2
 /// 「默认 ⇧⌘M 且可改」的用户面落点——与其他三键同款 Recorder 行。
+/// 像素级仿 Omi：185pt 右对齐冒号标签 + 右侧录制器，组间 Divider。
 private struct ShortcutsTab: View {
     var body: some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
-                settingSection("录制控制") {
-                    shortcutRow("开始/停止", .startStopRecording)
-                    shortcutRow("暂停/恢复", .pauseResumeRecording)
-                    shortcutRow("边录边标记", .toggleMarkingTools)
-                }
-                settingSection("录制模式") {
-                    shortcutRow("全屏", .startFullScreenRecording)
-                    shortcutRow("窗口", .startWindowRecording)
-                    shortcutRow("App", .startAppRecording)
-                    shortcutRow("区域", .startRegionRecordingShortcut)
-                    shortcutRow("窗口区域", .startWindowRegionRecordingShortcut)
-                    shortcutRow("仅声音", .startAudioOnlyRecordingShortcut)
-                    shortcutRow("仅摄像头", .startCameraOnlyRecordingShortcut)
-                }
-                settingSection("截图") {
-                    shortcutRow("区域截图", .takeRegionScreenshotShortcut)
-                    shortcutRow("全屏截图", .takeFullScreenScreenshotShortcut)
-                }
-                Text("全局生效，可点按右侧键位修改。")
-                    .font(.footnote)
-                    .foregroundStyle(OmiStyle.subtleText)
-                    .padding(.leading, 96 + 8)
+            VStack(alignment: .leading, spacing: 0) {
+                omiRecorderRow("开始 / 停止录制：", .startStopRecording)
+                omiRecorderRow("暂停 / 恢复录制：", .pauseResumeRecording)
+                omiRecorderRow("边录边标记：", .toggleMarkingTools)
+                Divider()
+                omiRecorderRow("全屏录制：", .startFullScreenRecording)
+                omiRecorderRow("窗口录制：", .startWindowRecording)
+                omiRecorderRow("App 录制：", .startAppRecording)
+                omiRecorderRow("区域录制：", .startRegionRecordingShortcut)
+                omiRecorderRow("窗口区域：", .startWindowRegionRecordingShortcut)
+                omiRecorderRow("仅声音：", .startAudioOnlyRecordingShortcut)
+                omiRecorderRow("仅摄像头：", .startCameraOnlyRecordingShortcut)
+                Divider()
+                omiRecorderRow("区域截图：", .takeRegionScreenshotShortcut)
+                omiRecorderRow("全屏截图：", .takeFullScreenScreenshotShortcut)
+                Divider()
+                omiNote("全局生效，可点按右侧键位修改。")
             }
             .padding(.vertical, 8)
-        }
-    }
-
-    /// 快捷键行（与其余设置页同几何：96pt 右对齐标签列 + 录制控件在内容列）。
-    private func shortcutRow(
-        _ title: LocalizedStringKey,
-        _ name: KeyboardShortcuts.Name
-    ) -> some View {
-        HStack(spacing: 8) {
-            rowLabel(title)
-            KeyboardShortcuts.Recorder("", name: name)
-            Spacer(minLength: 0)
         }
     }
 }

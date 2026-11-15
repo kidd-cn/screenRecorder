@@ -382,3 +382,14 @@
 "隐藏" = "Hide";
 "选择窗口" = "Choose Window";
 "麦克风音量" = "Mic Volume";
+
+/* Omi 其余三页像素级仿制（2026-11-15） */
+"启用按键可视化" = "Enable Keystroke Overlay";
+"面板颜色：" = "Panel Color:";
+"字体大小：" = "Font Size:";
+"停留时间：" = "Display Duration:";
+"按键可视化会显示在屏幕录制画面中。" = "Keystroke visualizations appear in the screen recording.";
+"画中画摄像头：" = "Picture-in-Picture Camera:";
+"虚拟背景：" = "Virtual Background:";
+"在录制画面中显示摄像头" = "Show camera in the recording";
+"未选择窗口" = "No window selected";
