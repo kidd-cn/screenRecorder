@@ -315,7 +315,8 @@ private struct GeneralTab: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.vertical, 12)
+        // 组间距与行距一致（2026-11-15）：组内 10 + 组间 6+6 = 12/12，分隔线居中。
+        .padding(.vertical, 6)
     }
 
     /// 勾选行（Omi 同款：checkbox + 文字，堆叠于内容列）。行高统一 22pt（2026-11-15
