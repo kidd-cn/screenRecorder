@@ -240,7 +240,10 @@ private struct RecordingSourcesTab: View {
                 Toggle("录制中静音", isOn: $settings.micMuted)
                 LabeledContent("音量") {
                     HStack(spacing: 8) {
+                        // 定宽 160（与背景/缩放档位等选择器同宽）——全宽滑杆会显得
+                        // 突出，定宽后整行与其余控件列对齐（2026-11-14 用户目验）。
                         Slider(value: $settings.micVolume, in: 0...1)
+                            .frame(width: 160)
                             .disabled(!settings.captureMicrophone)
                         Text("\(Int((settings.micVolume * 100).rounded()))%")
                             .monospacedDigit()
