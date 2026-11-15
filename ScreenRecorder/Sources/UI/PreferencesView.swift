@@ -202,6 +202,12 @@ private struct GeneralTab: View {
                         Text("30 fps").tag(30)
                         Text("60 fps").tag(60)
                     }
+                    // 录制清晰度（2026-11-15，参考 Omi）：开录快照，下一场生效。
+                    pickerRow("清晰度", selection: $settings.captureQuality, width: 160) {
+                        Text("原始分辨率").tag(CaptureQuality.source)
+                        Text("1080p").tag(CaptureQuality.p1080)
+                        Text("720p").tag(CaptureQuality.p720)
+                    }
                     // 编码行：HEVC 硬件编码器不可用时禁用并标注（能力进程内缓存）。
                     HStack(spacing: 8) {
                         rowLabel("编码")

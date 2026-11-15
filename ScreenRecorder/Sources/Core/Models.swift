@@ -81,6 +81,35 @@ enum BuiltinBackground: Equatable, Hashable, Codable {
 
 /// 一次录制会话的完整参数快照：启动录制时由上层从 `SettingsStore` + `RecordingFileStore` 装配，
 /// 之后采集/落盘各环节只读本快照——录制中途改设置不影响进行中的录制。
+/// 录制清晰度（2026-11-15，参考 Omi 录制前可选清晰度）：开录时对采集输出像素尺寸
+/// 上限做一次等比收敛（只缩不放），帧率/音轨不受影响。
+enum CaptureQuality: String, CaseIterable, Codable, Hashable {
+    case source
+    case p1080
+    case p720
+
+    /// 目标最大高度（nil = 原始分辨率）。
+    var maxHeight: Int? {
+        switch self {
+        case .source: return nil
+        case .p1080: return 1080
+        case .p720: return 720
+        }
+    }
+
+    /// 按最大高度等比缩放采集像素尺寸（只缩不放；非有限/零尺寸原样返回）。
+    func scaledPixelSize(_ size: CGSize) -> CGSize {
+        guard let maxHeight, size.height > 0, size.width > 0,
+              size.height.isFinite, size.width.isFinite,
+              size.height > CGFloat(maxHeight)
+        else { return size }
+        let scale = CGFloat(maxHeight) / size.height
+        return CGSize(
+            width: (size.width * scale).rounded(),
+            height: (size.height * scale).rounded())
+    }
+}
+
 struct RecordingConfiguration {
     var mode: CaptureMode
     var captureSystemAudio: Bool
@@ -116,4 +145,7 @@ struct RecordingConfiguration {
     /// 每满 N 小时提醒一条（每整数倍恰一条）。缺省 0——程序化构造（测试/未来后台路径）
     /// 安全缺省，只有经 `makeConfiguration` 的设置侧路径才按用户偏好启用。
     var recordingReminderIntervalHours: Int = 0
+    /// 录制清晰度（开录快照语义，2026-11-15）：采集像素尺寸按设定上限等比收敛。
+    /// 缺省原始分辨率（既有行为不变）。
+    var captureQuality: CaptureQuality = .source
 }

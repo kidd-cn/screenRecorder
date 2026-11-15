@@ -45,6 +45,11 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(micMuted, forKey: Self.micMutedKey) }
     }
 
+    /// 录制清晰度（2026-11-15）：开录快照语义——下一场录制生效。默认原始分辨率。
+    @Published var captureQuality: CaptureQuality {
+        didSet { defaults.set(captureQuality.rawValue, forKey: Self.captureQualityKey) }
+    }
+
     /// 默认 ~/Movies/Hummingbird（目录创建由 RecordingFileStore.ensureDirectory 负责）。
     /// 沙盒下访问权来自 `OutputDirectoryAccess` 的 security-scoped bookmark——变更目录
     /// 一律经 `setOutputDirectory(_:)`（此处仅路径落库，供展示与历史迁移）。
@@ -252,6 +257,8 @@ final class SettingsStore: ObservableObject {
             self.outputDirectory = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
                 .appendingPathComponent("Hummingbird", isDirectory: true)
         }
+        self.captureQuality = CaptureQuality(
+            rawValue: userDefaults.string(forKey: Self.captureQualityKey) ?? "") ?? .source
         self.countdownSeconds = Self.normalizedCountdown(userDefaults.object(forKey: Self.countdownSecondsKey) as? Int)
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false
         // P5：摄像头画中画背景（默认 off 原画面）；解码失败（枚举演化）回退默认。
@@ -314,6 +321,7 @@ final class SettingsStore: ObservableObject {
     private static let micVolumeKey = "micVolume"
     private static let micMutedKey = "micMuted"
     private static let outputDirectoryKey = "outputDirectory"
+    private static let captureQualityKey = "captureQuality"
     private static let countdownSecondsKey = "countdownSeconds"
     private static let pipEnabledKey = "pipEnabled"
     private static let cameraBackgroundKey = "cameraBackground"

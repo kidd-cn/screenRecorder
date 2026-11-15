@@ -561,7 +561,8 @@ final class AppAssembly: ObservableObject {
             autoZoomLevel: settings.autoZoomLevel,
             clickSoundEnabled: !cameraOnly && settings.clickSoundEnabled,
             captureMouseCursor: settings.captureMouseCursor, // Q2：开录快照（SCStream 视频路径消费，audioOnly/cameraOnly 分支不设该键）
-            recordingReminderIntervalHours: settings.recordingReminderIntervalHours // Q5：开录快照（全模式透传，elapsed 模式无关）
+            recordingReminderIntervalHours: settings.recordingReminderIntervalHours, // Q5：开录快照（全模式透传，elapsed 模式无关）
+            captureQuality: settings.captureQuality // 录制清晰度：开录快照（像素尺寸上限）
         )
     }
 

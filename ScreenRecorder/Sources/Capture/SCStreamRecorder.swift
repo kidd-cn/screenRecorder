@@ -169,14 +169,18 @@ final class SCStreamRecorder: NSObject {
     /// 输入装配推迟到首帧（需要首帧格式描述做 sourceFormatHint）。
     func start() async throws {
         let target = try await resolveTarget()
-        // P7a：audioOnly 无视频画布——pixelSize 以 .zero 占位（纯音轨会话永不
-        // addVideoInput，该值不参与任何装配，见 AssetWriterSession.init 注释）。
-        let session = try AssetWriterSession(config: config, pixelSize: target?.pixelSize ?? .zero)
+        // 录制清晰度（开录快照）：画布/合成器/采集配置统一使用缩放后的像素尺寸
+        //（2026-11-15——此前仅缩采集配置而画布仍为原始尺寸，编码器把帧放大回原分辨率）。
+        // P7a：audioOnly 无视频画布——pixelSize 以 .zero 占位。
+        let capturePixelSize = target.map {
+            config.captureQuality.scaledPixelSize($0.pixelSize)
+        } ?? .zero
+        let session = try AssetWriterSession(config: config, pixelSize: capturePixelSize)
         // T15/T16：合成器按需装配（判定单一真源 `makeCompositorIfActive`：PiP/点击/缩放/
         // 笔画/键帽任一活跃即建；全关 nil = 直通路径零开销）。P7a：audioOnly 无视频帧，
         // target 为 nil，整体不装配。
-        if let target {
-            pipCompositor = makeCompositorIfActive(pixelSize: target.pixelSize)
+        if target != nil {
+            pipCompositor = makeCompositorIfActive(pixelSize: capturePixelSize)
         }
         // 混音器在开流前启动：engine 先热起来，两路音频从第一刻起就不缺位；仅开麦克风关系统声
         // 时混音器同样在位（系统声源节点持续渲染静音，与麦克风混合）。启动失败（如无输出设备
@@ -217,8 +221,9 @@ final class SCStreamRecorder: NSObject {
             let streamConfig = SCStreamConfiguration()
             let stream: SCStream
             if let target {
-                streamConfig.width = Int(target.pixelSize.width.rounded())
-                streamConfig.height = Int(target.pixelSize.height.rounded())
+                // 录制清晰度：采集输出尺寸与画布同源（capturePixelSize，只缩不放）。
+                streamConfig.width = Int(capturePixelSize.width.rounded())
+                streamConfig.height = Int(capturePixelSize.height.rounded())
                 streamConfig.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(config.fps, 1)))
                 streamConfig.queueDepth = 3
                 streamConfig.showsCursor = config.captureMouseCursor // Q2：开录快照（偏好设置「录制鼠标光标」）
