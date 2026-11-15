@@ -1,6 +1,8 @@
+import CoreGraphics
 import CoreImage
 import CoreMedia
 import CoreVideo
+import ImageIO
 import XCTest
 
 @testable import Hummingbird
@@ -190,11 +192,12 @@ private final class GatedPersonSegmenter: PersonSegmenting {
 // MARK: - CameraBackgroundMode / RecordingConfiguration（P5 模型钉测）
 
 final class CameraBackgroundModeTests: XCTestCase {
-    /// 五态 Codable 往返保值（关联值枚举合成编码；SettingsStore 以 JSON 整只落库）。
+    /// 六态 Codable 往返保值（关联值枚举合成编码；SettingsStore 以 JSON 整只落库）。
     func testCameraBackgroundModeCodableRoundTrip() throws {
         let modes: [CameraBackgroundMode] = [
             .off, .blur,
             .builtin(.gradientWarm), .builtin(.gradientCool), .builtin(.solidSlate),
+            .custom("sample.png"),
         ]
         for mode in modes {
             let data = try JSONEncoder().encode(mode)
@@ -331,6 +334,60 @@ final class CameraBackgroundProcessorTests: XCTestCase {
         assertColor(samplePixel(output, x: fixtureWidth * 3 / 4, y: fixtureHeight / 2),
                     equals: BGRAColor(blue: 148, green: 120, red: 107, alpha: 255),
                     "mask 黑域必须填入程序生成的纯色灰蓝背景")
+    }
+
+    /// 自定义图片背景（2026-11-15 Omi 页复刻）：库图 aspect-fill 铺 mask 黑域（纯绿图
+    /// →黑域读数=绿）；文件缺失 → 原帧直通（不丢帧）；路径穿越名（含 / 或 ..）拒绝。
+    func testCustomImageBackgroundFillsMaskedOutRegion() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hb-bgproc-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // 写纯绿 PNG（ImageIO 直出）
+        let name = "green.png"
+        let imageURL = directory.appendingPathComponent(name)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let cgContext = CGContext(
+            data: nil, width: 8, height: 8, bitsPerComponent: 8, bytesPerRow: 8 * 4,
+            space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        cgContext.setFillColor(CGColor(red: 0, green: 1, blue: 0, alpha: 1))
+        cgContext.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        let cgImage = cgContext.makeImage()!
+        let destination = CGImageDestinationCreateWithURL(
+            imageURL as CFURL, "public.png" as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, cgImage, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+
+        let segmenter = FakePersonSegmenter { [width = fixtureWidth, height = fixtureHeight] _ in
+            leftHalfForegroundMask(width: width, height: height)
+        }
+        let frame = try XCTUnwrap(makeColorBuffer(
+            width: fixtureWidth, height: fixtureHeight,
+            color: BGRAColor(blue: 0, green: 0, red: 255, alpha: 255)))
+
+        let processor = CameraBackgroundProcessor(
+            mode: .custom(name), segmenter: segmenter, backgroundDirectory: directory)
+        let output = await processor.process(frame)
+        XCTAssertFalse(output === frame)
+        assertColor(samplePixel(output, x: fixtureWidth / 4, y: fixtureHeight / 2),
+                    equals: BGRAColor(blue: 0, green: 0, red: 255, alpha: 255),
+                    "前景域保留原帧颜色")
+        assertColor(samplePixel(output, x: fixtureWidth * 3 / 4, y: fixtureHeight / 2),
+                    equals: BGRAColor(blue: 0, green: 255, red: 0, alpha: 255),
+                    "mask 黑域填入库图（纯绿）")
+
+        // 文件缺失：直通原帧（同一实例引用，缓冲不动）
+        try FileManager.default.removeItem(at: imageURL)
+        let missing = await CameraBackgroundProcessor(
+            mode: .custom(name), segmenter: segmenter, backgroundDirectory: directory)
+            .process(frame)
+        XCTAssertTrue(missing === frame, "文件缺失 = 原帧直通不丢帧")
+
+        // 路径穿越名拒绝（不上溯目录）
+        let traversal = await CameraBackgroundProcessor(
+            mode: .custom("../escape.png"), segmenter: segmenter, backgroundDirectory: directory)
+            .process(frame)
+        XCTAssertTrue(traversal === frame, "路径穿越名拒绝 = 原帧直通")
     }
 
     /// blur/builtin 区分（同帧同 mask 对拍）：blur 的 mask 黑域是「自身高斯模糊」底（原帧

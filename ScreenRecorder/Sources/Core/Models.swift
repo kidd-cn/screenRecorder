@@ -67,6 +67,10 @@ enum CameraBackgroundMode: Equatable, Hashable, Codable {
     case blur
     /// 内置程序生成背景（CIImage 渐变/纯色，零素材文件）。
     case builtin(BuiltinBackground)
+    /// 自定义图片背景（2026-11-15 Omi 虚拟背景页复刻）：关联值 = 背景库目录内的
+    /// 文件名（不含路径——目录真源在 `CustomBackgroundStore`，整目录可迁移）。
+    /// 帧路径按 aspect-fill 拉伸铺底；文件缺失/解码失败 = 原帧直通不丢帧。
+    case custom(String)
 }
 
 /// 内置背景样式（P5）：全部 CIImage 程序生成，不内置照片素材。

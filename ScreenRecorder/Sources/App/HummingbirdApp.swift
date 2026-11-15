@@ -67,6 +67,15 @@ final class AppAssembly: ObservableObject {
     /// 快照语义（仅空闲时还原，录制中不摘）。init 尾段构造（闭包捕获局部 store，
     /// 不触 self——两段式初始化纪律同 keyboardMonitor）。
     private(set) var keyboardPreview: KeyboardPreviewController!
+    /// 自定义虚拟背景库（2026-11-15 Omi 页复刻）：偏好设置瓦片网格与处理器帧路径
+    /// 共用的文件真源（App Support/Hummingbird/Backgrounds）。
+    let customBackgroundStore = CustomBackgroundStore()
+    /// 虚拟背景页摄像头预览（复用录制同一条 CameraPiP 处理链——预览所见即录制所得）。
+    /// 页面 onAppear/onDisappear 驱动启停；窗口关闭由 prefsWindowCloser 兜底停机。
+    private(set) var virtualBackgroundPreview: VirtualBackgroundPreviewController!
+    /// 偏好设置窗口关闭收尾（预览停机 + 单实例控制控制器复位——下次打开重建 SwiftUI
+    /// 层级，页签 onAppear 语义可靠）。
+    private var prefsWindowCloser: PreferencesWindowCloser?
     /// 键盘装配订阅保活（$state 生命周期驱动）。
     private var keyboardCancellables: Set<AnyCancellable> = []
     /// 标记覆盖层控制器（P2）：面板/事件泵/显隐，init 末段装配（闭包捕获 self）。
@@ -167,6 +176,8 @@ final class AppAssembly: ObservableObject {
             fadeSecondsProvider: { settings.keyboardOverlayFadeSeconds })
         keyboardPreview = KeyboardPreviewController(
             snapshotProvider: { [keyboardOverlayStore] in keyboardOverlayStore.currentSnapshot() })
+        virtualBackgroundPreview = VirtualBackgroundPreviewController(
+            backgroundStore: customBackgroundStore)
         let coordinator = RecordingSessionCoordinator(
             cameraPiP: cameraPiP,
             clickHighlightTracker: clickHighlightTracker,
@@ -876,6 +887,8 @@ final class AppAssembly: ObservableObject {
             window.contentView = NSHostingView(rootView: PreferencesView(
                 settings: settings,
                 keyboardPreview: keyboardPreview,
+                virtualBackgroundPreview: virtualBackgroundPreview,
+                customBackgroundStore: customBackgroundStore,
                 onOutputDirectoryChange: { [weak self] url in
                     self?.updateOutputDirectory(to: url)
                 },
@@ -894,6 +907,16 @@ final class AppAssembly: ObservableObject {
                 }
             ))
             window.center()
+            // 关闭收尾（2026-11-15 虚拟背景预览兜底停机）：预览相机停机 + 控制器复位
+            //（下次打开重建 SwiftUI 层级，页签 onAppear/onDisappear 语义可靠）。
+            let closer = PreferencesWindowCloser { [weak self, weak window] in
+                self?.virtualBackgroundPreview.stop()
+                if self?.preferencesWindowController?.window === window {
+                    self?.preferencesWindowController = nil
+                }
+            }
+            window.delegate = closer
+            prefsWindowCloser = closer
             preferencesWindowController = NSWindowController(window: window)
         }
         NSApp.activate(ignoringOtherApps: true)
@@ -1631,3 +1654,16 @@ private struct PermissionOnboardingWindowContent: View {
     }
 }
 
+/// 偏好设置窗口关闭收尾桥（2026-11-15 虚拟背景预览兜底停机）：windowWillClose 主线程
+/// 回调装配层闭包（停预览相机 + 控制器复位）。装配层持强引用防释放。
+final class PreferencesWindowCloser: NSObject, NSWindowDelegate {
+    private let onClose: () -> Void
+
+    init(onClose: @escaping () -> Void) {
+        self.onClose = onClose
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        onClose()
+    }
+}

@@ -101,6 +101,11 @@ final class CameraBackgroundProcessor {
     /// 渲染可跨线程并发，裸读写是正式数据竞争）：键 =（样式, 宽, 高）——录制中恒定，
     /// 逐帧零生成直取（平移/缩放不缓存：渐变按帧尺寸生成即到位，无逐帧摆放成本）。
     private var builtinCache: (background: BuiltinBackground, width: Int, height: Int, image: CIImage)?
+    /// 自定义图片单槽缓存（同锁纪律）：键 =（文件名, 宽, 高）。图片 CIImage 平移/缩放
+    /// 也不缓存——只缓存解码产物，摆放按帧尺寸逐帧算（两次仿射，零成本）。
+    private var customCache: (name: String, width: Int, height: Int, image: CIImage)?
+    /// 自定义背景解析目录缝（文件真源；生产默认库目录，测试注入临时目录）。
+    let backgroundDirectory: URL
 
     /// 模糊半径（捕获像素，P5 观感定值）：640×480 源上 ~16px 高斯模糊在 PiP 展示尺寸
     ///（~160pt 窗）仍读得出「虚化」，边缘不过分涂抹。
@@ -108,9 +113,14 @@ final class CameraBackgroundProcessor {
 
     /// - Parameter mode: 背景模式（开录快照）。
     /// - Parameter segmenter: 分割缝（生产 = `VisionPersonSegmenter.shared`；测试注入假实现）。
-    init(mode: CameraBackgroundMode, segmenter: PersonSegmenting) {
+    /// - Parameter backgroundDirectory: 自定义图片解析目录（缺省 = 生产库目录；
+    ///   `.custom` 场才读取）。
+    init(mode: CameraBackgroundMode,
+         segmenter: PersonSegmenting,
+         backgroundDirectory: URL = CustomBackgroundStore.defaultDirectory()) {
         self.mode = mode
         self.segmenter = segmenter
+        self.backgroundDirectory = backgroundDirectory
     }
 
     /// 逐帧处理：off 直通；mask 不可得/渲染失败/无人像直通原帧（不丢帧）。
@@ -187,6 +197,9 @@ final class CameraBackgroundProcessor {
         case .builtin(let builtin):
             guard let generated = builtinBackground(builtin, bounds: bounds) else { return nil }
             background = generated
+        case .custom(let name):
+            guard let image = customBackground(named: name, bounds: bounds) else { return nil }
+            background = image // 文件缺失/解码失败：原帧直通（compose 返回 nil → process 兜底）
         }
 
         // mask 对齐帧尺寸：Vision 观测缓冲可能小于输入帧——平移掉观测原点（像素缓冲
@@ -285,6 +298,42 @@ final class CameraBackgroundProcessor {
     private static let gradientCoolBottom = srgb(0.33, 0.51, 0.90)
     /// 纯色灰蓝（slate）：(0.42, 0.47, 0.58)。
     private static let slateColor = srgb(0.42, 0.47, 0.58)
+
+    // MARK: 自定义图片背景（2026-11-15 Omi 页复刻）
+
+    /// 自定义图片按帧尺寸 aspect-fill 铺底：解码产物单槽缓存（文件名+尺寸命中直取），
+    /// 摆放 = 居中缩放覆盖帧（短边铺满，长边居中裁）→ 裁到帧界。文件缺失/解码失败
+    /// 返回 nil（compose 直通原帧，不丢帧）。
+    private func customBackground(named name: String, bounds: CGRect) -> CIImage? {
+        let width = Int(bounds.width)
+        let height = Int(bounds.height)
+        guard name.isEmpty == false,
+              !name.contains("/"), !name.contains("..") else { return nil } // 路径穿越防御
+        let cached: CIImage? = stateLock.withStateLock { () -> CIImage? in
+            guard let cache = customCache,
+                  cache.name == name, cache.width == width, cache.height == height else {
+                return nil
+            }
+            return cache.image
+        }
+        if let cached { return cached }
+        let url = backgroundDirectory.appendingPathComponent(name)
+        guard let cgImage = CustomBackgroundStore.loadImage(at: url) else { return nil }
+        let image = CIImage(cgImage: cgImage)
+        let imageExtent = image.extent
+        guard imageExtent.width > 0, imageExtent.height > 0,
+              width > 0, height > 0 else { return nil }
+        // aspect-fill：短边铺满（取较大缩放比），长边居中裁。
+        let scale = max(bounds.width / imageExtent.width, bounds.height / imageExtent.height)
+        let scaled = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let scaledExtent = scaled.extent
+        let offsetX = bounds.midX - scaledExtent.midX
+        let offsetY = bounds.midY - scaledExtent.midY
+        let filled = scaled.transformed(by: CGAffineTransform(translationX: offsetX, y: offsetY))
+            .cropped(to: bounds)
+        stateLock.withStateLock { customCache = (name, width, height, filled) }
+        return filled
+    }
 
     // MARK: 输出缓冲池（PiPCompositor 同款纪律）
 

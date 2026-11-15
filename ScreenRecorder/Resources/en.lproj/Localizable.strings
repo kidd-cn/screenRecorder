@@ -415,3 +415,10 @@
 "开启预览" = "Start Preview";
 "停止预览" = "Stop Preview";
 "在开启预览后尝试键盘输入" = "Try typing while preview is on";
+
+/* Omi 虚拟背景页像素级复刻（2026-11-15） */
+"虚拟背景" = "Virtual Background";
+"在屏幕录制画中画摄像头中应用虚拟背景" = "Apply virtual background to the camera PiP in screen recordings";
+"导入图片作为虚拟背景" = "Import an image as a virtual background";
+"删除选中的自定义背景" = "Delete the selected custom background";
+"仅自定义背景可删除" = "Only custom backgrounds can be deleted";

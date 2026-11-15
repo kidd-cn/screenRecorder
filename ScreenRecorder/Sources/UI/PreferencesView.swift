@@ -178,6 +178,11 @@ struct PreferencesView: View {
     /// 键帽预览控制器（Omi「开启预览」）：按钮观察其 isActive 换文案，经
     /// onToggleKeyboardPreview 回装配层开/停（预览窗归装配层，视图不做装配副作用）。
     @ObservedObject var keyboardPreview: KeyboardPreviewController
+    /// 虚拟背景页摄像头预览（Omi 页复刻）：页面 onAppear/onDisappear 驱动启停，
+    /// 装配层持有（窗口所有权归装配层）。
+    @ObservedObject var virtualBackgroundPreview: VirtualBackgroundPreviewController
+    /// 自定义背景库（⊕/⊖ 与网格缩略图的文件真源；装配层同一实例）。
+    let customBackgroundStore: CustomBackgroundStore
     var onOutputDirectoryChange: (URL) -> Void
     /// 打开窗口选择器（T20「窗口捕获」区「选择窗口…」入口）：呈现归装配层
     ///（`openWindowPicker`，选定只持久化、不开录），视图不做装配副作用。
@@ -202,7 +207,10 @@ struct PreferencesView: View {
                         onTogglePreview: onToggleKeyboardPreview)
                 .tabItem { Label("键盘事件", systemImage: "keyboard.badge.ellipsis") }
                 .tag(2)
-            BackgroundTab(settings: settings)
+            BackgroundTab(
+                settings: settings,
+                preview: virtualBackgroundPreview,
+                backgroundStore: customBackgroundStore)
                 .tabItem { Label("虚拟背景", systemImage: "person.crop.rectangle.badge.plus") }
                 .tag(3)
         }
@@ -561,33 +569,267 @@ private struct OmiColorWell: NSViewRepresentable {
     }
 }
 
-/// 虚拟背景页（Omi Tab 名「虚拟背景」）：摄像头画中画 + 背景模式（live 语义）+
-/// Omi 同款性能提示。像素级仿 Omi 行几何。
+/// 虚拟背景页（2026-11-15 Omi 52.png 像素级复刻）：全宽摄像头实时预览（所选背景
+/// 实时应用）→「虚拟背景」分区 chip + ⊕ 导入 / ⊖ 删除 → 4 列背景瓦片网格（无/模糊/
+/// 暖渐变/冷渐变/纯色灰蓝 + 自定义图片，选中绿框）→ 底部「在屏幕录制画中画摄像头中
+/// 应用虚拟背景」勾选 + 性能提示。所有选择 live 下发（录制中改动实时生效）。
 private struct BackgroundTab: View {
     @ObservedObject var settings: SettingsStore
+    @ObservedObject var preview: VirtualBackgroundPreviewController
+    let backgroundStore: CustomBackgroundStore
+    /// 自定义背景文件名列表（页内状态：⊕/⊖ 后刷新）。
+    @State private var customNames: [String] = []
 
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 0) {
-                omiGroup("画中画摄像头：") {
-                    omiCheckRow("在录制画面中显示摄像头", isOn: $settings.pipEnabled)
-                }
-                Divider()
-                omiGroup("虚拟背景：") {
-                    omiPickerRow("虚拟背景", selection: $settings.cameraBackground) {
-                        Text("无").tag(CameraBackgroundMode.off)
-                        Text("模糊").tag(CameraBackgroundMode.blur)
-                        Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
-                        Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
-                        Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+                VirtualBackgroundPreview(controller: preview)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 264)
+                    .padding(.vertical, 6)
+                // 分区 chip 行（Omi 同款：灰底圆角 chip + ⊕/⊖ 圆形按钮）
+                HStack(spacing: 12) {
+                    Text("虚拟背景")
+                        .font(.callout.weight(.medium))
+                        .frame(width: 140, height: 26)
+                        .background(Capsule().fill(Color.primary.opacity(0.14)))
+                    Button {
+                        addCustomBackground()
+                    } label: {
+                        Image(systemName: "plus.circle")
+                            .font(.system(size: 17))
+                            .foregroundStyle(OmiStyle.subtleText)
                     }
-                    .disabled(!settings.pipEnabled)
+                    .buttonStyle(.plain)
+                    .help("导入图片作为虚拟背景")
+                    Button {
+                        removeSelectedCustom()
+                    } label: {
+                        Image(systemName: "minus.circle")
+                            .font(.system(size: 17))
+                            .foregroundStyle(isCustomSelected
+                                ? Color.primary
+                                : OmiStyle.subtleText.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isCustomSelected)
+                    .help(isCustomSelected ? "删除选中的自定义背景" : "仅自定义背景可删除")
+                    Spacer(minLength: 0)
                 }
-                Divider()
-                omiNote("开启此选项后，由于性能原因，部分设备可能导致录屏失败。")
+                .padding(.vertical, 6)
+                // 背景瓦片网格（4 列，Omi 同款；选中绿框）
+                LazyVGrid(
+                    columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 4),
+                    spacing: 10
+                ) {
+                    backgroundTile(mode: .off) {
+                        AnyView(
+                            ZStack {
+                                Rectangle().fill(Color.black)
+                                Text("无")
+                                    .font(.system(size: 22, weight: .medium))
+                                    .foregroundStyle(.white)
+                            })
+                    }
+                    backgroundTile(mode: .blur) {
+                        AnyView(Image(nsImage: BackgroundTileArt.thumbnail(
+                            for: .blur, size: Self.tileSize)))
+                    }
+                    backgroundTile(mode: .builtin(.gradientWarm)) {
+                        AnyView(Image(nsImage: BackgroundTileArt.thumbnail(
+                            for: .builtin(.gradientWarm), size: Self.tileSize)))
+                    }
+                    backgroundTile(mode: .builtin(.gradientCool)) {
+                        AnyView(Image(nsImage: BackgroundTileArt.thumbnail(
+                            for: .builtin(.gradientCool), size: Self.tileSize)))
+                    }
+                    backgroundTile(mode: .builtin(.solidSlate)) {
+                        AnyView(Image(nsImage: BackgroundTileArt.thumbnail(
+                            for: .builtin(.solidSlate), size: Self.tileSize)))
+                    }
+                    ForEach(customNames, id: \.self) { name in
+                        backgroundTile(mode: .custom(name)) {
+                            AnyView(Image(nsImage: BackgroundTileArt.thumbnail(
+                                for: .custom(name), store: backgroundStore,
+                                size: Self.tileSize)))
+                        }
+                    }
+                }
+                .padding(.vertical, 4)
+                // 底部勾选（Omi 同款：勾选框 + 标签 + 标签下灰注）
+                HStack(alignment: .top, spacing: 8) {
+                    Toggle("", isOn: $settings.pipEnabled)
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("在屏幕录制画中画摄像头中应用虚拟背景")
+                        Text("开启此选项后，由于性能原因，部分设备可能导致录屏失败。")
+                            .font(.footnote)
+                            .foregroundStyle(OmiStyle.subtleText)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 10)
             }
-            .padding(.vertical, 8)
+            .padding(.horizontal, 2)
         }
+        .onAppear {
+            customNames = backgroundStore.listNames()
+            preview.setMode(settings.cameraBackground)
+            preview.start()
+        }
+        .onDisappear {
+            preview.stop()
+        }
+        .onChange(of: settings.cameraBackground) { newMode in
+            preview.setMode(newMode)
+        }
+    }
+
+    /// 瓦片标称尺寸（4 列网格减间距后的自然宽，4:3 前置画幅比）。
+    private static let tileSize = NSSize(width: 112, height: 80)
+
+    /// 当前选中是否自定义背景（⊖ 门控）。
+    private var isCustomSelected: Bool {
+        if case .custom = settings.cameraBackground { return true }
+        return false
+    }
+
+    /// 背景瓦片（Omi 同款：内容缩放裁切 + 圆角 8 + 选中绿框 2pt；无标注——Omi 瓦片
+    /// 不带文字标注，「无」文字在瓦片内容内）。
+    private func backgroundTile<C: View>(
+        mode: CameraBackgroundMode,
+        @ViewBuilder content: () -> C
+    ) -> some View {
+        Button {
+            settings.cameraBackground = mode
+        } label: {
+            content()
+                .frame(width: Self.tileSize.width, height: Self.tileSize.height)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(
+                            settings.cameraBackground == mode
+                                ? Color(nsColor: .systemGreen)
+                                : Color.clear,
+                            lineWidth: 2))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// ⊕ 导入图片（仅目录、可多选）：拷入背景库并选中新背景。
+    private func addCustomBackground() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = true
+        panel.allowedFileTypes = CustomBackgroundStore.allowedTypes
+        panel.begin { response in
+            guard response == .OK else { return }
+            var lastAdded: CameraBackgroundMode?
+            for url in panel.urls {
+                if let name = try? backgroundStore.addImage(from: url) {
+                    lastAdded = .custom(name)
+                }
+            }
+            customNames = backgroundStore.listNames()
+            if let lastAdded {
+                settings.cameraBackground = lastAdded
+            }
+        }
+    }
+
+    /// ⊖ 删除选中的自定义背景（非自定义选中时按钮已禁用）。
+    private func removeSelectedCustom() {
+        guard case .custom(let name) = settings.cameraBackground else { return }
+        backgroundStore.removeImage(named: name)
+        customNames = backgroundStore.listNames()
+        settings.cameraBackground = .off
+    }
+}
+
+/// 瓦片缩略图绘制（程序生成，零内置素材文件）：渐变/纯色按处理器同源配色画对角
+/// 线性渐变；模糊 = 同构图高斯虚化（CIGaussianBlur）示意；自定义 = 库图 aspect-fill。
+enum BackgroundTileArt {
+    /// 瓦片缩略图（main 线程绘制；绘制失败回退深灰占位）。
+    static func thumbnail(
+        for mode: CameraBackgroundMode,
+        store: CustomBackgroundStore? = nil,
+        size: NSSize
+    ) -> NSImage {
+        let image = NSImage(size: size)
+        image.lockFocusFlipped(true)
+        defer {
+            image.unlockFocus()
+            _ = image // lock/unlock 平衡（返回值固定）
+        }
+        let bounds = NSRect(origin: .zero, size: size)
+        switch mode {
+        case .off, .blur, .builtin(.gradientWarm), .builtin(.gradientCool), .builtin(.solidSlate):
+            // 处理器同源配色（CameraBackgroundProcessor 渐变端点/纯色定值）
+            let (from, to, blur): (NSColor, NSColor, CGFloat)
+            switch mode {
+            case .blur:
+                from = NSColor(calibratedRed: 0.55, green: 0.58, blue: 0.62, alpha: 1)
+                to = NSColor(calibratedRed: 0.30, green: 0.32, blue: 0.38, alpha: 1)
+                blur = 6
+            case .builtin(.gradientWarm):
+                from = NSColor(calibratedRed: 1.00, green: 0.62, blue: 0.35, alpha: 1)
+                to = NSColor(calibratedRed: 0.94, green: 0.33, blue: 0.38, alpha: 1)
+                blur = 0
+            case .builtin(.gradientCool):
+                from = NSColor(calibratedRed: 0.22, green: 0.78, blue: 0.86, alpha: 1)
+                to = NSColor(calibratedRed: 0.33, green: 0.51, blue: 0.90, alpha: 1)
+                blur = 0
+            case .builtin(.solidSlate):
+                from = NSColor(calibratedRed: 0.42, green: 0.47, blue: 0.58, alpha: 1)
+                to = from
+                blur = 0
+            default:
+                from = .darkGray
+                to = .darkGray
+                blur = 0
+            }
+            let gradient = NSGradient(starting: from, ending: to)
+            gradient?.draw(in: bounds, angle: -45)
+            // 模糊示意：细栅格随机光斑高斯虚化（视觉近似虚化背景）
+            if blur > 0 {
+                for _ in 0..<6 {
+                    let light = NSColor.white.withAlphaComponent(0.25)
+                    let spot = NSRect(
+                        x: CGFloat.random(in: 0...size.width),
+                        y: CGFloat.random(in: 0...size.height),
+                        width: size.width * 0.35, height: size.height * 0.35)
+                    light.setFill()
+                    NSBezierPath(ovalIn: spot).fill()
+                }
+            }
+        case .custom(let name):
+            if let store,
+               let cgImage = CustomBackgroundStore.loadImage(at: store.url(forName: name)) {
+                // aspect-fill 裁切（NSGraphicsContext 翻转坐标下绘位图）
+                let imageW = CGFloat(cgImage.width)
+                let imageH = CGFloat(cgImage.height)
+                guard imageW > 0, imageH > 0 else { break }
+                let scale = max(size.width / imageW, size.height / imageH)
+                let drawW = imageW * scale
+                let drawH = imageH * scale
+                let drawRect = NSRect(
+                    x: (size.width - drawW) / 2,
+                    y: (size.height - drawH) / 2,
+                    width: drawW, height: drawH)
+                NSGraphicsContext.current?.saveGraphicsState()
+                NSBezierPath(rect: bounds).addClip()
+                NSImage(cgImage: cgImage, size: NSSize(width: imageW, height: imageH))
+                    .draw(in: drawRect)
+                NSGraphicsContext.current?.restoreGraphicsState()
+            } else {
+                NSColor.darkGray.setFill()
+                NSBezierPath(rect: bounds).fill()
+            }
+        }
+        return image
     }
 }
 
