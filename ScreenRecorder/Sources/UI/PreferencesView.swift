@@ -221,6 +221,7 @@ private struct GeneralTab: View {
                         .frame(width: 160, alignment: .leading)
                         .disabled(!settings.autoZoomEnabled)
                     }
+                    .frame(height: 22)
                     checkRow("系统声音", isOn: $settings.captureSystemAudio)
                     checkRow("包含麦克风", isOn: $settings.captureMicrophone)
                     checkRow("录制中静音", isOn: $settings.micMuted)
@@ -234,6 +235,7 @@ private struct GeneralTab: View {
                             .monospacedDigit()
                             .frame(minWidth: 40, alignment: .trailing)
                     }
+                    .frame(height: 22)
                 }
                 Divider()
                 generalGroup("录制完成后：") {
@@ -316,15 +318,17 @@ private struct GeneralTab: View {
         .padding(.vertical, 12)
     }
 
-    /// 勾选行（Omi 同款：checkbox + 文字，堆叠于内容列）。
+    /// 勾选行（Omi 同款：checkbox + 文字，堆叠于内容列）。行高统一 22pt（2026-11-15
+    /// 用户目验「行与行间隔不一致」——勾选行/下拉行/滑杆行原生高度不同，混排即参差）。
     private func checkRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
         Toggle(isOn: isOn) {
             Text(title)
         }
         .toggleStyle(.checkbox)
+        .frame(height: 22)
     }
 
-    /// 通用页下拉行（标签 + 200pt 菜单选择器，表单外自绘）。
+    /// 通用页下拉行（标签 + 200pt 菜单选择器，表单外自绘）。行高 22pt 与勾选行一致。
     private func pickerGeneral<S: Hashable, C: View>(
         _ label: LocalizedStringKey,
         selection: Binding<S>,
@@ -337,7 +341,7 @@ private struct GeneralTab: View {
             Text(label)
         }
         .labelsHidden()
-        .frame(width: width, alignment: .leading)
+        .frame(width: width, height: 22, alignment: .leading)
     }
 
     /// 保存目录按钮（Omi 同款：文件夹图标 + 路径，点击弹 NSOpenPanel）。
