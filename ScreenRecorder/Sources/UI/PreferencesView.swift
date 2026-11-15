@@ -230,106 +230,136 @@ private struct RecordingSourcesTab: View {
     var onPickWindowTarget: () -> Void
 
     var body: some View {
-        ScrollView(.vertical) { // 溢出可滚（本页内容最多，2026-11-14 用户目验）
-            Form {
-            Section("系统声音") {
-                Toggle("系统声音", isOn: $settings.captureSystemAudio)
-            }
-            Section("麦克风") {
-                Toggle("包含麦克风", isOn: $settings.captureMicrophone)
-                Toggle("录制中静音", isOn: $settings.micMuted)
-                // 与「背景/缩放档位」行同一构造（字符串初始化）——columns 样式对两行
-                // 标签做完全相同的右对齐处理，「音量」与「背景」文字尾部必然同列。
-                LabeledContent("音量") {
+        ScrollView(.vertical) {
+            // 控件行统一构造（2026-11-15）：Form 的 columns 布局是**按 Section 各自
+            // 成网格**（标签列宽随各分区最长标签变化，跨分区永远对不齐）。故放弃
+            // Form/LabeledContent，全部行用同一自绘结构——固定 64pt 右对齐标签列 +
+            // 可控内容列，任何分区的任何行都严格同列。
+            VStack(alignment: .leading, spacing: 18) {
+                settingSection("系统声音") {
+                    toggleRow("系统声音", isOn: $settings.captureSystemAudio)
+                }
+                settingSection("麦克风") {
+                    toggleRow("包含麦克风", isOn: $settings.captureMicrophone)
+                    toggleRow("录制中静音", isOn: $settings.micMuted)
                     HStack(spacing: 8) {
-                        // 定宽 160（与背景/缩放档位等选择器同宽）——全宽滑杆会显得
-                        // 突出，定宽后整行与其余控件列对齐（2026-11-14 用户目验）。
+                        rowLabel("音量")
                         Slider(value: $settings.micVolume, in: 0...1)
                             .frame(width: 160)
                             .disabled(!settings.captureMicrophone)
                         Text("\(Int((settings.micVolume * 100).rounded()))%")
                             .monospacedDigit()
-                            .frame(minWidth: 44, alignment: .trailing)
+                            .frame(minWidth: 40, alignment: .trailing)
                     }
                 }
-            }
-            Section("摄像头") {
-                Toggle("画中画", isOn: $settings.pipEnabled)
-                // P5 摄像头背景：off=原画面、blur=模糊、builtin=三内置（程序生成，零素材）；
-                // live 语义；无画中画时背景无意义，随画中画开关联动禁用。
-                LabeledContent("背景") {
-                    Picker("", selection: $settings.cameraBackground) {
-                        Text("原画面").tag(CameraBackgroundMode.off)
-                        Text("模糊").tag(CameraBackgroundMode.blur)
-                        Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
-                        Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
-                        Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+                settingSection("摄像头") {
+                    toggleRow("画中画", isOn: $settings.pipEnabled)
+                    HStack(spacing: 8) {
+                        rowLabel("背景")
+                        Picker("", selection: $settings.cameraBackground) {
+                            Text("原画面").tag(CameraBackgroundMode.off)
+                            Text("模糊").tag(CameraBackgroundMode.blur)
+                            Text("暖渐变").tag(CameraBackgroundMode.builtin(.gradientWarm))
+                            Text("冷渐变").tag(CameraBackgroundMode.builtin(.gradientCool))
+                            Text("纯色灰蓝").tag(CameraBackgroundMode.builtin(.solidSlate))
+                        }
+                        .labelsHidden()
+                        .frame(width: 160, alignment: .leading)
+                        .disabled(!settings.pipEnabled)
                     }
-                    .labelsHidden()
-                    .frame(width: 160, alignment: .leading)
-                    .disabled(!settings.pipEnabled)
+                }
+                settingSection("点击与光标") {
+                    toggleRow("录制光标", isOn: $settings.captureMouseCursor)
+                    toggleRow("点击高亮", isOn: $settings.clickHighlightEnabled)
+                    toggleRow("点击自动缩放", isOn: $settings.autoZoomEnabled)
+                    HStack(spacing: 8) {
+                        rowLabel("缩放档位")
+                        Picker("", selection: $settings.autoZoomLevel) {
+                            Text("1.35x").tag(1.35)
+                            Text("1.6x").tag(1.6)
+                            Text("1.9x").tag(1.9)
+                        }
+                        .labelsHidden()
+                        .frame(width: 160, alignment: .leading)
+                        .disabled(!settings.autoZoomEnabled)
+                    }
+                    toggleRow("点击音效", isOn: $settings.clickSoundEnabled)
+                }
+                settingSection("按键可视化") {
+                    toggleRow("启用", isOn: $settings.keyboardOverlayEnabled)
+                    HStack(spacing: 8) {
+                        rowLabel("颜色")
+                        Picker("", selection: $settings.keyboardOverlayColorIsAlternate) {
+                            Text("主色").tag(false)
+                            Text("备选色").tag(true)
+                        }
+                        .pickerStyle(.radioGroup)
+                        .horizontalRadioGroupLayout()
+                        .labelsHidden()
+                        .disabled(!settings.keyboardOverlayEnabled)
+                    }
+                    HStack(spacing: 8) {
+                        rowLabel("字号")
+                        Picker("", selection: $settings.keyboardOverlayFontSize) {
+                            Text("12").tag(12)
+                            Text("14").tag(14)
+                            Text("18").tag(18)
+                        }
+                        .labelsHidden()
+                        .frame(width: 160, alignment: .leading)
+                        .disabled(!settings.keyboardOverlayEnabled)
+                    }
+                    HStack(spacing: 8) {
+                        rowLabel("停留时长")
+                        Picker("", selection: $settings.keyboardOverlayLingerSeconds) {
+                            Text("1 秒").tag(1.0)
+                            Text("2 秒").tag(2.0)
+                            Text("3 秒").tag(3.0)
+                        }
+                        .labelsHidden()
+                        .frame(width: 160, alignment: .leading)
+                        .disabled(!settings.keyboardOverlayEnabled)
+                    }
+                }
+                settingSection("窗口捕获") {
+                    windowTargetRow
+                    Button("选择窗口…") { onPickWindowTarget() }
+                        .padding(.leading, 96 + 8)
                 }
             }
-            Section("点击与光标") {
-                // Q2 录制光标：默认开（既有行为）；开录快照语义（下一场录制生效）。
-                Toggle("录制光标", isOn: $settings.captureMouseCursor)
-                Toggle("点击高亮", isOn: $settings.clickHighlightEnabled)
-                // P1a 点击自动缩放：opt-in 默认关；档位三选与 SettingsStore 钳制档位一致。
-                Toggle("点击自动缩放", isOn: $settings.autoZoomEnabled)
-                LabeledContent("缩放档位") {
-                    Picker("", selection: $settings.autoZoomLevel) {
-                        Text("1.35x").tag(1.35)
-                        Text("1.6x").tag(1.6)
-                        Text("1.9x").tag(1.9)
-                    }
-                    .labelsHidden()
-                    .frame(width: 160, alignment: .leading)
-                    .disabled(!settings.autoZoomEnabled)
-                }
-                // P1b 点击音效：opt-in 默认关；音量固定内置，只进录制音轨、绝无实时外放。
-                Toggle("点击音效", isOn: $settings.clickSoundEnabled)
-            }
-            // P4 键盘按键可视化：opt-in 默认关。enabled 是开录快照语义（下一场录制生效）；
-            // 颜色/字号/停留时长是 live 语义（键帽样式逐帧经 provider 读当前设置，改动对
-            // 进行中的录制即时生效，SettingsStore 载入野值钳回默认档）。
-            Section("按键可视化") {
-                Toggle("启用", isOn: $settings.keyboardOverlayEnabled)
-                LabeledContent("颜色") {
-                    Picker("", selection: $settings.keyboardOverlayColorIsAlternate) {
-                        Text("主色").tag(false)
-                        Text("备选色").tag(true)
-                    }
-                    .pickerStyle(.radioGroup)
-                    .horizontalRadioGroupLayout()
-                    .labelsHidden()
-                    .disabled(!settings.keyboardOverlayEnabled)
-                }
-                LabeledContent("字号") {
-                    Picker("", selection: $settings.keyboardOverlayFontSize) {
-                        Text("12").tag(12)
-                        Text("14").tag(14)
-                        Text("18").tag(18)
-                    }
-                    .labelsHidden()
-                    .frame(width: 160, alignment: .leading)
-                    .disabled(!settings.keyboardOverlayEnabled)
-                }
-                LabeledContent("停留时长") {
-                    Picker("", selection: $settings.keyboardOverlayLingerSeconds) {
-                        Text("1 秒").tag(1.0)
-                        Text("2 秒").tag(2.0)
-                        Text("3 秒").tag(3.0)
-                    }
-                    .labelsHidden()
-                    .frame(width: 160, alignment: .leading)
-                    .disabled(!settings.keyboardOverlayEnabled)
-                }
-            }
-            Section("窗口捕获") {
-                windowTargetRow
-                Button("选择窗口…") { onPickWindowTarget() }
-            }
-            }
+            .padding(.vertical, 8)
+        }
+    }
+
+    // MARK: - 行构造（统一几何：标签列 64pt 右对齐）
+
+    private func settingSection<Content: View>(
+        _ title: LocalizedStringKey,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+            content()
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private func rowLabel(_ title: LocalizedStringKey) -> some View {
+        Text(title)
+            .lineLimit(1)
+            .frame(width: 96, alignment: .trailing) // 容纳最长标签「点击自动缩放」
+    }
+
+    /// 开关行（checkbox 在内容列，标签列同宽右对齐）。
+    private func toggleRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 8) {
+            rowLabel(title)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+            Spacer(minLength: 0)
         }
     }
 
