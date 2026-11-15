@@ -422,3 +422,12 @@
 "导入图片作为虚拟背景" = "Import an image as a virtual background";
 "删除选中的自定义背景" = "Delete the selected custom background";
 "仅自定义背景可删除" = "Only custom backgrounds can be deleted";
+
+/* Omi 启动条（2026-11-15） */
+"全屏录制" = "Full Screen";
+"自定义区域录制" = "Custom Region";
+"窗口区域录制" = "Window Region";
+"窗口内容录制" = "Window";
+"App内容录制" = "App";
+"摄像头录制" = "Camera";
+"声音录制" = "Audio Only";

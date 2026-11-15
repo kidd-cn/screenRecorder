@@ -76,6 +76,39 @@ final class AppAssembly: ObservableObject {
     /// 偏好设置窗口关闭收尾（预览停机 + 单实例控制控制器复位——下次打开重建 SwiftUI
     /// 层级，页签 onAppear 语义可靠）。
     private var prefsWindowCloser: PreferencesWindowCloser?
+    /// 启动条（2026-11-15 Omi 49.png 复刻）：Dock 图标点击 / 应用启动 / 菜单入口的
+    /// 主界面——7 录制模式横条。窗口归装配容器（装配红线），懒建单例复用。
+    private var launchBarController: LaunchBarWindowController?
+
+    /// 打开启动条（幂等重入 = 前置）：模式回调与菜单栏磁贴同源（同一批 start 方法），
+    /// 点击后收条由 LaunchBarWindowController 自理。
+    func openLaunchBar() {
+        if launchBarController == nil {
+            launchBarController = LaunchBarWindowController { [weak self] mode in
+                guard let self else { return }
+                switch mode {
+                case .fullscreen:
+                    self.startDisplayRecording(on: CGMainDisplayID())
+                case .region:
+                    self.startRegionRecording()
+                case .windowRegion:
+                    self.startWindowRegionRecording()
+                case .window:
+                    self.openWindowPicker(startsRecordingOnSelection: true)
+                case .app:
+                    self.openAppPicker()
+                case .camera:
+                    self.startCameraOnlyRecording()
+                case .audio:
+                    self.startAudioOnlyRecording()
+                }
+            }
+        }
+        // 不主动 activate（Dock 点击/启动本身已激活；LSUIElement 场 activate 会扰动
+        // 空间与菜单面板状态——2026-11-15 实测 occlusion 异常的嫌疑点）。
+        launchBarController?.show()
+    }
+
     /// 键盘装配订阅保活（$state 生命周期驱动）。
     private var keyboardCancellables: Set<AnyCancellable> = []
     /// 标记覆盖层控制器（P2）：面板/事件泵/显隐，init 末段装配（闭包捕获 self）。
@@ -1531,8 +1564,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 等待轮询步长（秒）。
     private static let terminationPollInterval: TimeInterval = 0.05
 
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let assembly = Self.registeredAssembly else { return .terminateNow }
+    /// Dock 图标点击 / Finder 重开（2026-11-15 用户反馈「dock app图标点击没有界面」）：
+    /// 打开启动条（Omi 主界面——7 录制模式横条）。LSUIElement 常态无 Dock 图标；
+    /// 用户关掉「隐藏 Dock 图标」后 Dock 点击即落到本入口。
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        Self.registeredAssembly?.openLaunchBar()
+        return true
+    }
+
+    /// 全新启动（Finder/Dock 双击 / 登录项）：打开启动条——与 Omi 启动行为对齐
+    ///（启动即见主界面；× 可收，菜单栏入口照常）。MenuBarExtra App 生命周期下本回调
+    /// 可能先于 `App.init`（装配登记未就位），就绪短轮询兜住竞态（3s 上界）。
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        showLaunchBarWhenAssemblyReady()
+    }
+
+    /// 装配登记就绪轮询（`registeredAssembly` 由 `AppAssembly.init` 在 `App.init` 内
+    /// 写入；就绪即开启动条，60×50ms 未就位放弃——装配本身失败是另一级故障）。
+    private func showLaunchBarWhenAssemblyReady(attempt: Int = 0) {
+        guard attempt < 60 else { return }
+        if let assembly = Self.registeredAssembly {
+            assembly.openLaunchBar()
+        } else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self.showLaunchBarWhenAssemblyReady(attempt: attempt + 1)
+            }
+        }
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {        guard let assembly = Self.registeredAssembly else { return .terminateNow }
         let controller = assembly.controller
         switch QuitGuard.action(for: controller.state) {
         case .terminateNow:
