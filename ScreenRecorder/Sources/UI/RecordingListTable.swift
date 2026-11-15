@@ -70,10 +70,8 @@ struct RecordingListTable: NSViewRepresentable {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(spec.id))
             column.title = spec.title
             column.width = spec.width
-            // 表头与单元格同对齐（2026-11-15 用户目验「内容没有与 title 对齐」）：
-            // 文本列左对齐；数值列（大小/时长）右对齐。
-            let numeric = spec.id == "size" || spec.id == "duration"
-            column.headerCell.alignment = numeric ? .right : .left
+            // 表头与单元格同对齐（2026-11-15 用户裁定「统一左对齐」）：四列全部左对齐。
+            column.headerCell.alignment = .left
             return column
         }
     }
@@ -106,21 +104,23 @@ struct RecordingListTable: NSViewRepresentable {
         func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
             guard row < items.count else { return nil }
             let item = items[row]
-            let cell = tableView.makeView(
-                withIdentifier: NSUserInterfaceItemIdentifier("cell-\(tableColumn?.identifier.rawValue ?? "")"),
-                owner: nil
-            ) as? NSTableCellView ?? Self.makeCell()
-            cell.identifier = NSUserInterfaceItemIdentifier("cell-\(tableColumn?.identifier.rawValue ?? "")")
-            cell.textField?.stringValue = Self.text(for: item, column: tableColumn?.identifier.rawValue)
-            let id = tableColumn?.identifier.rawValue ?? ""
-            cell.textField?.alignment = (id == "size" || id == "duration") ? .right : .left
+            let cellIdentifier = NSUserInterfaceItemIdentifier(
+                "cell-\(tableColumn?.identifier.rawValue ?? "")")
+            let cell = tableView.makeView(withIdentifier: cellIdentifier, owner: nil)
+                as? ListRowCell ?? ListRowCell(columnID: tableColumn?.identifier.rawValue ?? "")
+            cell.identifier = cellIdentifier
+            cell.label.stringValue = Self.text(for: item, column: tableColumn?.identifier.rawValue)
+            cell.label.alignment = .left // 统一左对齐（2026-11-15）
             if tableColumn?.identifier.rawValue == "name" {
-                // 名称列前置媒体类型图标（视频/音频；2026-11-14 UI 精修）。
+                // 名称列前置媒体类型图标（视频/音频）。
                 let isAudio = item.url.pathExtension.lowercased() == "m4a"
-                cell.imageView?.image = NSImage(
+                cell.icon.image = NSImage(
                     systemSymbolName: isAudio ? "music.note" : "film",
                     accessibilityDescription: nil)
-                cell.imageView?.contentTintColor = .secondaryLabelColor
+                cell.icon.contentTintColor = .secondaryLabelColor
+                cell.icon.isHidden = false
+            } else {
+                cell.icon.isHidden = true
             }
             return cell
         }
@@ -136,30 +136,6 @@ struct RecordingListTable: NSViewRepresentable {
             guard let table else { return [] }
             return table.selectedRowIndexes
                 .compactMap { Int($0) < items.count ? items[Int($0)] : nil }
-        }
-
-        private static func makeCell() -> NSTableCellView {
-            let cell = NSTableCellView()
-            let icon = NSImageView()
-            icon.imageScaling = .scaleProportionallyUpOrDown
-            icon.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(icon)
-            cell.imageView = icon
-            let field = NSTextField(labelWithString: "")
-            field.lineBreakMode = .byTruncatingTail
-            field.translatesAutoresizingMaskIntoConstraints = false
-            cell.addSubview(field)
-            cell.textField = field
-            NSLayoutConstraint.activate([
-                icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
-                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-                icon.widthAnchor.constraint(equalToConstant: 16),
-                icon.heightAnchor.constraint(equalToConstant: 16),
-                field.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 6),
-                field.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -6),
-                field.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-            ])
-            return cell
         }
 
         private static func text(for item: RecordingFileMetadata, column: String?) -> String {
@@ -213,5 +189,41 @@ enum RecordingListFormat {
     static func createdAtText(_ date: Date?) -> String {
         guard let date else { return "—" }
         return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+/// 普通行单元（不使用 NSTableCellView——其 textField 内部缩进会与表头不对齐）：
+/// 图标（仅名称列）+ 文本，leading 6pt 与表头标题内边距视觉一致。
+@MainActor
+final class ListRowCell: NSView {
+    let label = NSTextField(labelWithString: "")
+    let icon = NSImageView()
+
+    init(columnID: String) {
+        super.init(frame: .zero)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(icon)
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        let showIcon = columnID == "name"
+        icon.isHidden = !showIcon
+        NSLayoutConstraint.activate([
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
+            icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: showIcon ? 16 : 0),
+            icon.heightAnchor.constraint(equalToConstant: 16),
+            label.leadingAnchor.constraint(
+                equalTo: showIcon ? icon.trailingAnchor : leadingAnchor,
+                constant: showIcon ? 6 : 0), // 内容起点与表头标题 0 内缩对齐（2026-11-15）
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -6),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) 不支持（代码构建视图）")
     }
 }
