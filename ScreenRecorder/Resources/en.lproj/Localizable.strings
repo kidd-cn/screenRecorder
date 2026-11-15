@@ -366,3 +366,19 @@
 "默认录制" = "Default Recording";
 "画中画摄像头" = "Camera PiP";
 "开启此选项后，由于性能原因，部分设备可能导致录屏失败。" = "Enabling this may cause screen recording to fail on some devices due to performance.";
+
+/* Omi 通用页像素级仿制（2026-11-15） */
+"录制文件保存目录：" = "Recorded Video Folder:";
+"录制完成后：" = "After Recording is Stopped:";
+"编辑完成后：" = "After edited video is exported:";
+"Dock栏App图标：" = "Dock App Icon:";
+"录制提醒间隔：" = "Recording reminder interval:";
+"默认屏幕录制分辨率：" = "Default screen recording resolution:";
+"默认屏幕录制帧率：" = "Default screen recording frame rate:";
+"默认屏幕录制倒计时时长：" = "Default screen recording countdown:";
+"默认视频编码：" = "Default video codec:";
+"窗口捕获：" = "Window Capture:";
+"显示文件列表" = "Show Recordings List";
+"隐藏" = "Hide";
+"选择窗口" = "Choose Window";
+"麦克风音量" = "Mic Volume";

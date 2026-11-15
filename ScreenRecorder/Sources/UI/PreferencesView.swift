@@ -196,117 +196,184 @@ private struct GeneralTab: View {
 
     var body: some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 18) {
-                // Omi「通用」页同构：保存目录（含副标题）→ 默认录制参数 → 录制时 →
-                // 录制提醒 → 编辑完成后 → 窗口捕获。
-                settingSection("保存位置") {
-                    outputDirectoryRow
+            VStack(alignment: .leading, spacing: 0) {
+                generalGroup("录制文件保存目录：") {
+                    folderPickerButton
                     Text("所有录制的文件会默认保存到该目录下。")
                         .font(.footnote)
                         .foregroundStyle(OmiStyle.subtleText)
-                        .padding(.leading, 96 + 8)
                 }
-                settingSection("默认录制") {
-                    pickerRow("倒计时", selection: $settings.countdownSeconds) {
-                        Text("无").tag(0)
-                        Text("3 秒").tag(3)
-                        Text("5 秒").tag(5)
-                        Text("10 秒").tag(10)
-                    }
-                    pickerRow("帧率", selection: $settings.fps) {
-                        Text("30 fps").tag(30)
-                        Text("60 fps").tag(60)
-                    }
-                    // 录制清晰度（2026-11-15，参考 Omi 的默认分辨率档）：开录快照。
-                    pickerRow("清晰度", selection: $settings.captureQuality, width: 160) {
-                        Text("原始分辨率").tag(CaptureQuality.source)
-                        Text("1080p").tag(CaptureQuality.p1080)
-                        Text("720p").tag(CaptureQuality.p720)
-                    }
-                }
-                settingSection("录制时") {
-                    toggleRow("录制光标", isOn: $settings.captureMouseCursor)
-                    toggleRow("点击高亮", isOn: $settings.clickHighlightEnabled)
-                    toggleRow("点击自动缩放", isOn: $settings.autoZoomEnabled)
-                    pickerRow("缩放档位", selection: $settings.autoZoomLevel) {
-                        Text("1.35x").tag(1.35)
-                        Text("1.6x").tag(1.6)
-                        Text("1.9x").tag(1.9)
-                    }
-                    .disabled(!settings.autoZoomEnabled)
-                    toggleRow("点击音效", isOn: $settings.clickSoundEnabled)
-                    toggleRow("系统声音", isOn: $settings.captureSystemAudio)
-                    toggleRow("包含麦克风", isOn: $settings.captureMicrophone)
-                    toggleRow("录制中静音", isOn: $settings.micMuted)
+                Divider()
+                generalGroup("录制时：") {
+                    checkRow("录制光标", isOn: $settings.captureMouseCursor)
+                    checkRow("点击音效", isOn: $settings.clickSoundEnabled)
+                    checkRow("点击高亮", isOn: $settings.clickHighlightEnabled)
+                    checkRow("点击自动缩放", isOn: $settings.autoZoomEnabled)
                     HStack(spacing: 8) {
-                        rowLabel("麦克风音量")
+                        Text("缩放档位")
+                            .foregroundStyle(OmiStyle.subtleText)
+                        Picker("", selection: $settings.autoZoomLevel) {
+                            Text("1.35x").tag(1.35)
+                            Text("1.6x").tag(1.6)
+                            Text("1.9x").tag(1.9)
+                        }
+                        .labelsHidden()
+                        .frame(width: 160, alignment: .leading)
+                        .disabled(!settings.autoZoomEnabled)
+                    }
+                    checkRow("系统声音", isOn: $settings.captureSystemAudio)
+                    checkRow("包含麦克风", isOn: $settings.captureMicrophone)
+                    checkRow("录制中静音", isOn: $settings.micMuted)
+                    HStack(spacing: 8) {
+                        Text("麦克风音量")
+                            .foregroundStyle(OmiStyle.subtleText)
                         Slider(value: $settings.micVolume, in: 0...1)
+                            .frame(width: 160)
                             .disabled(!settings.captureMicrophone)
                         Text("\(Int((settings.micVolume * 100).rounded()))%")
                             .monospacedDigit()
                             .frame(minWidth: 40, alignment: .trailing)
                     }
                 }
-                settingSection("提醒与应用") {
-                    pickerRow("录制提醒间隔", selection: $settings.recordingReminderIntervalHours, width: 180) {
+                Divider()
+                generalGroup("录制完成后：") {
+                    checkRow("显示文件列表", isOn: $settings.recordCompletedShowList)
+                }
+                Divider()
+                generalGroup("编辑完成后：") {
+                    checkRow("打开所在目录", isOn: $settings.editorPostExportRevealInFinder)
+                    checkRow("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
+                }
+                Divider()
+                generalGroup("Dock栏App图标：") {
+                    checkRow("隐藏", isOn: $settings.dockIconHidden)
+                }
+                Divider()
+                generalGroup("录制提醒间隔：") {
+                    pickerGeneral("录制提醒间隔", selection: $settings.recordingReminderIntervalHours, width: 200) {
                         Text("1 小时（默认）").tag(1)
                         Text("2 小时").tag(2)
                         Text("3 小时").tag(3)
                         Text("从不").tag(0)
                     }
-                    toggleRow("开机自启", isOn: $settings.launchAtLogin)
                 }
-                settingSection("编辑导出完成后") {
-                    toggleRow("打开所在目录", isOn: $settings.editorPostExportRevealInFinder)
-                    toggleRow("删除原始文件", isOn: $settings.editorPostExportDeleteOriginal)
-                }
-                settingSection("窗口捕获") {
-                    windowTargetRow
-                    // 选择按钮与值同列（96pt 空占位对齐内容列）。
-                    HStack(spacing: 8) {
-                        Color.clear.frame(width: 96, height: 0)
-                        Button("选择窗口…") { onPickWindowTarget() }
-                        Spacer(minLength: 0)
+                Divider()
+                generalGroup("默认屏幕录制分辨率：") {
+                    pickerGeneral("分辨率", selection: $settings.captureQuality, width: 200) {
+                        Text("原始分辨率").tag(CaptureQuality.source)
+                        Text("1080p").tag(CaptureQuality.p1080)
+                        Text("720p").tag(CaptureQuality.p720)
                     }
                 }
+                generalGroup("默认屏幕录制帧率：") {
+                    pickerGeneral("帧率", selection: $settings.fps, width: 200) {
+                        Text("30FPS").tag(30)
+                        Text("60FPS").tag(60)
+                    }
+                }
+                generalGroup("默认屏幕录制倒计时时长：") {
+                    pickerGeneral("倒计时时长", selection: $settings.countdownSeconds, width: 200) {
+                        Text("无").tag(0)
+                        Text("3 秒").tag(3)
+                        Text("5 秒").tag(5)
+                        Text("10 秒").tag(10)
+                    }
+                }
+                generalGroup("默认视频编码：") {
+                    pickerGeneral("编码", selection: $settings.videoCodec, width: 200) {
+                        Text("H.264").tag(SettingsStore.VideoCodec.h264)
+                        if HEVCEncoderCapability.hevcHardwareEncodingAvailable {
+                            Text("HEVC").tag(SettingsStore.VideoCodec.hevc)
+                        } else {
+                            Text("HEVC（需硬件编码器）")
+                                .tag(SettingsStore.VideoCodec.hevc)
+                                .disabled(true)
+                        }
+                    }
+                }
+                Divider()
+                generalGroup("窗口捕获：") {
+                    windowTargetRow
+                    Button("选择窗口…") { onPickWindowTarget() }
+                }
             }
-            .padding(.vertical, 8)
         }
     }
 
-    /// 输出目录行（统一行构造）：路径两行截断 + 选择按钮均在内容列。
-    private var outputDirectoryRow: some View {
-        HStack(alignment: .top, spacing: 8) {
-            rowLabel("输出目录")
-                .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 6) {
-                Text(settings.outputDirectory.path)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .help(settings.outputDirectory.path)
-                Button("选择…") { chooseOutputDirectory() }
+    /// Omi「通用」页分组行（标签列右对齐 + 内容列，2026-11-15 像素级仿制）。
+    private func generalGroup<Content: View>(
+        _ label: LocalizedStringKey,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label)
+                .frame(width: 185, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 10) {
+                content()
             }
             Spacer(minLength: 0)
         }
+        .padding(.vertical, 12)
     }
 
-    /// HEVC 硬件编码器不可用时：HEVC 选项禁用并标注（硬件能力进程内缓存，读取零开销）。
-    private var codecPicker: some View {
-        Picker("", selection: $settings.videoCodec) {
-            Text("H.264").tag(SettingsStore.VideoCodec.h264)
-            if HEVCEncoderCapability.hevcHardwareEncodingAvailable {
-                Text("HEVC").tag(SettingsStore.VideoCodec.hevc)
-            } else {
-                Text("HEVC（需硬件编码器）")
-                    .tag(SettingsStore.VideoCodec.hevc)
-                    .disabled(true)
-            }
+    /// 勾选行（Omi 同款：checkbox + 文字，堆叠于内容列）。
+    private func checkRow(_ title: LocalizedStringKey, isOn: Binding<Bool>) -> some View {
+        Toggle(isOn: isOn) {
+            Text(title)
         }
-        .pickerStyle(.radioGroup)
-        .horizontalRadioGroupLayout()
+        .toggleStyle(.checkbox)
     }
 
-    /// 当前目标行（窗口捕获）：App 名 + 窗口标题，未配置「未设置」。
+    /// 通用页下拉行（标签 + 200pt 菜单选择器，表单外自绘）。
+    private func pickerGeneral<S: Hashable, C: View>(
+        _ label: LocalizedStringKey,
+        selection: Binding<S>,
+        width: CGFloat,
+        @ViewBuilder content: () -> C
+    ) -> some View {
+        Picker(selection: selection) {
+            content()
+        } label: {
+            Text(label)
+        }
+        .labelsHidden()
+        .frame(width: width, alignment: .leading)
+    }
+
+    /// 保存目录按钮（Omi 同款：文件夹图标 + 路径，点击弹 NSOpenPanel）。
+    private var folderPickerButton: some View {
+        Button {
+            chooseOutputDirectory()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "folder.fill")
+                Text(displayPath)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.primary.opacity(0.12)))
+        }
+        .buttonStyle(.plain)
+        .frame(width: 300, alignment: .leading)
+        .help(displayPath)
+    }
+
+    private var displayPath: String {
+        let home = NSHomeDirectory() as NSString
+        let path = settings.outputDirectory.path as NSString
+        return path.hasPrefix(home as String)
+            ? "~" + path.substring(from: home.length)
+            : path as String
+    }
+
+    /// 窗口捕获行（96pt 标签列沿用录制源页行构造，当前目标值截断规则同前）。
     private var windowTargetRow: some View {
         HStack(spacing: 8) {
             rowLabel("当前目标")
