@@ -40,6 +40,11 @@ struct RecordingListView: View {
                     menuProvider: { selection in self.makeMenu(for: selection) },
                     onDoubleClick: { item in NSWorkspace.shared.open(item.url) } // 双击行：播放
                 )
+                // 卡片容器（Omi 风格，2026-11-15）：表格底色由圆角卡提供。
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(OmiStyle.cardBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
                 .padding(.horizontal, 12)
                 .padding(.top, 12)
             }

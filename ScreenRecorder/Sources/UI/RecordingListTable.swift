@@ -28,9 +28,11 @@ struct RecordingListTable: NSViewRepresentable {
         let table = RowMenuTableView()
         table.dataSource = context.coordinator
         table.delegate = context.coordinator
-        table.headerView = nil // 旧 SwiftUI Table 表头无排序交互（纯展示），原生等价简化为无表头
+        // 原生列表头（2026-11-15 布局优化）：列名（名称/大小/时长/创建时间）显示在顶部，
+        // 无排序交互（纯展示）。
+        table.headerView = NSTableHeaderView()
         table.usesAlternatingRowBackgroundColors = false // Omi 卡面：白卡行 + 绿柔光选中（OmiTableRowView）
-        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.allowsEmptySelection = true
         table.usesAutomaticRowHeights = false
         table.rowHeight = 28
