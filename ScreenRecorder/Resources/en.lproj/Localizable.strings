@@ -393,3 +393,25 @@
 "虚拟背景：" = "Virtual Background:";
 "在录制画面中显示摄像头" = "Show camera in the recording";
 "未选择窗口" = "No window selected";
+
+/* Omi 键盘事件页像素级复刻（2026-11-15） */
+"仅显示组合按键 (⌘,⌥,⌃,⇧)：" = "Only show key combinations (⌘,⌥,⌃,⇧):";
+"字体大小：" = "Font Size:";
+"面板上的按键大小" = "Key size on the panel";
+"最小" = "Min";
+"最大" = "Max";
+"换行延迟：" = "Wrap Delay:";
+"换行前的时长" = "Time before wrapping";
+"短" = "Short";
+"长" = "Long";
+"停留时间：" = "Display Duration:";
+"文字消失之前的时长" = "How long text stays visible";
+"消失时长：" = "Fade Duration:";
+"消失动画的时长" = "Duration of the fade-out animation";
+"立即" = "Instant";
+"快速" = "Fast";
+"面板颜色：" = "Panel Color:";
+"文字颜色：" = "Text Color:";
+"开启预览" = "Start Preview";
+"停止预览" = "Stop Preview";
+"在开启预览后尝试键盘输入" = "Try typing while preview is on";

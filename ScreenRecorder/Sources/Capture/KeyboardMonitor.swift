@@ -198,6 +198,10 @@ final class KeyboardMonitor {
     private let secureInputProbe: () -> Bool
     private let styleProvider: () -> KeyboardOverlayStyle
     private let lingerProvider: () -> TimeInterval
+    /// 换行延迟 live 读缝（秒；0 = 不合行）。
+    private let wrapDelayProvider: () -> Double
+    /// 消失动画时长 live 读缝（秒；0 = 停留到期立即消失）。
+    private let fadeSecondsProvider: () -> Double
     private let now: () -> TimeInterval
 
     /// 是否已装监听（主 actor 可读；internal 缝供无头钉测）。
@@ -229,9 +233,11 @@ final class KeyboardMonitor {
          globalPermissionProbe: @escaping () -> Bool = { InputMonitoringPermission.isGranted() },
          secureInputProbe: @escaping () -> Bool = { isSecureEventInputEnabled() },
          styleProvider: @escaping () -> KeyboardOverlayStyle = {
-             KeyboardOverlayStyle(colorAlternate: false, fontSize: 14)
+             KeyboardOverlayStyle(fontSize: 14)
          },
          lingerProvider: @escaping () -> TimeInterval = { 2 },
+         wrapDelayProvider: @escaping () -> Double = { 0.5 },
+         fadeSecondsProvider: @escaping () -> Double = { 0.2 },
          now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.state = state
         self.store = store
@@ -241,6 +247,8 @@ final class KeyboardMonitor {
         self.secureInputProbe = secureInputProbe
         self.styleProvider = styleProvider
         self.lingerProvider = lingerProvider
+        self.wrapDelayProvider = wrapDelayProvider
+        self.fadeSecondsProvider = fadeSecondsProvider
         self.now = now
     }
 
@@ -368,6 +376,8 @@ final class KeyboardMonitor {
     private func refreshStore() {
         store.update(state.snapshot(style: styleProvider(),
                                     lingerSeconds: lingerProvider(),
+                                    wrapDelaySeconds: wrapDelayProvider(),
+                                    fadeSeconds: fadeSecondsProvider(),
                                     now: now()))
     }
 

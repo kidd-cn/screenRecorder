@@ -141,18 +141,102 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(keyboardOverlayEnabled, forKey: Self.keyboardOverlayEnabledKey) }
     }
 
-    /// 键帽颜色两色单选（P4）：false = 主色（默认），true = 备选色；取色渲染在
-    /// 合成器（Task 9），此处只存布尔档位。
-    @Published var keyboardOverlayColorIsAlternate: Bool {
+    /// 仅显示组合按键（2026-11-15 Omi 键盘事件页复刻）：开启后纯单键（无 ⇧⌃⌥⌘
+    /// 前缀）的键帽不上屏。live 语义（样式 live 读缝逐帧供帧，改动即时生效）。
+    @Published var keyboardOverlayCombosOnly: Bool {
+        didSet { defaults.set(keyboardOverlayCombosOnly, forKey: Self.keyboardOverlayCombosOnlyKey) }
+    }
+
+    /// 换行延迟（秒，Omi 同名控件；合法 0…1 默认 0.5）：窗口内连续结算的键帽合为
+    /// 一行显示（"⌘C ⌘V"），间隔 ≥ 窗口即断行。live 语义同上。
+    @Published var keyboardOverlayWrapDelaySeconds: Double {
         didSet {
-            defaults.set(keyboardOverlayColorIsAlternate,
-                         forKey: Self.keyboardOverlayColorIsAlternateKey)
+            let normalized = Self.normalizedUnitRange(keyboardOverlayWrapDelaySeconds, fallback: 0.5)
+            guard normalized == keyboardOverlayWrapDelaySeconds else {
+                keyboardOverlayWrapDelaySeconds = normalized
+                return
+            }
+            defaults.set(normalized, forKey: Self.keyboardOverlayWrapDelayKey)
         }
     }
 
-    /// 键帽字号档位（P4，合法 12/14/18 默认 14）：越界 didSet 钳回 14——沿用
-    /// autoZoomLevel 的「不等才收敛赋值一次、重入轮落库」写法（@Published 的 didSet
-    /// 内再赋值、含同值赋值都会重入 didSet，见 autoZoomLevel 注释定论）。
+    /// 消失时长（秒，Omi 同名控件；合法 0…1 默认 0.2）：停留到期后的淡出动画时长
+    ///（0 = 立即消失）。live 语义同上。
+    @Published var keyboardOverlayFadeSeconds: Double {
+        didSet {
+            let normalized = Self.normalizedUnitRange(keyboardOverlayFadeSeconds, fallback: 0.2)
+            guard normalized == keyboardOverlayFadeSeconds else {
+                keyboardOverlayFadeSeconds = normalized
+                return
+            }
+            defaults.set(normalized, forKey: Self.keyboardOverlayFadeKey)
+        }
+    }
+
+    /// 键帽面板色（2026-11-15 色井自由取色，替代原两色单选）：NSKeyedArchiver 归档
+    /// NSColor(deviceRGB) 落库；解码失败回退默认黑 65%。文字色同构。
+    @Published private var keyboardOverlayPanelColorData: Data? {
+        didSet {
+            if let keyboardOverlayPanelColorData {
+                defaults.set(keyboardOverlayPanelColorData, forKey: Self.keyboardOverlayPanelColorKey)
+            } else {
+                defaults.removeObject(forKey: Self.keyboardOverlayPanelColorKey)
+            }
+        }
+    }
+
+    /// 键帽文字色（同面板色存取口径；默认白）。
+    @Published private var keyboardOverlayTextColorData: Data? {
+        didSet {
+            if let keyboardOverlayTextColorData {
+                defaults.set(keyboardOverlayTextColorData, forKey: Self.keyboardOverlayTextColorKey)
+            } else {
+                defaults.removeObject(forKey: Self.keyboardOverlayTextColorKey)
+            }
+        }
+    }
+
+    /// 面板色读写桥（KeyboardOverlayColor ↔ 归档数据；写 nil 等价默认色）。
+    var keyboardOverlayPanelColor: KeyboardOverlayColor {
+        get { Self.decodeColor(keyboardOverlayPanelColorData) ?? .panelDefault }
+        set { keyboardOverlayPanelColorData = Self.encodeColor(newValue) }
+    }
+
+    /// 文字色读写桥（同上；默认白）。
+    var keyboardOverlayTextColor: KeyboardOverlayColor {
+        get { Self.decodeColor(keyboardOverlayTextColorData) ?? .textDefault }
+        set { keyboardOverlayTextColorData = Self.encodeColor(newValue) }
+    }
+
+    /// KeyboardOverlayColor → 归档数据（deviceRGB 四分量直存，24 字节定长负载）。
+    private static func encodeColor(_ color: KeyboardOverlayColor) -> Data? {
+        var red = color.red
+        var green = color.green
+        var blue = color.blue
+        var alpha = color.alpha
+        var data = Data(capacity: 32)
+        withUnsafeBytes(of: &red) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &green) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &blue) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: &alpha) { data.append(contentsOf: $0) }
+        return data
+    }
+
+    /// 归档数据 → KeyboardOverlayColor（长度/对齐不符回退 nil = 调用方取默认色）。
+    private static func decodeColor(_ data: Data?) -> KeyboardOverlayColor? {
+        guard let data, data.count == 32 else { return nil }
+        func component(at offset: Int) -> Double {
+            data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Double.self) }
+        }
+        return KeyboardOverlayColor(
+            red: component(at: 0), green: component(at: 8),
+            blue: component(at: 16), alpha: component(at: 24))
+    }
+
+    /// 键帽字号（P4，2026-11-15 Omi 页复刻改滑杆连续取值；合法 12…48 默认 14）：
+    /// 越界 didSet 钳回区间——沿用 autoZoomLevel 的「不等才收敛赋值一次、重入轮
+    /// 落库」写法（@Published 的 didSet 内再赋值、含同值赋值都会重入 didSet，见
+    /// autoZoomLevel 注释定论）。
     @Published var keyboardOverlayFontSize: Int {
         didSet {
             let normalized = Self.normalizedKeyboardOverlayFontSize(keyboardOverlayFontSize)
@@ -164,8 +248,8 @@ final class SettingsStore: ObservableObject {
         }
     }
 
-    /// 键帽停留时长档位（P4，合法 1/2/3 秒默认 2）：越界 didSet 钳回 2，收敛写法
-    /// 同字号档位。
+    /// 键帽停留时长（P4，2026-11-15 Omi 页复刻改滑杆连续取值；合法 1…5 秒默认 2）：
+    /// 越界 didSet 钳回区间，收敛写法同字号。
     @Published var keyboardOverlayLingerSeconds: Double {
         didSet {
             let normalized = Self.normalizedKeyboardOverlayLingerSeconds(keyboardOverlayLingerSeconds)
@@ -298,10 +382,18 @@ final class SettingsStore: ObservableObject {
         self.autoZoomLevel = Self.normalizedAutoZoomLevel(userDefaults.object(forKey: Self.autoZoomLevelKey) as? Double)
         // P1b：点击音效（opt-in 默认关；快照语义同上）。
         self.clickSoundEnabled = userDefaults.object(forKey: Self.clickSoundEnabledKey) as? Bool ?? false
-        // P4：键盘按键可视化（opt-in 默认关）；字号/停留载入野值钳回默认档
-        // （init 内赋值不触发 didSet，落库野值原样保留、不回写，与 fps/countdown 同纪律）。
-        self.keyboardOverlayEnabled = userDefaults.object(forKey: Self.keyboardOverlayEnabledKey) as? Bool ?? false
-        self.keyboardOverlayColorIsAlternate = userDefaults.object(forKey: Self.keyboardOverlayColorIsAlternateKey) as? Bool ?? false
+        // P4：键盘按键可视化（2026-11-15 Omi 页复刻：页面无启用开关，默认改为开
+        // ——键帽随录制常显；曾显式关闭的用户落库 false 仍受尊重）。字号/停留改连续
+        // 区间钳制，换行延迟/消失时长野值钳回 0…1（init 内赋值不触发 didSet，落库
+        // 野值原样保留、不回写，与 fps/countdown 同纪律）。
+        self.keyboardOverlayEnabled = userDefaults.object(forKey: Self.keyboardOverlayEnabledKey) as? Bool ?? true
+        self.keyboardOverlayCombosOnly = userDefaults.object(forKey: Self.keyboardOverlayCombosOnlyKey) as? Bool ?? false
+        self.keyboardOverlayWrapDelaySeconds = Self.normalizedUnitRange(
+            userDefaults.object(forKey: Self.keyboardOverlayWrapDelayKey) as? Double ?? 0.5, fallback: 0.5)
+        self.keyboardOverlayFadeSeconds = Self.normalizedUnitRange(
+            userDefaults.object(forKey: Self.keyboardOverlayFadeKey) as? Double ?? 0.2, fallback: 0.2)
+        self.keyboardOverlayPanelColorData = userDefaults.data(forKey: Self.keyboardOverlayPanelColorKey)
+        self.keyboardOverlayTextColorData = userDefaults.data(forKey: Self.keyboardOverlayTextColorKey)
         self.keyboardOverlayFontSize = Self.normalizedKeyboardOverlayFontSize(userDefaults.object(forKey: Self.keyboardOverlayFontSizeKey) as? Int)
         self.keyboardOverlayLingerSeconds = Self.normalizedKeyboardOverlayLingerSeconds(userDefaults.object(forKey: Self.keyboardOverlayLingerSecondsKey) as? Double)
         // T17：上次使用的采集模式（⇧⌘R 开录用）；缺省/解码失败回退全屏（主显示器）。
@@ -353,7 +445,11 @@ final class SettingsStore: ObservableObject {
     private static let autoZoomLevelKey = "autoZoomLevel"
     private static let clickSoundEnabledKey = "clickSoundEnabled"
     private static let keyboardOverlayEnabledKey = "keyboardOverlayEnabled"
-    private static let keyboardOverlayColorIsAlternateKey = "keyboardOverlayColorIsAlternate"
+    private static let keyboardOverlayCombosOnlyKey = "keyboardOverlayCombosOnly"
+    private static let keyboardOverlayWrapDelayKey = "keyboardOverlayWrapDelaySeconds"
+    private static let keyboardOverlayFadeKey = "keyboardOverlayFadeSeconds"
+    private static let keyboardOverlayPanelColorKey = "keyboardOverlayPanelColorData"
+    private static let keyboardOverlayTextColorKey = "keyboardOverlayTextColorData"
     private static let keyboardOverlayFontSizeKey = "keyboardOverlayFontSize"
     private static let keyboardOverlayLingerSecondsKey = "keyboardOverlayLingerSeconds"
     private static let lastCaptureModeKey = "lastCaptureMode"
@@ -382,16 +478,22 @@ final class SettingsStore: ObservableObject {
         return raw
     }
 
-    /// 合法键帽字号档位 12/14/18；越界/缺失回退 14（P4）。
+    /// 合法键帽字号区间 12…48；越界钳回区间界、缺失回退 14（P4，2026-11-15 改连续滑杆）。
     private static func normalizedKeyboardOverlayFontSize(_ raw: Int?) -> Int {
-        guard let raw, raw == 12 || raw == 14 || raw == 18 else { return 14 }
-        return raw
+        guard let raw else { return 14 }
+        return min(48, max(12, raw))
     }
 
-    /// 合法键帽停留时长档位 1/2/3 秒；越界/缺失回退 2（P4）。
+    /// 合法键帽停留时长区间 1…5 秒；越界钳回区间界、缺失回退 2（P4，2026-11-15 改连续滑杆）。
     private static func normalizedKeyboardOverlayLingerSeconds(_ raw: Double?) -> Double {
-        guard let raw, raw == 1 || raw == 2 || raw == 3 else { return 2 }
-        return raw
+        guard let raw else { return 2 }
+        return min(5, max(1, raw))
+    }
+
+    /// 单位区间 0…1 钳制（换行延迟/消失时长共用；载入野值钳回区间界，didSet 载入
+    /// 用 fallback 缺省）。
+    private static func normalizedUnitRange(_ raw: Double, fallback: Double) -> Double {
+        raw.isFinite ? min(1, max(0, raw)) : fallback
     }
 
     /// 合法长录提醒间隔档位 0（从不）/1/2/3 小时；越界/缺失回退 1（Q5）。

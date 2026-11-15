@@ -216,59 +216,90 @@ final class SettingsStoreTests: XCTestCase {
 
     // MARK: P4 键盘按键可视化样式（Task 8 简报钉测）
 
-    /// 简报钉测 testStyleParamsRoundTrip：开关默认关（opt-in）、两色单选默认主色、
-    /// 字号默认 14（didSet 越界钳回 {12,14,18}→14）、停留默认 2s（越界钳回
-    /// {1,2,3}→2），合法档原样通过，四项跨实例往返。
+    /// testStyleParamsRoundTrip（2026-11-15 Omi 键盘事件页复刻改版）：默认开（页面无
+    /// 启用开关，键帽随录制常显）、组合过滤默认关、字号默认 14（连续 12…48 越界钳界）、
+    /// 停留默认 2s（连续 1…5 越界钳界）、换行延迟默认 0.5 / 消失时长默认 0.2（0…1 越界
+    /// 钳界）、面板黑 65% / 文字白，全项跨实例往返。
     func testStyleParamsRoundTrip() {
         let store = SettingsStore(userDefaults: defaults)
 
-        XCTAssertFalse(store.keyboardOverlayEnabled, "P4 opt-in 默认关")
-        XCTAssertFalse(store.keyboardOverlayColorIsAlternate, "两色单选默认主色")
+        XCTAssertTrue(store.keyboardOverlayEnabled, "Omi 复刻：默认开（页面无启用开关）")
+        XCTAssertFalse(store.keyboardOverlayCombosOnly, "仅显示组合按键默认关")
         XCTAssertEqual(store.keyboardOverlayFontSize, 14)
         XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2)
+        XCTAssertEqual(store.keyboardOverlayWrapDelaySeconds, 0.5)
+        XCTAssertEqual(store.keyboardOverlayFadeSeconds, 0.2)
+        XCTAssertEqual(store.keyboardOverlayPanelColor, .panelDefault, "面板色默认黑 65%")
+        XCTAssertEqual(store.keyboardOverlayTextColor, .textDefault, "文字色默认白")
 
         store.keyboardOverlayFontSize = 99
-        XCTAssertEqual(store.keyboardOverlayFontSize, 14, "越界字号钳回默认 14")
-        store.keyboardOverlayFontSize = 13
-        XCTAssertEqual(store.keyboardOverlayFontSize, 14)
+        XCTAssertEqual(store.keyboardOverlayFontSize, 48, "越界字号钳上界 48")
+        store.keyboardOverlayFontSize = 11
+        XCTAssertEqual(store.keyboardOverlayFontSize, 12, "越界字号钳下界 12")
         store.keyboardOverlayFontSize = 12
-        XCTAssertEqual(store.keyboardOverlayFontSize, 12, "合法档位原样通过")
-        store.keyboardOverlayFontSize = 18
-        XCTAssertEqual(store.keyboardOverlayFontSize, 18)
+        XCTAssertEqual(store.keyboardOverlayFontSize, 12, "界内原样通过")
+        store.keyboardOverlayFontSize = 24
+        XCTAssertEqual(store.keyboardOverlayFontSize, 24)
 
-        store.keyboardOverlayLingerSeconds = 5
-        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2, "越界停留钳回默认 2")
-        store.keyboardOverlayLingerSeconds = 0
-        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2)
+        store.keyboardOverlayLingerSeconds = 6
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 5, "越界停留钳上界 5")
+        store.keyboardOverlayLingerSeconds = 0.5
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 1, "越界停留钳下界 1")
         store.keyboardOverlayLingerSeconds = 1
-        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 1, "合法档位原样通过")
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 1, "界内原样通过")
         store.keyboardOverlayLingerSeconds = 3
         XCTAssertEqual(store.keyboardOverlayLingerSeconds, 3)
 
-        // 合法组合跨实例往返
-        store.keyboardOverlayEnabled = true
-        store.keyboardOverlayColorIsAlternate = true
-        store.keyboardOverlayFontSize = 18
+        store.keyboardOverlayWrapDelaySeconds = 2
+        XCTAssertEqual(store.keyboardOverlayWrapDelaySeconds, 1, "越界换行延迟钳上界 1")
+        store.keyboardOverlayWrapDelaySeconds = -1
+        XCTAssertEqual(store.keyboardOverlayWrapDelaySeconds, 0, "越界换行延迟钳下界 0")
+        store.keyboardOverlayWrapDelaySeconds = 0.5
+        XCTAssertEqual(store.keyboardOverlayWrapDelaySeconds, 0.5)
+
+        store.keyboardOverlayFadeSeconds = 3
+        XCTAssertEqual(store.keyboardOverlayFadeSeconds, 1, "越界消失时长钳上界 1")
+        store.keyboardOverlayFadeSeconds = 0.2
+        XCTAssertEqual(store.keyboardOverlayFadeSeconds, 0.2)
+
+        // 合法组合跨实例往返（含色井 RGBA 保值）
+        store.keyboardOverlayEnabled = false
+        store.keyboardOverlayCombosOnly = true
+        store.keyboardOverlayFontSize = 24
         store.keyboardOverlayLingerSeconds = 3
+        store.keyboardOverlayWrapDelaySeconds = 0.8
+        store.keyboardOverlayFadeSeconds = 0.4
+        store.keyboardOverlayPanelColor = KeyboardOverlayColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.8)
+        store.keyboardOverlayTextColor = KeyboardOverlayColor(red: 1, green: 0.5, blue: 0, alpha: 1)
 
         let reloaded = SettingsStore(userDefaults: defaults)
 
-        XCTAssertTrue(reloaded.keyboardOverlayEnabled)
-        XCTAssertTrue(reloaded.keyboardOverlayColorIsAlternate)
-        XCTAssertEqual(reloaded.keyboardOverlayFontSize, 18)
+        XCTAssertFalse(reloaded.keyboardOverlayEnabled)
+        XCTAssertTrue(reloaded.keyboardOverlayCombosOnly)
+        XCTAssertEqual(reloaded.keyboardOverlayFontSize, 24)
         XCTAssertEqual(reloaded.keyboardOverlayLingerSeconds, 3)
+        XCTAssertEqual(reloaded.keyboardOverlayWrapDelaySeconds, 0.8)
+        XCTAssertEqual(reloaded.keyboardOverlayFadeSeconds, 0.4)
+        XCTAssertEqual(reloaded.keyboardOverlayPanelColor,
+                       KeyboardOverlayColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.8))
+        XCTAssertEqual(reloaded.keyboardOverlayTextColor,
+                       KeyboardOverlayColor(red: 1, green: 0.5, blue: 0, alpha: 1))
     }
 
-    /// defaults 外写野值（字号 99 / 停留 4.5）加载时钳回默认档——沿用
-    /// fps/countdownSeconds 载入钳制模式（init 内赋值不触发 didSet，落库野值不回写）。
+    /// defaults 外写野值（字号 99 / 停留 9 / 换行 7 / 消失 -1）加载时钳回区间界——
+    /// 沿用 fps/countdownSeconds 载入钳制模式（init 内赋值不触发 didSet，落库野值不回写）。
     func testOutOfRangePersistedKeyboardStyleClampsToDefaults() {
         defaults.set(99, forKey: "keyboardOverlayFontSize")
-        defaults.set(4.5, forKey: "keyboardOverlayLingerSeconds")
+        defaults.set(9.0, forKey: "keyboardOverlayLingerSeconds")
+        defaults.set(7.0, forKey: "keyboardOverlayWrapDelaySeconds")
+        defaults.set(-1.0, forKey: "keyboardOverlayFadeSeconds")
 
         let store = SettingsStore(userDefaults: defaults)
 
-        XCTAssertEqual(store.keyboardOverlayFontSize, 14)
-        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 2)
+        XCTAssertEqual(store.keyboardOverlayFontSize, 48)
+        XCTAssertEqual(store.keyboardOverlayLingerSeconds, 5)
+        XCTAssertEqual(store.keyboardOverlayWrapDelaySeconds, 1)
+        XCTAssertEqual(store.keyboardOverlayFadeSeconds, 0)
     }
 
     // MARK: P5 摄像头背景（Task 10 简报钉测）

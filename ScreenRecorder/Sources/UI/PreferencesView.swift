@@ -175,10 +175,15 @@ private func omiNote(_ text: LocalizedStringKey) -> some View {
 /// 视图不做装配副作用。
 struct PreferencesView: View {
     @ObservedObject var settings: SettingsStore
+    /// 键帽预览控制器（Omi「开启预览」）：按钮观察其 isActive 换文案，经
+    /// onToggleKeyboardPreview 回装配层开/停（预览窗归装配层，视图不做装配副作用）。
+    @ObservedObject var keyboardPreview: KeyboardPreviewController
     var onOutputDirectoryChange: (URL) -> Void
     /// 打开窗口选择器（T20「窗口捕获」区「选择窗口…」入口）：呈现归装配层
     ///（`openWindowPicker`，选定只持久化、不开录），视图不做装配副作用。
     var onPickWindowTarget: () -> Void
+    /// 键帽预览开/停（装配层互翻：活跃即停、空闲才可开）。
+    var onToggleKeyboardPreview: () -> Void
     /// 当前页签（默认通用页）。
     @State private var selectedTab = 0
 
@@ -193,7 +198,8 @@ struct PreferencesView: View {
             ShortcutsTab()
                 .tabItem { Label("快捷键", systemImage: "keyboard") }
                 .tag(1)
-            KeyboardTab(settings: settings)
+            KeyboardTab(settings: settings, keyboardPreview: keyboardPreview,
+                        onTogglePreview: onToggleKeyboardPreview)
                 .tabItem { Label("键盘事件", systemImage: "keyboard.badge.ellipsis") }
                 .tag(2)
             BackgroundTab(settings: settings)
@@ -393,60 +399,165 @@ private struct GeneralTab: View {
     }
 }
 
-/// 键盘事件页（Omi Tab 名「键盘事件」）：按键可视化全部行——启用 / 面板颜色 / 字号 /
-/// 停留时长（live 语义：键帽样式逐帧经 provider 读当前设置）。像素级仿 Omi：
-/// 「标签：」185pt 右对齐 + 内容列，行组之间 Divider。
+/// 键盘事件页（Omi Tab 名「键盘事件」，2026-11-15 像素级复刻 48.png）：仅显示组合按键
+/// 勾选行 / 字体大小 / 换行延迟 / 停留时间 / 消失时长 四滑杆（右对齐冒号标签 + 标签下
+/// 灰色小注 + 滑杆下 最小·当前值·最大 刻度）/ 面板颜色 / 文字颜色 色井 / 开启预览
+/// 按钮 + 试输入提示。所有控件 live 语义（键帽样式逐帧经 provider 读当前设置）。
 private struct KeyboardTab: View {
     @ObservedObject var settings: SettingsStore
+    @ObservedObject var keyboardPreview: KeyboardPreviewController
+    var onTogglePreview: () -> Void
 
     var body: some View {
         ScrollView(.vertical) {
             VStack(alignment: .leading, spacing: 0) {
-                omiGroup("按键可视化：") {
-                    omiCheckRow("启用按键可视化", isOn: $settings.keyboardOverlayEnabled)
+                // 首行（Omi 同款：左对齐标签 + 行内勾选框，不用 185pt 列）。
+                HStack(spacing: 10) {
+                    Text("仅显示组合按键 (⌘,⌥,⌃,⇧)：")
+                    Toggle("", isOn: $settings.keyboardOverlayCombosOnly)
+                        .toggleStyle(.checkbox)
+                        .labelsHidden()
+                    Spacer(minLength: 0)
                 }
+                .frame(height: 28)
+                .padding(.vertical, 6)
                 Divider()
-                omiGroup("面板颜色：") {
-                    panelColorPicker
+                omiSliderRow(
+                    label: "字体大小：", subtitle: "面板上的按键大小",
+                    value: fontSizeBinding, range: 12...48,
+                    minLabel: "最小", maxLabel: "最大")
+                omiSliderRow(
+                    label: "换行延迟：", subtitle: "换行前的时长",
+                    value: $settings.keyboardOverlayWrapDelaySeconds, range: 0...1,
+                    minLabel: "短", maxLabel: "长")
+                omiSliderRow(
+                    label: "停留时间：", subtitle: "文字消失之前的时长",
+                    value: $settings.keyboardOverlayLingerSeconds, range: 1...5,
+                    minLabel: "短", maxLabel: "长")
+                omiSliderRow(
+                    label: "消失时长：", subtitle: "消失动画的时长",
+                    value: $settings.keyboardOverlayFadeSeconds, range: 0...1,
+                    minLabel: "立即", maxLabel: "快速")
+                omiColorRow("面板颜色：", color: $settings.keyboardOverlayPanelColor)
+                omiColorRow("文字颜色：", color: $settings.keyboardOverlayTextColor)
+                // 预览（Omi 同款居中主按钮 + 试输入提示）。
+                HStack {
+                    Spacer(minLength: 0)
+                    Button(keyboardPreview.isActive
+                        ? LocalizedStringKey("停止预览")
+                        : LocalizedStringKey("开启预览")) { onTogglePreview() }
+                        .frame(width: 120)
+                    Spacer(minLength: 0)
                 }
-                Divider()
-                omiGroup("字体大小：") {
-                    omiPickerRow("字体大小", selection: $settings.keyboardOverlayFontSize) {
-                        Text("12").tag(12)
-                        Text("14").tag(14)
-                        Text("18").tag(18)
-                    }
-                    .disabled(!settings.keyboardOverlayEnabled)
-                }
-                Divider()
-                omiGroup("停留时间：") {
-                    omiPickerRow("停留时间", selection: $settings.keyboardOverlayLingerSeconds) {
-                        Text("1 秒").tag(1.0)
-                        Text("2 秒").tag(2.0)
-                        Text("3 秒").tag(3.0)
-                    }
-                    .disabled(!settings.keyboardOverlayEnabled)
-                }
-                Divider()
-                omiNote("按键可视化会显示在屏幕录制画面中。")
+                .padding(.vertical, 10)
+                Text("在开启预览后尝试键盘输入")
+                    .font(.footnote)
+                    .foregroundStyle(OmiStyle.subtleText)
+                    .frame(maxWidth: .infinity, alignment: .center)
+                    .padding(.bottom, 6)
             }
             .padding(.vertical, 8)
         }
     }
 
-    /// 面板颜色（Omi 同款单选：主色 / 备选色）。
-    private var panelColorPicker: some View {
-        Picker(selection: $settings.keyboardOverlayColorIsAlternate) {
-            Text("主色").tag(false)
-            Text("备选色").tag(true)
-        } label: {
-            Text("面板颜色")
+    /// 字号滑杆桥（Int 落库 ↔ Double 滑杆，步进 1）。
+    private var fontSizeBinding: Binding<Double> {
+        Binding(
+            get: { Double(settings.keyboardOverlayFontSize) },
+            set: { settings.keyboardOverlayFontSize = Int($0.rounded()) })
+    }
+
+    /// Omi 滑杆行（48.png 几何）：185pt 右对齐标签 + 标签下灰色小注（同列右对齐）；
+    /// 内容列滑杆 + 下方三刻度（左 最小 / 中 当前值一位小数 / 右 最大）。
+    private func omiSliderRow(
+        label: LocalizedStringKey,
+        subtitle: LocalizedStringKey,
+        value: Binding<Double>,
+        range: ClosedRange<Double>,
+        minLabel: LocalizedStringKey,
+        maxLabel: LocalizedStringKey
+    ) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(label)
+                Text(subtitle)
+                    .font(.footnote)
+                    .foregroundStyle(OmiStyle.subtleText)
+            }
+            .frame(width: 185, alignment: .trailing)
+            VStack(spacing: 2) {
+                Slider(value: value, in: range)
+                HStack(spacing: 0) {
+                    Text(minLabel).font(.footnote).foregroundStyle(OmiStyle.subtleText)
+                    Spacer(minLength: 0)
+                    Text(String(format: "%.1f", value.wrappedValue))
+                        .font(.footnote)
+                        .monospacedDigit()
+                    Spacer(minLength: 0)
+                    Text(maxLabel).font(.footnote).foregroundStyle(OmiStyle.subtleText)
+                }
+            }
+            .frame(width: 250)
+            Spacer(minLength: 0)
         }
-        .pickerStyle(.radioGroup)
-        .horizontalRadioGroupLayout()
-        .labelsHidden()
-        .frame(height: 22)
-        .disabled(!settings.keyboardOverlayEnabled)
+        .padding(.vertical, 6)
+    }
+
+    /// Omi 色井行（48.png 几何）：185pt 右对齐标签 + NSColorWell（圆角小色块）。
+    private func omiColorRow(
+        _ label: LocalizedStringKey,
+        color: Binding<KeyboardOverlayColor>
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .frame(width: 185, alignment: .trailing)
+            OmiColorWell(color: color)
+                .frame(width: 48, height: 24)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 6)
+    }
+}
+
+/// NSColorWell 桥（Omi 同款小色块，macOS 13 target-action 口径）：取色面板变更即
+/// 经 Binding 回 SettingsStore 落库（live 语义，键帽逐帧读当前色）。
+private struct OmiColorWell: NSViewRepresentable {
+    @Binding var color: KeyboardOverlayColor
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSColorWell {
+        let well = NSColorWell()
+        well.color = Self.nsColor(color)
+        well.target = context.coordinator
+        well.action = #selector(Coordinator.colorChanged(_:))
+        return well
+    }
+
+    func updateNSView(_ well: NSColorWell, context: Context) {
+        // 取色面板拖动中每拍回写又回流：值同源恒一致，直接对齐（不打断取色面板）。
+        well.color = Self.nsColor(color)
+        context.coordinator.parent = self
+    }
+
+    final class Coordinator: NSObject {
+        var parent: OmiColorWell
+        init(_ parent: OmiColorWell) { self.parent = parent }
+
+        @objc func colorChanged(_ sender: NSColorWell) {
+            let rgb = sender.color.usingColorSpace(.deviceRGB) ?? sender.color
+            parent.color = KeyboardOverlayColor(
+                red: Double(rgb.redComponent),
+                green: Double(rgb.greenComponent),
+                blue: Double(rgb.blueComponent),
+                alpha: Double(rgb.alphaComponent))
+        }
+    }
+
+    private static func nsColor(_ color: KeyboardOverlayColor) -> NSColor {
+        NSColor(deviceRed: color.red, green: color.green, blue: color.blue, alpha: color.alpha)
     }
 }
 

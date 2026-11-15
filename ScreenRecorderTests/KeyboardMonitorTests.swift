@@ -68,8 +68,10 @@ final class KeyboardMonitorTests: XCTestCase {
             enabled: enabled,
             globalPermissionProbe: { globalPermitted },
             secureInputProbe: { [weak self] in self?.secureInputActive ?? false },
-            styleProvider: { KeyboardOverlayStyle(colorAlternate: false, fontSize: 14) },
+            styleProvider: { KeyboardOverlayStyle(fontSize: 14) },
             lingerProvider: { 2 },
+            wrapDelayProvider: { 0 },
+            fadeSecondsProvider: { 0 },
             now: { [weak self] in self?.clock ?? 0 })
     }
 
@@ -86,7 +88,7 @@ final class KeyboardMonitorTests: XCTestCase {
         handlers?.onKeyDown(makeKeyEvent(keyCode: 0, characters: "A"))
         let shown = monitor.currentSnapshot()
         XCTAssertEqual(shown?.text, "A", "全局 keyDown → descriptor → 状态机 live 直显")
-        XCTAssertEqual(shown?.style, KeyboardOverlayStyle(colorAlternate: false, fontSize: 14), "样式原样透传")
+        XCTAssertEqual(shown?.style, KeyboardOverlayStyle(fontSize: 14), "样式原样透传")
 
         handlers?.onKeyUp(makeKeyEvent(keyCode: 0, characters: "A", type: .keyUp))
         clock += 1

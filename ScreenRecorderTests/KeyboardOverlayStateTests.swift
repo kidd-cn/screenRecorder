@@ -7,7 +7,7 @@ import XCTest
 /// 同纪律），断言只走 `snapshot` 纯读口径与 `phase` 观测，不偷看实现内部。
 @MainActor
 final class KeyboardOverlayStateTests: XCTestCase {
-    private let style = KeyboardOverlayStyle(colorAlternate: false, fontSize: 14)
+    private let style = KeyboardOverlayStyle(fontSize: 14)
     private let linger: TimeInterval = 2
 
     // 修饰位本地别名（掩码是纯 Int，运算须写全名——无 OptionSet 点语法）
@@ -189,5 +189,116 @@ final class KeyboardOverlayStateTests: XCTestCase {
         state.keyDown(key(0, characters: "A"), now: 3)
         XCTAssertEqual(state.snapshot(style: style, lingerSeconds: linger, now: 3)?.text, "A",
                        "解除后从头正常")
+    }
+
+    // MARK: 2026-11-15 Omi 键盘事件页复刻钉测（仅组合键 / 换行延迟合行 / 消失时长淡出）
+
+    /// combosOnly：无修饰单键（live 与 linger 两态）恒 nil；带修饰前缀的组合照常；
+    /// 修饰键单独按住（"⌘"）算组合前缀照常显示。
+    func testCombosOnlyFiltersPlainKeysOnly() {
+        let state = KeyboardOverlayState()
+        let combos = KeyboardOverlayStyle(combosOnly: true, fontSize: 14)
+
+        state.keyDown(key(0, characters: "A"), now: 0)
+        XCTAssertNil(state.snapshot(style: combos, lingerSeconds: linger, now: 0),
+                     "combosOnly：单键 live 不显示")
+        XCTAssertNotNil(state.snapshot(style: style, lingerSeconds: linger, now: 0),
+                        "默认样式不受过滤影响")
+        state.keyUp(key(0, characters: "A"), now: 1)
+        XCTAssertNil(state.snapshot(style: combos, lingerSeconds: linger, now: 1.5),
+                     "combosOnly：单键 linger 不显示")
+
+        state.keyDown(key(55, modifiers: command), now: 2)
+        state.keyDown(key(8, characters: "C", modifiers: command), now: 2.2)
+        state.keyUp(key(8, characters: "C", modifiers: command), now: 2.5)
+        state.keyUp(key(55, modifiers: command), now: 2.8)
+        XCTAssertEqual(state.snapshot(style: combos, lingerSeconds: linger, now: 3)?.text, "⌘C",
+                       "combosOnly：组合键两态照常")
+    }
+
+    /// 换行延迟：窗口内连续结算合行为一行（空格连接、带式钉测文本序）；间隔 ≥ 窗口
+    /// 断行只显最新段；wrapDelay 0 = 旧语义不合行。
+    func testWrapDelayMergesConsecutiveSettlements() {
+        let state = KeyboardOverlayState()
+
+        // "A" 弹起结算 0s，"B" 弹起结算 0.3s（0.5s 窗口内）→ 合行 "A B"
+        state.keyDown(key(0, characters: "A"), now: 0)
+        state.keyUp(key(0, characters: "A"), now: 0.1)
+        state.keyDown(key(11, characters: "B"), now: 0.3)
+        state.keyUp(key(11, characters: "B"), now: 0.4)
+        XCTAssertEqual(
+            state.snapshot(style: style, lingerSeconds: 2, wrapDelaySeconds: 0.5, now: 0.5)?.text,
+            "A B", "窗口内连续结算合行")
+        // linger 锚定最新段弹起：0.5 + 2 到期
+        XCTAssertNil(
+            state.snapshot(style: style, lingerSeconds: 2, wrapDelaySeconds: 0.5, now: 2.5))
+        // 断行：0.8s 后再按 C → 只显 "C"
+        state.keyDown(key(8, characters: "C"), now: 1.2)
+        state.keyUp(key(8, characters: "C"), now: 1.4)
+        XCTAssertEqual(
+            state.snapshot(style: style, lingerSeconds: 2, wrapDelaySeconds: 0.5, now: 1.5)?.text,
+            "C", "间隔 ≥ 窗口断行只显最新段")
+
+        // wrapDelay 0：旧语义，第二次结算只显 "B"
+        let plain = KeyboardOverlayState()
+        plain.keyDown(key(0, characters: "A"), now: 0)
+        plain.keyUp(key(0, characters: "A"), now: 0.1)
+        plain.keyDown(key(11, characters: "B"), now: 0.2)
+        plain.keyUp(key(11, characters: "B"), now: 0.3)
+        XCTAssertEqual(
+            plain.snapshot(style: style, lingerSeconds: 2, now: 0.4)?.text, "B",
+            "wrapDelay 0 = 旧语义不合行")
+    }
+
+    /// 消失时长：停留窗口内 opacity 1；淡出期线性 1→0 且文本仍可见；到期（含淡出）
+    /// 后 nil；fade 0 = 停留到期立即 nil（旧语义钉测在既有用例已覆盖）。
+    func testFadeDurationRampsOpacityAfterLinger() {
+        let state = KeyboardOverlayState()
+
+        state.keyDown(key(0, characters: "A"), now: 0)
+        state.keyUp(key(0, characters: "A"), now: 1)
+
+        let duringLinger = state.snapshot(style: style, lingerSeconds: 2, fadeSeconds: 1, now: 1.5)
+        XCTAssertEqual(duringLinger?.opacity, 1, "停留期内全不透明")
+        let fadeStart = state.snapshot(style: style, lingerSeconds: 2, fadeSeconds: 1, now: 3.0)
+        XCTAssertEqual(fadeStart?.text, "A", "淡出起点文本仍在")
+        XCTAssertEqual(fadeStart?.opacity ?? -1, 1, accuracy: 1e-9, "淡出起点 opacity 1")
+        let midFade = state.snapshot(style: style, lingerSeconds: 2, fadeSeconds: 1, now: 3.5)
+        XCTAssertEqual(midFade?.opacity ?? -1, 0.5, accuracy: 1e-9, "淡出中点 opacity 0.5")
+        XCTAssertNil(state.snapshot(style: style, lingerSeconds: 2, fadeSeconds: 1, now: 4.0),
+                     "linger+fade 到期消失")
+        XCTAssertNil(state.snapshot(style: style, lingerSeconds: 2, now: 3.5),
+                     "fade 0 = 停留到期立即消失（旧语义）")
+    }
+
+    /// live 按下打断合行行显示但**保留历史**（换行延迟语义）：新键 live 只接管显示；
+    /// 新结算在窗口内续接旧行（"A B ⌘C"），间隔 ≥ 窗口才断行。
+    func testNewKeyDownContinuesMergedLineWithinWindow() {
+        let state = KeyboardOverlayState()
+        state.keyDown(key(0, characters: "A"), now: 0)
+        state.keyUp(key(0, characters: "A"), now: 0.1)
+        state.keyDown(key(11, characters: "B"), now: 0.2)
+        state.keyUp(key(11, characters: "B"), now: 0.3)
+        XCTAssertEqual(
+            state.snapshot(style: style, lingerSeconds: 2, wrapDelaySeconds: 0.5, now: 0.4)?.text,
+            "A B")
+        // live 期间只显当前组合（旧行不混入 live 直显）
+        state.keyDown(key(55, modifiers: command), now: 0.5)
+        state.keyDown(key(8, characters: "C", modifiers: command), now: 0.55)
+        XCTAssertEqual(
+            state.snapshot(style: style, lingerSeconds: 2, wrapDelaySeconds: 0.5, now: 0.6)?.text,
+            "⌘C", "live 直显只有当前组合")
+        // 全松结算（距上一段 0.25s < 窗口）续接旧行
+        state.keyUp(key(8, characters: "C", modifiers: command), now: 0.7)
+        state.keyUp(key(55, modifiers: command), now: 0.75)
+        XCTAssertEqual(
+            state.snapshot(style: style, lingerSeconds: 2, wrapDelaySeconds: 0.5, now: 0.8)?.text,
+            "A B ⌘C", "窗口内新结算续接旧行")
+        // 间隔 ≥ 窗口后只显最新段
+        state.keyDown(key(6, characters: "Z"), now: 2.0)
+        state.keyUp(key(6, characters: "Z"), now: 2.2)
+        XCTAssertEqual(
+            state.snapshot(style: style, lingerSeconds: 2, wrapDelaySeconds: 0.5, now: 2.3)?.text,
+            "Z", "间隔 ≥ 窗口断行只显最新段")
     }
 }

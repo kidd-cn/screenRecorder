@@ -951,10 +951,9 @@ final class PiPCompositorKeyboardTests: XCTestCase {
     }
 
     private func keycap(text: String = "A",
-                        colorAlternate: Bool = false,
                         fontSize: Int = 14) -> KeyboardOverlaySnapshot {
         KeyboardOverlaySnapshot(text: text,
-                                style: KeyboardOverlayStyle(colorAlternate: colorAlternate, fontSize: fontSize))
+                                style: KeyboardOverlayStyle(fontSize: fontSize))
     }
 
     /// 键帽「半透明暗底叠在底层内容上」的带式断言：主色键帽填充（≈65% 黑）压暗底层后，
@@ -1091,7 +1090,7 @@ final class PiPCompositorSwappedTests: XCTestCase {
 
     private func keycap(text: String = "A", fontSize: Int = 6) -> KeyboardOverlaySnapshot {
         KeyboardOverlaySnapshot(text: text,
-                                style: KeyboardOverlayStyle(colorAlternate: false, fontSize: fontSize))
+                                style: KeyboardOverlayStyle(fontSize: fontSize))
     }
 
     private func click(point: CGPoint, alpha: CGFloat = 1) -> ClickOverlayState {

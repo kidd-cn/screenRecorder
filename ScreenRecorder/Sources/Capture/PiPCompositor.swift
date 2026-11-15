@@ -217,12 +217,8 @@ final class PiPCompositor {
 
     /// 键帽底边距（捕获像素，简报钉定）：键帽底边距画布下沿 24px，水平居中。
     static let keycapBottomMargin: CGFloat = 24
-    /// 键帽配色（P4 两色单选）：主色 = 深底白字（半透明 0.65，悬浮观感不遮底内容重心），
-    /// 备选色 = 浅底黑字（0.85）。取色在合成器（SettingsStore 只存布尔档位）。
-    private static let keycapPrimaryFill = (CGFloat(0.1), CGFloat(0.1), CGFloat(0.1), CGFloat(0.65))
-    private static let keycapPrimaryText = (CGFloat(1), CGFloat(1), CGFloat(1), CGFloat(1))
-    private static let keycapAlternateFill = (CGFloat(1), CGFloat(1), CGFloat(1), CGFloat(0.85))
-    private static let keycapAlternateText = (CGFloat(0), CGFloat(0), CGFloat(0), CGFloat(1))
+    /// 键帽配色（2026-11-15 Omi 页复刻）：定值取色移除，面板/文字色由快照样式
+    /// 自由指定（默认 = 原主色，KeyboardOverlayColor.panelDefault/.textDefault）。
 
     /// 笔画彩色位图（premultiplied RGBA：笔画带各自色值、其余透明，边沿 AA）。
     /// 坐标：笔画点为底帧归一化（左上原点、y 向下 0…1），CGContext 原点左下、y 向上——
@@ -428,21 +424,23 @@ final class PiPCompositor {
     }
 
     /// 键帽位图（圆角矩形底 + CoreText 文字，文字渲染沿用合成器位图生成惯例）：系统字体
-    /// 字号字面直用（SettingsStore 档位 12/14/18 即捕获像素，与 ClickOverlayState
-    /// radiusInPixels 同口径，栅格化时按 1x 捕获像素取值）；两色单选在此外观定值。
+    /// 字号字面直用（捕获像素，与 ClickOverlayState radiusInPixels 同口径，栅格化时按
+    /// 1x 捕获像素取值）；面板/文字色由快照样式自由指定（2026-11-15 Omi 页复刻，
+    /// 默认 = 原主色定值，历史外观零回退），淡出期按快照 opacity 同比压双 alpha。
     /// 布局：水平内边距 0.7×字号、垂直 0.45×字号、圆角 0.28×键帽高，文字基线贴下缘内边距。
     private static func makeKeycapCGImage(for overlay: KeyboardOverlaySnapshot) -> CGImage? {
         let fontSize = CGFloat(overlay.style.fontSize)
         guard fontSize > 0, fontSize.isFinite else { return nil }
-        let (fill, text) = overlay.style.colorAlternate
-            ? (keycapAlternateFill, keycapAlternateText)
-            : (keycapPrimaryFill, keycapPrimaryText)
+        let opacity = CGFloat(max(0, min(1, overlay.opacity)))
+        let fill = overlay.style.panelColor
+        let text = overlay.style.textColor
         let font = CTFontCreateUIFontForLanguage(.system, fontSize, nil)
         guard let font else { return nil } // 字体创建失败：无键帽直通（不丢帧）
         let attributes: [NSAttributedString.Key: Any] = [
             kCTFontAttributeName as NSAttributedString.Key: font,
             kCTForegroundColorAttributeName as NSAttributedString.Key: CGColor(
-                red: text.0, green: text.1, blue: text.2, alpha: text.3),
+                red: CGFloat(text.red), green: CGFloat(text.green),
+                blue: CGFloat(text.blue), alpha: CGFloat(text.alpha) * opacity),
         ]
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: overlay.text, attributes: attributes))
         var ascent: CGFloat = 0
@@ -464,7 +462,8 @@ final class PiPCompositor {
         let radius = CGFloat(height) * 0.28
         let capRect = CGRect(x: 0, y: 0, width: width, height: height)
         context.addPath(CGPath(roundedRect: capRect, cornerWidth: radius, cornerHeight: radius, transform: nil))
-        context.setFillColor(CGColor(red: fill.0, green: fill.1, blue: fill.2, alpha: fill.3))
+        context.setFillColor(CGColor(red: CGFloat(fill.red), green: CGFloat(fill.green),
+                                     blue: CGFloat(fill.blue), alpha: CGFloat(fill.alpha) * opacity))
         context.fillPath()
         // CoreText 文字：基线贴下缘内边距（位图不翻 CTM，CoreText 直绘即正立）。
         context.textPosition = CGPoint(x: padX, y: padY)

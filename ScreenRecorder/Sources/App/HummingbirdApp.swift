@@ -62,6 +62,11 @@ final class AppAssembly: ObservableObject {
     /// 都保持监听——暂停不是生命周期事件，输出侧已有暂停段剔除）。授权判定是 start 内的
     /// 只读预检（缺授权降级仅本地监听，无弹窗）——弹窗只归 PermissionOnboardingView 引导。
     private let keyboardMonitor: KeyboardMonitor
+    /// 键帽预览（2026-11-15 Omi「开启预览」复刻）：与录制合成同源快照桥的悬浮预览窗。
+    /// 装配层编排：开预览临时装机监听器（enabled true + start），停预览/开录还原设置
+    /// 快照语义（仅空闲时还原，录制中不摘）。init 尾段构造（闭包捕获局部 store，
+    /// 不触 self——两段式初始化纪律同 keyboardMonitor）。
+    private(set) var keyboardPreview: KeyboardPreviewController!
     /// 键盘装配订阅保活（$state 生命周期驱动）。
     private var keyboardCancellables: Set<AnyCancellable> = []
     /// 标记覆盖层控制器（P2）：面板/事件泵/显隐，init 末段装配（闭包捕获 self）。
@@ -152,10 +157,16 @@ final class AppAssembly: ObservableObject {
             // 不得捕获 self；settings 单例与容器同寿，闭包持之无环）。
             styleProvider: {
                 KeyboardOverlayStyle(
-                    colorAlternate: settings.keyboardOverlayColorIsAlternate,
-                    fontSize: settings.keyboardOverlayFontSize)
+                    combosOnly: settings.keyboardOverlayCombosOnly,
+                    fontSize: settings.keyboardOverlayFontSize,
+                    panelColor: settings.keyboardOverlayPanelColor,
+                    textColor: settings.keyboardOverlayTextColor)
             },
-            lingerProvider: { settings.keyboardOverlayLingerSeconds })
+            lingerProvider: { settings.keyboardOverlayLingerSeconds },
+            wrapDelayProvider: { settings.keyboardOverlayWrapDelaySeconds },
+            fadeSecondsProvider: { settings.keyboardOverlayFadeSeconds })
+        keyboardPreview = KeyboardPreviewController(
+            snapshotProvider: { [keyboardOverlayStore] in keyboardOverlayStore.currentSnapshot() })
         let coordinator = RecordingSessionCoordinator(
             cameraPiP: cameraPiP,
             clickHighlightTracker: clickHighlightTracker,
@@ -516,6 +527,9 @@ final class AppAssembly: ObservableObject {
         setMarkingEnabled(false)
         markingCanvas.clear()
         markingGeometry = nil
+        // 键帽预览随开录收起（Omi 语义：预览只在空闲态演示；录制画面自带键帽，悬浮
+        // 预览窗与录制并存只会双显）。监听器保持既有快照语义（下面 setEnabled 不变）。
+        if keyboardPreview.isActive { keyboardPreview.stop() }
         // P4 键帽 enabled 快照语义：开录时刻以设置重对齐（录制中途改设置不影响本场；
         // 与 clickHighlightEnabled 同纪律）。装机由 $state 订阅在进入 recording 时驱动，
         // 此处只对齐开关（监听中翻 false 立即摘除，KeyboardMonitor.setEnabled 自理）。
@@ -829,6 +843,24 @@ final class AppAssembly: ObservableObject {
         aboutWindow.show()
     }
 
+    /// 开启键帽预览（偏好设置「开启预览」）：监听器临时装机（enabled true + start；
+    /// 幂等——录制中监听器已在装，start 自守卫），预览窗开跑。授权缺失降级仅本地
+    /// 监听（与录制同口径：其他应用的按键不进预览）。
+    func startKeyboardPreview() {
+        keyboardMonitor.setEnabled(true)
+        keyboardMonitor.start()
+        keyboardPreview.start()
+    }
+
+    /// 停止键帽预览：预览窗收起；监听器仅在空闲态还原设置快照语义（stop 清状态机
+    /// 残影 + setEnabled 回设置值）——录制中不摘（录制键帽照常）。
+    func stopKeyboardPreview() {
+        keyboardPreview.stop()
+        guard controller.state == .idle else { return }
+        keyboardMonitor.stop()
+        keyboardMonitor.setEnabled(settings.keyboardOverlayEnabled)
+    }
+
     func openPreferences() {
         if preferencesWindowController == nil {
             // 520×560（2026-11-14 用户目验：原 480×320 装不下录制源页全部设置项；
@@ -843,12 +875,22 @@ final class AppAssembly: ObservableObject {
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: PreferencesView(
                 settings: settings,
+                keyboardPreview: keyboardPreview,
                 onOutputDirectoryChange: { [weak self] url in
                     self?.updateOutputDirectory(to: url)
                 },
                 onPickWindowTarget: { [weak self] in
                     // 偏好设置入口：选定只持久化、不开录（简报「选定持久化；取消不动现有值」）
                     self?.openWindowPicker(startsRecordingOnSelection: false)
+                },
+                onToggleKeyboardPreview: { [weak self] in
+                    guard let self else { return }
+                    // 开/停互翻：预览活跃即停（含监听器还原），否则开（临时装机）。
+                    if self.keyboardPreview.isActive {
+                        self.stopKeyboardPreview()
+                    } else {
+                        self.startKeyboardPreview()
+                    }
                 }
             ))
             window.center()

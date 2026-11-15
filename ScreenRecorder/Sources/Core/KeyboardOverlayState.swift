@@ -30,19 +30,38 @@ struct KeyDescriptor: Equatable {
     var modifiers: ModifierFlagsMask
 }
 
-/// 键帽样式（Task 9 合成器渲染入参）：`colorAlternate` 两色单选（false = 主色，
-/// true = 备选色，取色在合成器）；`fontSize` 字号档位（SettingsStore 已钳制到
-/// 12/14/18，此处不做二次钳制）。
+/// 键帽颜色（RGBA 四分量，2026-11-15 Omi 键盘事件页复刻）：合成器与预览窗共用；
+/// 元组不合成 Equatable 故独立小结构。
+struct KeyboardOverlayColor: Equatable {
+    var red: Double
+    var green: Double
+    var blue: Double
+    var alpha: Double
+
+    /// 默认面板色（黑 65%——原「主色」键帽底同值，外观零回退）。
+    static let panelDefault = KeyboardOverlayColor(red: 0.1, green: 0.1, blue: 0.1, alpha: 0.65)
+    /// 默认文字色（白——原「主色」键帽文字同值）。
+    static let textDefault = KeyboardOverlayColor(red: 1, green: 1, blue: 1, alpha: 1)
+}
+
+/// 键帽样式（Task 9 合成器渲染入参，2026-11-15 Omi 页复刻改版）：`combosOnly`
+/// 仅显示组合按键（纯文本无 ⇧⌃⌥⌘ 前缀的键帽不上屏）；`fontSize` 捕获像素字号
+///（SettingsStore 已钳制 12…48，此处不做二次钳制）；面板/文字色由偏好色井
+/// 自由指定（默认沿用原「主色」定值，历史外观零回退）。
 struct KeyboardOverlayStyle: Equatable {
-    var colorAlternate: Bool
+    var combosOnly: Bool = false
     var fontSize: Int
+    var panelColor: KeyboardOverlayColor = .panelDefault
+    var textColor: KeyboardOverlayColor = .textDefault
 }
 
 /// 键帽合成快照（Task 9 合成器逐帧入参）：`text` 如 "⌘C"/"A"——修饰符用固定
-/// 符号序 ⇧⌃⌥⌘；`style` 原样透传调用方样式。
+/// 符号序 ⇧⌃⌥⌘；`style` 原样透传调用方样式；`opacity` 消失动画透明度
+///（1 = 停留期正常显示，淡出期 1→0 线性，合成器按比例压填色/文字 alpha）。
 struct KeyboardOverlaySnapshot: Equatable {
     var text: String
     var style: KeyboardOverlayStyle
+    var opacity: Double = 1
 }
 
 /// 键帽聚合状态机（P4 核心）：把键盘事件的按下/松开流聚合成「当前该显示什么」
@@ -94,6 +113,10 @@ final class KeyboardOverlayState: ObservableObject {
     /// 结算文本与锚定时刻（lingering 态）。
     private var settledText: String?
     private var settledAt: TimeInterval?
+    /// 合行历史（2026-11-15 Omi「换行延迟」）：换行延迟窗口内的连续结算累积为一行
+    ///（"⌘C ⌘V" 式空格连接，上界 6 段防无限拉长）；段间间隔 ≥ wrapDelay 即断行
+    ///（只显示最新段）。与 settled 同锚点、同寿命（过期/清空一并走）。
+    private var settledSegments: [(text: String, at: TimeInterval)] = []
     /// 安全输入标志（外部事实，监听层轮询驱动；置位期间整键忽略、snapshot 恒 nil）。
     private var secureInputActive = false
 
@@ -118,6 +141,8 @@ final class KeyboardOverlayState: ObservableObject {
         guard displayedBits != 0 || trailingKeyText != nil else { return }
         settledText = nil
         settledAt = nil
+        // 合行历史**不清**（2026-11-15 换行延迟语义）：新键 live 只接管显示，窗口内
+        // 连续结算仍续接旧行（"A B ⌘C"）；断行由 mergedLine 按段间隔判定。
         liveText = Self.modifierGlyphs(for: displayedBits) + (trailingKeyText ?? "")
         phase = .live
     }
@@ -156,6 +181,7 @@ final class KeyboardOverlayState: ObservableObject {
             liveText = nil
             settledText = nil
             settledAt = nil
+            settledSegments = []
             phase = .idle
         }
     }
@@ -173,21 +199,63 @@ final class KeyboardOverlayState: ObservableObject {
     }
 
     /// now 时刻的键帽快照（合成热路径逐帧调用，纯读零副作用）：安全输入恒 nil
-    /// （静默跳过）；live 态返回当前组合文本；lingering 态在停留窗口内
-    /// （max(0, now − 锚点) < lingerSeconds，时钟回拨钳 0 同 AutoZoomState）返回
-    /// 结算文本，到期/停留参数非法（≤0 或非有限）返回 nil。`style` 原样透传。
+    /// （静默跳过）；live 态返回当前组合文本（`style.combosOnly` 时无 ⇧⌃⌥⌘ 前缀的
+    /// live 文本不显示）；lingering 态在停留窗口内（max(0, now − 锚点) < linger，
+    /// 时钟回拨钳 0 同 AutoZoomState）返回结算行（换行延迟窗口内的连续结算合行），
+    /// 淡出期（linger ≤ elapsed < linger + fadeSeconds）按 1→0 线性透明度续显，
+    /// 到期/参数非法（linger ≤ 0 或非有限）返回 nil。`style` 原样透传。
+    /// `wrapDelaySeconds`/`fadeSeconds` 缺省 0 = 旧语义（不合行、立即消失），既有
+    /// 调用与钉测零改动。
     func snapshot(style: KeyboardOverlayStyle,
                   lingerSeconds: Double,
+                  wrapDelaySeconds: Double = 0,
+                  fadeSeconds: Double = 0,
                   now: TimeInterval) -> KeyboardOverlaySnapshot? {
         if secureInputActive { return nil }
         if let liveText {
+            if style.combosOnly, !Self.isComboText(liveText) { return nil }
             return KeyboardOverlaySnapshot(text: liveText, style: style)
         }
         guard let settledText, let settledAt,
               lingerSeconds.isFinite, lingerSeconds > 0 else { return nil }
         let elapsed = max(0, now - settledAt)
-        guard elapsed < lingerSeconds else { return nil }
-        return KeyboardOverlaySnapshot(text: settledText, style: style)
+        guard elapsed < lingerSeconds + max(0, fadeSeconds) else { return nil }
+        let displayText = Self.mergedLine(segments: settledSegments,
+                                          wrapDelaySeconds: wrapDelaySeconds)
+            ?? settledText
+        if style.combosOnly, !Self.isComboText(displayText) { return nil }
+        let opacity: Double
+        if elapsed < lingerSeconds {
+            opacity = 1
+        } else if fadeSeconds > 0, fadeSeconds.isFinite {
+            opacity = max(0, min(1, 1 - (elapsed - lingerSeconds) / fadeSeconds))
+        } else {
+            return nil // 无淡出：停留到期即消失（旧语义）
+        }
+        return KeyboardOverlaySnapshot(text: displayText, style: style, opacity: opacity)
+    }
+
+    /// 组合键判定（combosOnly 过滤口径）：首字符为 ⇧⌃⌥⌘ 任一显示位 glyph 即组合
+    ///（modifierGlyphs 固定符号序的前缀性保证首字符即最优先位）。
+    static func isComboText(_ text: String) -> Bool {
+        guard let first = text.unicodeScalars.first else { return false }
+        return first == "⇧" || first == "⌃" || first == "⌥" || first == "⌘"
+    }
+
+    /// 合行显示文本（换行延迟窗口内连续结算段空格连接，上界 6 段；窗口无效
+    ///（≤0/非有限）或不足两段返回 nil = 单段走 settledText 原文）。
+    private static func mergedLine(segments: [(text: String, at: TimeInterval)],
+                                   wrapDelaySeconds: Double) -> String? {
+        guard wrapDelaySeconds > 0, wrapDelaySeconds.isFinite, segments.count >= 2 else {
+            return nil
+        }
+        var kept: [String] = [segments[segments.count - 1].text]
+        for i in (1..<segments.count).reversed() {
+            guard segments[i].at - segments[i - 1].at < wrapDelaySeconds else { break }
+            kept.insert(segments[i - 1].text, at: 0)
+            if kept.count == 6 { break }
+        }
+        return kept.count >= 2 ? kept.joined(separator: " ") : nil
     }
 
     /// 清空显示/记账状态回 idle（录制收尾，同 `AutoZoomState.reset` 残影防御语义）。
@@ -198,6 +266,7 @@ final class KeyboardOverlayState: ObservableObject {
         liveText = nil
         settledText = nil
         settledAt = nil
+        settledSegments = []
         phase = .idle
     }
 
@@ -277,10 +346,15 @@ final class KeyboardOverlayState: ObservableObject {
     }
 
     /// 结算进 linger（显示位全松/普通键弹起的唯一入口）：定格文本、锚定时刻、
-    /// 清空 live 态与尾键（防下次按修饰键凭空复现旧尾键）。
+    /// 追加合行历史段、清空 live 态与尾键（防下次按修饰键凭空复现旧尾键）。
     private func settle(text: String, at now: TimeInterval) {
         settledText = text
         settledAt = now
+        settledSegments.append((text, now))
+        // 历史上界 6 段（mergedLine 显示上界同款），防长按连续结算无限累积。
+        if settledSegments.count > 6 {
+            settledSegments.removeFirst(settledSegments.count - 6)
+        }
         liveText = nil
         trailingKeyText = nil
         phase = .lingering
