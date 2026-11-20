@@ -311,9 +311,10 @@ final class WindowRegionSelectionTests: XCTestCase {
         }
     }
 
-    /// 简报 Step 1 钉测：亚点尺寸拖动沿用一期区域模式最小尺寸语义（宽或高 <1pt = 误触）
-    /// → 按取消处理，不产零面积 rect。
-    func testDragSmallerThanMinimumIgnored() {
+    /// 亚点尺寸拖动沿用一期区域模式最小尺寸语义（宽或高 <1pt = 误触）——2026-11-21 起
+    /// 不再立即取消整场选择（单击/微动曾被判取消，用户误以为「不能录制」）：只重置
+    /// 选区、保留遮罩等待重试；取消仍走 ESC/performCancel，最终恰一次 nil。
+    func testDragSmallerThanMinimumKeepsSessionForRetry() {
         let session = makeSession()
         session.begin()
 
@@ -321,8 +322,11 @@ final class WindowRegionSelectionTests: XCTestCase {
         session.dragMoved(to: CGPoint(x: 100.5, y: 200)) // 宽 0.5pt < 1pt
         session.dragEnded(at: CGPoint(x: 100.5, y: 200))
 
+        XCTAssertEqual(box.results.count, 0, "亚点拖动不取消：遮罩保留等待重试")
+        XCTAssertFalse(session.isFinished)
+        session.performCancel()
         XCTAssertEqual(box.results.count, 1)
-        XCTAssertNil(box.soleResult, "亚点拖动按取消处理（一期区域模式同语义）")
+        XCTAssertNil(box.soleResult, "最终取消返回 nil，不产零面积 rect")
         session.performCancel()
         XCTAssertEqual(box.results.count, 1, "取消后再取消：恰一次闩不重入")
     }

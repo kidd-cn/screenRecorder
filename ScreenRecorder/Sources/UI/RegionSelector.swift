@@ -98,7 +98,10 @@ final class RegionSelectionOverlayView: NSView {
         guard let cgContext = NSGraphicsContext.current?.cgContext else { return }
         NSColor.black.withAlphaComponent(0.3).setFill()
         bounds.fill()
-        guard !selectionRect.isEmpty else { return }
+        guard !selectionRect.isEmpty else {
+            drawHint()
+            return
+        }
         // 抠亮：clear 混合把选区内的遮罩擦成透明，被选画面原亮度透出
         cgContext.saveGState()
         cgContext.setBlendMode(.clear)
@@ -110,6 +113,26 @@ final class RegionSelectionOverlayView: NSView {
         NSColor.white.setStroke()
         border.stroke()
         drawSizeLabel()
+    }
+
+    /// 未拖出选区时的操作提示（2026-11-21：用户把遮罩当可点击目标单击，被当作误触取消，
+    /// 误以为「不能录制」——顶部居中常驻提示明确「按住拖动」）。
+    private func drawHint() {
+        let text = NSAttributedString(
+            string: NSLocalizedString("按住鼠标拖动框选录制区域，Esc 取消", comment: "Window region hint"),
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+                .foregroundColor: NSColor.white,
+            ])
+        let textSize = text.size()
+        let chip = NSRect(
+            x: bounds.midX - textSize.width / 2 - 12,
+            y: bounds.maxY - textSize.height - 28,
+            width: textSize.width + 24,
+            height: textSize.height + 12)
+        NSColor.black.withAlphaComponent(0.65).setFill()
+        NSBezierPath(roundedRect: chip, xRadius: 8, yRadius: 8).fill()
+        text.draw(at: NSPoint(x: chip.minX + 12, y: chip.minY + 6))
     }
 
     /// 选区中央的 `W×H` 尺寸标签（深色圆角芯片 + 白色等宽数字，任意底色可读）。
@@ -308,6 +331,10 @@ final class WindowRegionSelectionSession {
     private var selfRetainer: WindowRegionSelectionSession?
     /// 拖拽起点（窗口基坐标 == 内容视图坐标）；nil = 未按下。
     private var dragStart: CGPoint?
+    /// 本次拖拽轨迹的最大边界（2026-11-21 修复「松开点回到起点附近 → 选区塌成 0 高被判
+    /// 无效」：终选 rect 取整段轨迹的并集，而不是只看起点→松开点；用户画一圈再松手
+    /// 仍得到完整选区）。每次 dragBegan 重置。
+    private var dragBounds: CGRect?
     private var keyMonitor: Any?
     private var closeObserver: NSObjectProtocol?
 
@@ -353,6 +380,7 @@ final class WindowRegionSelectionSession {
     func dragBegan(at point: CGPoint) {
         guard phase == .selecting else { return }
         dragStart = RegionSelectorMath.clamped(point: point, to: overlayView.bounds)
+        dragBounds = nil
         overlayView.selectionRect = .zero
     }
 
@@ -369,13 +397,19 @@ final class WindowRegionSelectionSession {
                 from: start,
                 to: RegionSelectorMath.clamped(point: point, to: overlayView.bounds)),
             to: overlayView.bounds)
-        guard RegionSelectorMath.isMeaningfulSelection(rect) else {
-            performCancel() // 亚点拖动 = 误触：按取消处理（一期区域模式最小尺寸语义）
+        // 终选 = 整段轨迹并集（画一圈再松手不丢选区；单点点击仍无边界 → 无效）。
+        let finalRect = dragBounds.map { $0.union(rect) } ?? rect
+        guard RegionSelectorMath.isMeaningfulSelection(finalRect) else {
+            // 2026-11-21 修复：单击/微动不再取消整场选择（曾把「点击」当误触直接关遮罩，
+            // 用户误以为不能录制）——只重置选区，保留遮罩等待重新拖框；取消只走 Esc。
+            dragStart = nil
+            dragBounds = nil
+            overlayView.selectionRect = .zero
             return
         }
         // 窗口基 rect →（加遮罩窗 origin）Cocoa 全局 →（窗口 frame 充当锚屏、CG 原点 .zero
         // 的 cgRect 算式）窗口相对左上系。屏幕点仅此一次换算直达契约系。
-        let cocoaRect = RegionSelectorMath.cocoaRect(fromWindowRect: rect, windowOrigin: window.frame.origin)
+        let cocoaRect = RegionSelectorMath.cocoaRect(fromWindowRect: finalRect, windowOrigin: window.frame.origin)
         finish(with: RegionSelectorMath.cgRect(
             fromCocoaRect: cocoaRect,
             screenFrame: anchorFrame,
@@ -385,7 +419,9 @@ final class WindowRegionSelectionSession {
     private func applyDrag(to point: CGPoint) {
         guard let start = dragStart else { return }
         let clamped = RegionSelectorMath.clamped(point: point, to: overlayView.bounds)
-        overlayView.selectionRect = RegionSelectorMath.normalizedRect(from: start, to: clamped)
+        let rect = RegionSelectorMath.normalizedRect(from: start, to: clamped)
+        overlayView.selectionRect = rect
+        dragBounds = dragBounds.map { $0.union(rect) } ?? rect
     }
 
     // MARK: 三条出口收敛的唯一收尾
