@@ -440,7 +440,8 @@ final class RecordingActionCell: NSView {
         let side = CircularGlyphButton.diameter
         let spacing: CGFloat = 10
         let buttons = [playButton, revealButton, editButton]
-        var x: CGFloat = 8
+        // 2026-11-20 用户目验微调：整组图标再左移 10pt（8 → -2）。
+        var x: CGFloat = -2
         let y = (bounds.height - side) / 2
         for button in buttons {
             button.frame = NSRect(x: x, y: y, width: side, height: side)
