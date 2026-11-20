@@ -1262,16 +1262,19 @@ final class AppAssembly: ObservableObject {
 
     /// 选择器呈现的共同出口（P3a 从 openWindowPicker 抽取）：窗口归装配容器（装配红线），
     /// 懒建单实例复用，每次打开重建内容视图（复用窗口不重触发 `.task`，同 T18 文件列表的
-    /// 教训；`scope` 决定初始范围，重建同时换窗口标题）。
+    /// 教训；`scope` 决定初始范围，重建同时换窗口标题）。2026-11-16 Omi 55.png 复刻：
+    /// 窗口放大到 900×640（4 列大缩略图网格装得下），整窗钉死深色外观（Omi 恒深色页，
+    /// 网格白标签/下一步按钮的观感基准）。
     private func presentPicker(scope: WindowPickerView.Scope, bannerText: String?) {
         if windowPickerWindowController == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 460, height: 380),
-                styleMask: [.titled, .closable],
+                contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
+                styleMask: [.titled, .closable, .resizable],
                 backing: .buffered,
                 defer: false
             )
             window.isReleasedWhenClosed = false
+            window.appearance = NSAppearance(named: .darkAqua)
             window.center()
             windowPickerWindowController = NSWindowController(window: window)
         }
@@ -1282,7 +1285,8 @@ final class AppAssembly: ObservableObject {
             scope: scope,
             bannerText: bannerText,
             onSelect: { [weak self] windowID in self?.windowPickerSelected(windowID) },
-            onAppSelect: { [weak self] bundleID in self?.appPickerSelected(bundleID) }
+            onAppSelect: { [weak self] bundleID in self?.appPickerSelected(bundleID) },
+            onConfirm: { [weak self] windowIDs in self?.windowPickerConfirmed(windowIDs) }
         ))
         NSApp.activate(ignoringOtherApps: true)
         windowPickerWindowController?.showWindow(nil)
@@ -1329,6 +1333,13 @@ final class AppAssembly: ObservableObject {
             beginWindowRegionSelection(windowID: windowID)
             return
         }
+        persistAndMaybeStart(windowID: windowID, startsRecording: startsRecording)
+    }
+
+    /// 单窗目标的持久化 + 可选直录（windowPickerSelected 与「下一步」单选路径共用）：
+    /// 单窗所有者快照组装稳定标识（裁定 1）→ 持久化 → 按场景决定立即开始。快照/标识
+    /// 取不到（选中间隙窗口关闭）记日志后放弃：不持久化、不开录（死 windowID 开录必败）。
+    private func persistAndMaybeStart(windowID: CGWindowID, startsRecording: Bool) {
         guard let snapshot = WindowTargetResolver.windowOwnerSnapshot(windowID: windowID),
               let target = WindowTargetResolver.makeTarget(windowID: windowID, snapshot: snapshot) else {
             NSLog("WindowPicker: 选定窗口 \(windowID) 的所有者信息读取失败（可能已关闭），未持久化目标")
@@ -1338,6 +1349,37 @@ final class AppAssembly: ObservableObject {
         NSLog("WindowPicker: 已持久化窗口捕获目标（\(target.ownerAppIdentifier) — \(target.windowTitle)）")
         if startsRecording {
             startRecording(mode: .window(windowID))
+        }
+    }
+
+    /// 「下一步」确认回调（2026-11-16 Omi 55.png 多选补齐）：网格选中集按流程分流——
+    /// 窗口区域流程单选 = 既有单窗拖框；多选 = union 包围盒拖框（新能力 `.windowsRegion`）；
+    /// 窗口录制流程单选 = 既有单窗直录（持久化目标）；多选 = 多窗口合成录制（新能力
+    /// `.windows`，union 画布，不经单窗目标持久化）。偏好设置入口（startsRecording=false）
+    /// 多选无落点——只持久化单窗目标，多选静默忽略（该入口的语义就是「选一个默认目标」）。
+    private func windowPickerConfirmed(_ windowIDs: [CGWindowID]) {
+        guard controller.state == .idle else {
+            NSLog("WindowPicker: 忽略「下一步」（当前状态非 idle：\(controller.state)）")
+            dismissWindowPicker()
+            return
+        }
+        let anchorsRegion = pendingWindowPickerAnchorsRegion
+        let startsRecording = pendingWindowPickerStartsRecording
+        dismissWindowPicker()
+        guard !windowIDs.isEmpty else { return }
+        if anchorsRegion {
+            if windowIDs.count == 1 {
+                beginWindowRegionSelection(windowID: windowIDs[0])
+            } else {
+                beginWindowsRegionSelection(windowIDs: windowIDs)
+            }
+            return
+        }
+        if windowIDs.count == 1 {
+            persistAndMaybeStart(windowID: windowIDs[0], startsRecording: startsRecording)
+        } else if startsRecording {
+            NSLog("WindowPicker: 多窗口录制启动（\(windowIDs.count) 个窗口，union 画布）")
+            startRecording(mode: .windows(windowIDs))
         }
     }
 
@@ -1365,6 +1407,35 @@ final class AppAssembly: ObservableObject {
             let cocoaFrame = RegionSelectorMath.cocoaRect(fromCGRect: frame, primaryScreenHeight: primaryHeight)
             guard let rect = await RegionSelector.selectWindowRegion(anchorFrame: cocoaFrame) else { return }
             startRecording(mode: .windowRegion(window: windowID, rect: rect))
+        }
+    }
+
+    /// 多窗口 union 区域拖框（2026-11-16 Omi 55.png 多选补齐，「下一步」多选路径）：
+    /// 现场枚举所选窗口的 union 包围盒为锚（选中间隙部分/全部关闭——全部关闭放弃；
+    /// 部分关闭按存活集），拖拽产出 union 相对 rect → 开录 `.windowsRegion`。取消语义
+    /// 与单窗区域一致（ESC/亚点拖动/遮罩被关 = 静默放弃）。持久化走 startRecording
+    /// 统一入口（`lastCaptureMode` 记 windowRegion 模式，⇧⌘R 上次使用模式自动包含）。
+    private func beginWindowsRegionSelection(windowIDs: [CGWindowID]) {
+        Task { @MainActor in
+            let windows: [ShareableWindow]
+            do {
+                windows = try await WindowPicker.enumeratedWindows()
+            } catch {
+                NSLog("WindowRegion: 窗口枚举失败，放弃多窗口区域选择：\(error)")
+                return
+            }
+            let idSet = Set(windowIDs)
+            let frames = windows.filter { idSet.contains($0.windowID) }.map(\.frame)
+            guard !frames.isEmpty else {
+                NSLog("WindowRegion: 所选窗口均已不可见或已关闭，放弃多窗口区域选择")
+                return
+            }
+            let canvas = frames.reduce(CGRect.null) { $0.union($1) }
+            // union 包围盒 CG 全局（左上原点）→ 遮罩 Cocoa 全局 frame（同单窗区域换算口径）。
+            let primaryHeight = NSScreen.screens.first { $0.frame.origin == .zero }?.frame.height ?? 0
+            let cocoaFrame = RegionSelectorMath.cocoaRect(fromCGRect: canvas, primaryScreenHeight: primaryHeight)
+            guard let rect = await RegionSelector.selectWindowRegion(anchorFrame: cocoaFrame) else { return }
+            startRecording(mode: .windowsRegion(windows: windowIDs, rect: rect))
         }
     }
 
@@ -1420,6 +1491,7 @@ private struct WindowPickerHostView: View {
     let bannerText: String?
     let onSelect: (CGWindowID) -> Void
     let onAppSelect: (String) -> Void
+    let onConfirm: ([CGWindowID]) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1434,6 +1506,7 @@ private struct WindowPickerHostView: View {
             WindowPickerView(
                 onSelect: onSelect,
                 onAppSelect: onAppSelect,
+                onConfirm: onConfirm,
                 initialScope: scope)
         }
     }

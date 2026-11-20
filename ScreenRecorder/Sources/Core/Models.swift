@@ -19,12 +19,25 @@ enum CaptureMode: Equatable, Codable {
     /// `SCContentFilter(display:including:)`（零窗口 → 走 begin 失败路径）；
     /// 录制期新开窗口不入画、部分关闭继续录、全部关闭走源丢失自动保存（规格画布纪律）。
     case app(bundleID: String)
+    /// 多窗口内容录制（2026-11-16 Omi 55.png 选择窗口页多选补齐）：一组可见窗口合成
+    /// 单一采集源（union 包围盒画布，`SCContentFilter(display:including:)`——与 `.app`
+    /// 同族多窗口构造）。id 集在 start 时定格：录制期新开窗口不入画、部分关闭继续
+    ///（SCK 对已关窗口空画）、全部关闭走源丢失自动保存。不经 `windowCaptureTarget`
+    /// 持久化（那是单窗目标语义）；`lastCaptureMode` 照常落库（重启复播遇死 id =
+    /// 既有 windowNotFound 失败路径）。
+    case windows([CGWindowID])
     /// 窗口区域录制（P3b）：一个窗口内用户拖出的子矩形。rect 为**窗口相对系**——原点 =
     /// 窗口 frame 左上、points、y 向下，即 `SCContentFilter(desktopIndependentWindow:)` +
     /// `SCStreamConfiguration.sourceRect` 的裁剪口径（不经显示器全局系，无多屏偏移/Y 翻转
     /// 坑）。开录时 rect 与窗口 frame 求交钳制一次固定（SCStreamRecorder.resolveTarget）；
     /// 录制中窗口缩小沿用一期窗口模式语义（无 live 重配置，不重钳制）。
     case windowRegion(window: CGWindowID, rect: CGRect)
+    /// 多窗口区域录制（2026-11-16 Omi 55.png 补齐）：多选窗口 union 包围盒内拖出的子
+    /// 矩形。windows = 选中窗口 id 集；rect 为 **union 包围盒相对系**（原点 = union 左上、
+    /// points、y 向下——与 windowRegion 同口径，锚定对象从单窗换成 union 而已）。装配 =
+    /// 多窗口 filter + union 画布 + sourceRect 裁剪；开录时 rect 与 union 画布求交钳制
+    /// 一次固定，此后不重钳（同 windowRegion）。
+    case windowsRegion(windows: [CGWindowID], rect: CGRect)
     /// 仅声音录制（P7a）：不采集任何视频内容——SCStream 只装 `.audio` 输出（filter 锚
     /// 主屏仅为 SCK API 形参要求，无 `.screen` data output 即永无视频帧），落盘为纯音轨
     /// `.m4a`（无视频 input 的 AVAssetWriter 会话）。无关联值：`lastCaptureMode`
@@ -48,7 +61,7 @@ extension CaptureMode {
     /// display/window/region/app/windowRegion = 屏幕视频画布在；audioOnly/cameraOnly = 无。
     var hasVideoCanvas: Bool {
         switch self {
-        case .display, .window, .region, .app, .windowRegion:
+        case .display, .window, .region, .app, .windowRegion, .windows, .windowsRegion:
             return true
         case .audioOnly, .cameraOnly:
             return false

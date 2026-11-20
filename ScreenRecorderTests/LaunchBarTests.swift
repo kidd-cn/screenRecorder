@@ -38,3 +38,36 @@ final class LaunchBarTests: XCTestCase {
             LaunchBarLayout.tileWidth, "等宽逐格排布")
     }
 }
+
+// MARK: - Omi 选择窗口网格页（2026-11-16 55.png 复刻）钉测
+
+/// 网格几何：4 列等分（视图宽扣除列间距与两侧 inset）、瓦片高 = 缩略图 + 标签、
+/// 超窄回退标称瓦片。
+final class WindowGridGeometryTests: XCTestCase {
+    func testTileSizeDividesViewWidthIntoFourColumns() {
+        // 900 宽 - 2×14 inset - 3×10 间距 = 842 → 每列 210.5 → floor 210
+        XCTAssertEqual(
+            WindowGridGeometry.tileSize(forViewWidth: 900),
+            CGSize(width: 210, height: WindowGridGeometry.itemHeight))
+    }
+
+    func testTileSizeFallsBackOnTooNarrowView() {
+        let fallback = CGSize(width: WindowGridGeometry.fallbackTileWidth,
+                              height: WindowGridGeometry.itemHeight)
+        XCTAssertEqual(WindowGridGeometry.tileSize(forViewWidth: 0), fallback)
+        XCTAssertEqual(WindowGridGeometry.tileSize(forViewWidth: 100), fallback,
+                       "每列不足 60pt 回退标称瓦片")
+    }
+
+    /// 新捕获模式（多窗口/多窗口区域）Codable 往返保值 + 屏幕画布表态在。
+    func testWindowsModesCodableAndCanvasFlag() throws {
+        let multi = CaptureMode.windows([1, 2, 3])
+        let multiRegion = CaptureMode.windowsRegion(windows: [4, 5], rect: CGRect(x: 10, y: 20, width: 30, height: 40))
+        for mode in [multi, multiRegion] {
+            let decoded = try JSONDecoder().decode(
+                CaptureMode.self, from: JSONEncoder().encode(mode))
+            XCTAssertEqual(decoded, mode, "Codable 往返必须保值")
+            XCTAssertTrue(mode.hasVideoCanvas, "多窗口族 = 屏幕视频画布在")
+        }
+    }
+}

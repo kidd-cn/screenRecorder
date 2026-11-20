@@ -99,6 +99,18 @@ struct PiPCaptureGeometry {
                 captureOriginInCGPoints: canvas.origin,
                 scale: 1,
                 capturePixelSize: canvas.size)
+        case .windows(let windowIDs):
+            // 多窗口（2026-11-16）：画布 = 选中窗口 union 包围盒（与 SCStreamRecorder
+            // filter 构造同口径）。存活过滤：全灭 nil = 本场纯屏幕，部分灭按存活集。
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return nil }
+            let ids = Set(windowIDs)
+            let windows = content.windows.filter { ids.contains($0.windowID) }
+            guard !windows.isEmpty else { return nil }
+            let canvas = windows.reduce(CGRect.null) { $0.union($1.frame) }
+            return PiPCaptureGeometry(
+                captureOriginInCGPoints: canvas.origin,
+                scale: 1,
+                capturePixelSize: canvas.size)
         case .windowRegion(let windowID, let rect):
             // P3b：画布 = 窗口内采样子集的绝对位置 = 窗口 frame 原点 + 窗口相对 rect 原点
             //（SCWindow.frame 与窗口模式同 CG 全局口径，平移即得采样区左上角；Y 向已在
@@ -111,6 +123,21 @@ struct PiPCaptureGeometry {
                 captureOriginInCGPoints: CGPoint(
                     x: window.frame.origin.x + rect.minX,
                     y: window.frame.origin.y + rect.minY),
+                scale: 1,
+                capturePixelSize: rect.size)
+        case .windowsRegion(let windowIDs, let rect):
+            // 多窗口区域（2026-11-16）：union 包围盒内采样子集的绝对位置 = union 原点 +
+            // union 相对 rect 原点（windowRegion 的平移语义把锚定对象换成 union，同口径）。
+            // rect 开录时已钳制于 union 画布（SCStreamRecorder），沿用同值不再重钳。
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return nil }
+            let ids = Set(windowIDs)
+            let windows = content.windows.filter { ids.contains($0.windowID) }
+            guard !windows.isEmpty else { return nil }
+            let canvas = windows.reduce(CGRect.null) { $0.union($1.frame) }
+            return PiPCaptureGeometry(
+                captureOriginInCGPoints: CGPoint(
+                    x: canvas.origin.x + rect.minX,
+                    y: canvas.origin.y + rect.minY),
                 scale: 1,
                 capturePixelSize: rect.size)
         case .audioOnly:

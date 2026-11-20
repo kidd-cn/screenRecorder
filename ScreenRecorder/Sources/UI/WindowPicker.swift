@@ -87,11 +87,14 @@ enum WindowPicker {
     static func availableWindows(
         preflight: () -> Bool = preflightScreenRecordingPermission,
         loadWindows: () async throws -> [ShareableWindow] = loadShareableWindowsFromSystem,
-        loadThumbnails: @MainActor ([ThumbnailRequest]) async -> [CGWindowID: NSImage] = generateThumbnails
+        loadThumbnails: @MainActor ([ThumbnailRequest]) async -> [CGWindowID: NSImage] = generateThumbnails,
+        thumbnailCap: CGFloat = WindowPicker.thumbnailMaxPoint
     ) async throws -> [WindowCandidate] {
         let selectable = try await loadFilteredWindows(preflight: preflight, loadWindows: loadWindows)
         let requests = selectable.map { source in
-            ThumbnailRequest(windowID: source.windowID, pointSize: thumbnailPointSize(fitting: source.frame.size))
+            ThumbnailRequest(
+                windowID: source.windowID,
+                pointSize: thumbnailPointSize(fitting: source.frame.size, maxPoint: thumbnailCap))
         }
         let thumbnails = await loadThumbnails(requests)
         return selectable.map { source in
@@ -325,22 +328,29 @@ struct WindowPickerView: View {
     var onSelect: (CGWindowID) -> Void
     /// App 行选定回调（P3a）：透传所选 bundleID（装配层决定开录/持久化）。
     var onAppSelect: (String) -> Void
+    /// 「下一步」确认回调（2026-11-16 Omi 55.png 多选补齐）：透传当前选中窗口 id 集
+    ///（≥1；单选 = 单窗语义，多选 = 多窗口录制/union 区域，装配层按流程分流）。
+    var onConfirm: ([CGWindowID]) -> Void
 
     @State private var scope: Scope
     @State private var candidates: [WindowCandidate] = []
     @State private var apps: [AppCandidate] = []
     @State private var failureText: String?
     @State private var isLoading = true
+    /// 网格当前选中（Omi 多选：⌘-点击切换；单选语义 = 集合恰一元素）。
+    @State private var selectedIDs: Set<CGWindowID> = []
 
     /// `initialScope` 决定打开时落在哪个范围（菜单「App…」= .apps，既有入口 = .windows）；
-    /// `onAppSelect` 缺省空闭包：未接线的调用点（若未来出现）编译期无需感知 P3a 参数。
+    /// `onAppSelect`/`onConfirm` 缺省空闭包：未接线的调用点（若未来出现）编译期无需感知。
     init(
         onSelect: @escaping (CGWindowID) -> Void,
         onAppSelect: @escaping (String) -> Void = { _ in },
+        onConfirm: @escaping ([CGWindowID]) -> Void = { _ in },
         initialScope: Scope = .windows
     ) {
         self.onSelect = onSelect
         self.onAppSelect = onAppSelect
+        self.onConfirm = onConfirm
         _scope = State(initialValue: initialScope)
     }
 
@@ -405,21 +415,41 @@ struct WindowPickerView: View {
                 .foregroundStyle(OmiStyle.subtleText)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            WindowPickerTable(
-                rows: candidates.map(PickerRow.window),
-                onActivate: { row in
-                    if case .window(let candidate) = row { onSelect(candidate.id) }
-                })
+            // 窗口范围 = Omi 55.png 网格页（2026-11-16 像素级复刻）：大缩略图瓦片 +
+            // 「App - 标题」标签 + 选中绿框；底部 下一步 + ⌘ 多选提示。双击瓦片 = 既有
+            // 即选即走语义（onSelect 直达）；下一步 = 选中集确认（单选/多选分流在装配层）。
+            VStack(spacing: 0) {
+                WindowGridView(
+                    candidates: candidates,
+                    selectedIDs: $selectedIDs,
+                    onActivate: { id in onSelect(id) })
+                VStack(spacing: 6) {
+                    Button {
+                        onConfirm(selectedIDs.sorted())
+                    } label: {
+                        Text("下一步")
+                            .frame(width: 110, height: 26)
+                    }
+                    .buttonStyle(NextStepButtonStyle())
+                    .disabled(selectedIDs.isEmpty)
+                    Text("按住⌘键后可进行多选 / 反选")
+                        .font(.footnote)
+                        .foregroundStyle(OmiStyle.subtleText)
+                }
+                .padding(.vertical, 10)
+            }
         }
     }
 
     private func load() async {
         isLoading = true
         failureText = nil
+        selectedIDs = [] // 候选重枚举（复用窗口重开/换范围）：旧选择全灭（陈旧 id 无意义）
         do {
             switch scope {
             case .windows:
-                candidates = try await WindowPicker.availableWindows()
+                candidates = try await WindowPicker.availableWindows(
+                    thumbnailCap: WindowGridGeometry.thumbnailPointCap)
             case .apps:
                 apps = try await WindowPicker.availableApps()
             }
@@ -646,5 +676,282 @@ final class WindowPickerAppCell: NSTableCellView {
         } else {
             iconView.image = NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil)
         }
+    }
+}
+
+// MARK: - Omi 选择窗口网格页（2026-11-16 55.png 像素级复刻）
+//
+// 手建窗内 SwiftUI 手势层死的定论（列表窗/选择器同根因实证实修）——网格交互全走
+// AppKit 原生 NSCollectionView：单击选中（⌘-点击切换 = Omi「多选 / 反选」）、双击
+// 即选即走（mouseDown clickCount 计数，AppKit 事件通道）。选中态绿框自绘
+//（NSCollectionView 默认系统蓝选框不是 Omi 观感）。
+
+/// 网格几何（internal 供无头钉测）：4 列等宽瓦片，缩略图 + 标签上下结构。
+enum WindowGridGeometry {
+    static let columns = 4
+    static let thumbnailHeight: CGFloat = 118
+    static let labelHeight: CGFloat = 26
+    static let spacing: CGFloat = 10
+    static let sectionInset: CGFloat = 14
+    /// 标称瓦片尺寸（视图宽度不可得时的回退；视图宽就绪后按等分重排）。
+    static let fallbackTileWidth: CGFloat = 200
+    /// 瓦片缩略图点尺寸上限（availableWindows 抓帧封顶——Retina 2x 像素余量同惯例）。
+    static let thumbnailPointCap: CGFloat = 200
+
+    static var itemHeight: CGFloat { thumbnailHeight + labelHeight }
+
+    /// 视图宽 → 瓦片尺寸（等分列数扣间距；超窄/非法回退标称瓦片）。
+    static func tileSize(forViewWidth width: CGFloat) -> CGSize {
+        let computed = floor((width - spacing * CGFloat(columns - 1) - sectionInset * 2) / CGFloat(columns))
+        guard computed.isFinite, computed > 60 else {
+            return CGSize(width: fallbackTileWidth, height: itemHeight)
+        }
+        return CGSize(width: computed, height: itemHeight)
+    }
+}
+
+/// 网格桥（AppKit 原生 NSCollectionView）：候选 → 瓦片（缩略图 aspect-fill + 「App - 标题」
+/// 标签），选中绿框；⌘-点击原生切换（allowsMultipleSelection），双击回调 onActivate。
+struct WindowGridView: NSViewRepresentable {
+    let candidates: [WindowCandidate]
+    @Binding var selectedIDs: Set<CGWindowID>
+    /// 双击瓦片（即选即走，既有 onSelect 语义）。
+    let onActivate: (CGWindowID) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+
+        let layout = NSCollectionViewFlowLayout()
+        layout.minimumLineSpacing = WindowGridGeometry.spacing
+        layout.minimumInteritemSpacing = WindowGridGeometry.spacing
+        layout.sectionInset = NSEdgeInsets(
+            top: WindowGridGeometry.sectionInset,
+            left: WindowGridGeometry.sectionInset,
+            bottom: WindowGridGeometry.sectionInset,
+            right: WindowGridGeometry.sectionInset)
+        layout.itemSize = WindowGridGeometry.tileSize(forViewWidth: scrollView.frame.width)
+
+        let grid = NSCollectionView(frame: .zero)
+        grid.collectionViewLayout = layout
+        grid.dataSource = context.coordinator
+        grid.delegate = context.coordinator
+        grid.isSelectable = true
+        grid.allowsMultipleSelection = true
+        // 选中视觉完全由瓦片自绘（isSelected 翻转 → 绿框；本 SDK 无系统选框可关）。
+        // ⌘-点击的原生多选切换语义不受影响（委托 didSelect/didDeselect 照常回调）。
+        grid.backgroundColors = [.clear]
+        grid.register(
+            WindowGridItem.self,
+            forItemWithIdentifier: NSUserInterfaceItemIdentifier("windowTile"))
+        scrollView.documentView = grid
+        context.coordinator.grid = grid
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        coordinator.syncSelection(selectedIDs)
+        guard let grid = coordinator.grid else { return }
+        // 候选变化（重枚举）才重载；仅选择变化（Binding 回流）不重载不打断 ⌘ 连选。
+        if coordinator.candidates.map(\.id) != candidates.map(\.id) {
+            coordinator.candidates = candidates
+            let layout = grid.collectionViewLayout as? NSCollectionViewFlowLayout
+            layout?.itemSize = WindowGridGeometry.tileSize(forViewWidth: scrollView.frame.width)
+            grid.reloadData()
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegate {
+        var parent: WindowGridView
+        var candidates: [WindowCandidate] = []
+        var grid: NSCollectionView?
+
+        init(parent: WindowGridView) {
+            self.parent = parent
+        }
+
+        // MARK: 数据源
+
+        func numberOfSections(in collectionView: NSCollectionView) -> Int { 1 }
+
+        func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
+            candidates.count
+        }
+
+        func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+            let item = collectionView.makeItem(
+                withIdentifier: NSUserInterfaceItemIdentifier("windowTile"),
+                for: indexPath)
+            if let tile = item as? WindowGridItem,
+               indexPath.item < candidates.count {
+                tile.configure(with: candidates[indexPath.item])
+            }
+            return item
+        }
+
+        /// 双击转发（WindowGridItem.mouseDown clickCount≥2 → 按序号取候选回调）。
+        fileprivate func forwardActivation(at index: Int) {
+            guard index < candidates.count else { return }
+            parent.onActivate(candidates[index].id)
+        }
+
+        /// 单击选择（自管语义，WindowGridItem.mouseDown 驱动）：无 ⌘ = 单选替换；
+        /// ⌘ = 切换（Omi 多选/反选）。同步 item 视觉（isSelected）+ Binding 回流。
+        fileprivate func handleTap(at index: Int, commandPressed: Bool) {
+            guard index < candidates.count, let grid else { return }
+            let id = candidates[index].id
+            var ids = Set(grid.selectionIndexPaths.compactMap { candidateID(at: $0.item) })
+            if commandPressed {
+                if ids.contains(id) { ids.remove(id) } else { ids.insert(id) }
+            } else {
+                ids = [id]
+            }
+            applySelection(ids)
+        }
+
+        /// 选中集 → collection view（驱动 item.isSelected 视觉）+ Binding 回流。
+        fileprivate func applySelection(_ ids: Set<CGWindowID>) {
+            guard let grid else { return }
+            let idToIndex = Dictionary(uniqueKeysWithValues: candidates.enumerated().map { ($1.id, $0) })
+            grid.selectionIndexPaths = Set(ids.compactMap { idToIndex[$0] }.map { IndexPath(item: $0, section: 0) })
+            if parent.selectedIDs != ids {
+                parent.selectedIDs = ids
+            }
+        }
+
+        // MARK: 选择（系统选择事件照常回流；自管路径为主，两者幂等一致）
+
+        func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
+            forwardSelection()
+        }
+
+        func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
+            forwardSelection()
+        }
+
+        /// 选择态 → SwiftUI Binding（以委托回调为准——⌘ 切换由 NSCollectionView 原生
+        /// 处理，这里只搬运结果，不自己维护选中集）。
+        fileprivate func forwardSelection() {
+            guard let grid else { return }
+            let ids = Set(grid.selectionIndexPaths.compactMap { candidateID(at: $0.item) })
+            if parent.selectedIDs != ids {
+                parent.selectedIDs = ids
+            }
+        }
+
+        /// Binding → 视图（load 重置清空时回流；编程选择无其它入口）。
+        func syncSelection(_ ids: Set<CGWindowID>) {
+            guard let grid else { return }
+            let current = Set(grid.selectionIndexPaths.compactMap { candidateID(at: $0.item) })
+            guard current != ids else { return }
+            applySelection(ids)
+        }
+
+        private func candidateID(at index: Int) -> CGWindowID? {
+            index < candidates.count ? candidates[index].id : nil
+        }
+    }
+}
+
+/// 网格瓦片（NSCollectionViewItem）：缩略图 aspect-fill（Omi 同款裁切满格）+ 下方
+/// 「App - 标题」白标签；选中态绿框 2pt（自绘 layer border——默认系统蓝选框非 Omi 观感）。
+@MainActor
+final class WindowGridItem: NSCollectionViewItem {
+    private let thumbContainer = NSView()
+    private let thumbView = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+
+    override func loadView() {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: WindowGridGeometry.fallbackTileWidth, height: WindowGridGeometry.itemHeight))
+        container.wantsLayer = true
+
+        thumbContainer.wantsLayer = true
+        thumbContainer.translatesAutoresizingMaskIntoConstraints = false
+        thumbContainer.layer?.backgroundColor = NSColor.black.cgColor
+        thumbContainer.layer?.cornerRadius = 4
+        thumbContainer.layer?.masksToBounds = true
+        thumbView.imageScaling = .scaleProportionallyUpOrDown
+        thumbView.translatesAutoresizingMaskIntoConstraints = false
+        thumbContainer.addSubview(thumbView)
+        NSLayoutConstraint.activate([
+            thumbView.topAnchor.constraint(equalTo: thumbContainer.topAnchor),
+            thumbView.bottomAnchor.constraint(equalTo: thumbContainer.bottomAnchor),
+            thumbView.leadingAnchor.constraint(equalTo: thumbContainer.leadingAnchor),
+            thumbView.trailingAnchor.constraint(equalTo: thumbContainer.trailingAnchor),
+        ])
+
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .white
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(thumbContainer)
+        container.addSubview(label)
+        NSLayoutConstraint.activate([
+            thumbContainer.topAnchor.constraint(equalTo: container.topAnchor),
+            thumbContainer.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            thumbContainer.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            thumbContainer.heightAnchor.constraint(equalToConstant: WindowGridGeometry.thumbnailHeight),
+            label.topAnchor.constraint(equalTo: thumbContainer.bottomAnchor, constant: 4),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 2),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -2),
+            label.heightAnchor.constraint(equalToConstant: WindowGridGeometry.labelHeight - 4),
+        ])
+        view = container
+    }
+
+    func configure(with candidate: WindowCandidate) {
+        thumbView.image = candidate.thumbnail
+        label.stringValue = candidate.title.isEmpty
+            ? candidate.appName
+            : "\(candidate.appName) - \(candidate.title)"
+        refreshSelectionVisual()
+    }
+
+    override var isSelected: Bool {
+        didSet { refreshSelectionVisual() }
+    }
+
+    /// 选中绿框（Omi 55.png 同款 2pt 绿描边；未选中透明）。绿框包住缩略图区（标签不框）。
+    private func refreshSelectionVisual() {
+        thumbContainer.layer?.borderWidth = isSelected ? 2 : 0
+        thumbContainer.layer?.borderColor = NSColor.systemGreen.cgColor
+    }
+
+    /// 双击即选即走 + 单击选择（**完全自管**——系统 NSCollectionView 的内部单击选择在
+    /// 本宿主环境不可依赖（2026-11-20 用户实测「下一步」永远禁用），手建窗交互纪律与
+    /// 列表窗 doubleAction 同源：AppKit 事件通道 + 自己维护状态）。⌘ = 切换（Omi 多选
+    /// /反选）；无 ⌘ = 单选替换。
+    override func mouseDown(with event: NSEvent) {
+        guard let indexPath = collectionView?.indexPath(for: self),
+              let coordinator = collectionView?.delegate as? WindowGridView.Coordinator else {
+            return super.mouseDown(with: event)
+        }
+        if event.clickCount >= 2 {
+            coordinator.forwardActivation(at: indexPath.item)
+            return
+        }
+        coordinator.handleTap(at: indexPath.item, commandPressed: event.modifierFlags.contains(.command))
+    }
+}
+
+/// 「下一步」按钮样式（Omi 55.png 同款灰底圆角 + 白字；按下微降透明度）。
+struct NextStepButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 14, weight: .medium))
+            .foregroundStyle(Color.white.opacity(configuration.isPressed ? 0.75 : 1))
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.18)))
     }
 }

@@ -48,6 +48,8 @@ final class SCStreamRecorder: NSObject {
         /// P3b：窗口区域 rect 开录钳制后与窗口当前范围完全无交集（⇧⌘R 复播遇窗口已缩小
         /// 到陈旧 rect 之外），无内容可录，走 begin 失败路径。
         case windowRegionClippedEmpty(CGWindowID)
+        /// 多窗口模式（2026-11-16）：start 时一个选中 id 都枚举不到（全部已关闭）。
+        case windowsNotFound(count: Int)
 
         var errorDescription: String? {
             switch self {
@@ -59,6 +61,8 @@ final class SCStreamRecorder: NSObject {
                 return String(format: NSLocalizedString("找不到应用（bundle id=%@）的可录制窗口（应用可能已退出或窗口已全部关闭）", comment: "msg"), bundleID)
             case .windowRegionClippedEmpty(let id):
                 return String(format: NSLocalizedString("窗口（id=%lld）已缩小到上次所选区域之外，无内容可录，请重新选择窗口区域", comment: "msg"), id)
+            case .windowsNotFound(let count):
+                return String(format: NSLocalizedString("选中的 %lld 个窗口都已关闭，无内容可录", comment: "msg"), count)
             }
         }
     }
@@ -523,6 +527,25 @@ final class SCStreamRecorder: NSObject {
                 pixelSize: rect.size,
                 sourceRect: rect
             )
+        case .windows(let windowIDs):
+            // 多窗口（2026-11-16 Omi 55.png 多选补齐）：与 `.app` 同族多窗口构造
+            //（`initWithDisplay:includingWindows:`，union 包围盒画布、锚屏取 union 中心
+            // 所在显示器）。存活 id 过滤（选择与 start 的间隙窗口已关）——全灭抛错走
+            // begin 失败路径，部分灭按存活集继续。
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let ids = Set(windowIDs)
+            let windows = content.windows.filter { ids.contains($0.windowID) }
+            guard !windows.isEmpty else {
+                throw SCStreamRecorderError.windowsNotFound(count: windowIDs.count)
+            }
+            let canvas = windows.reduce(CGRect.null) { $0.union($1.frame) }
+            let anchor = Self.displayID(containingPoint: CGPoint(x: canvas.midX, y: canvas.midY)) ?? CGMainDisplayID()
+            let display = try await findDisplay(anchor)
+            return ResolvedTarget(
+                filter: SCContentFilter(display: display, including: windows),
+                pixelSize: canvas.size,
+                sourceRect: nil
+            )
         case .windowRegion(let windowID, let rect):
             // P3b：窗口锚定区域 = 单窗口 filter（一期窗口模式同款装配）+ sourceRect 裁剪
             //（region 模式的采样子集语义移植到窗口系）。rect 为窗口相对系（原点 = 窗口
@@ -542,6 +565,28 @@ final class SCStreamRecorder: NSObject {
             }
             return ResolvedTarget(
                 filter: SCContentFilter(desktopIndependentWindow: window),
+                pixelSize: clampedRect.size,
+                sourceRect: clampedRect
+            )
+        case .windowsRegion(let windowIDs, let rect):
+            // 多窗口区域（2026-11-16）：多窗口 filter + union 画布 + sourceRect 裁剪——
+            // windowRegion 的「锚定系裁剪」语义把锚定对象从单窗换成 union 包围盒（rect
+            // 为 union 相对系）。钳制与无内容失败路径同 windowRegion（clampedWindowRect
+            // 以 union 画布尺寸为界，纯函数复用单一真源）。
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let ids = Set(windowIDs)
+            let windows = content.windows.filter { ids.contains($0.windowID) }
+            guard !windows.isEmpty else {
+                throw SCStreamRecorderError.windowsNotFound(count: windowIDs.count)
+            }
+            let canvas = windows.reduce(CGRect.null) { $0.union($1.frame) }
+            guard let clampedRect = Self.clampedWindowRect(windowSize: canvas.size, rect: rect) else {
+                throw SCStreamRecorderError.windowRegionClippedEmpty(windowIDs.first ?? 0)
+            }
+            let anchor = Self.displayID(containingPoint: CGPoint(x: canvas.midX, y: canvas.midY)) ?? CGMainDisplayID()
+            let display = try await findDisplay(anchor)
+            return ResolvedTarget(
+                filter: SCContentFilter(display: display, including: windows),
                 pixelSize: clampedRect.size,
                 sourceRect: clampedRect
             )

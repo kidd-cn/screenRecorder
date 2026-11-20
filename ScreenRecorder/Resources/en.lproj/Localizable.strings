@@ -431,3 +431,8 @@
 "App内容录制" = "App";
 "摄像头录制" = "Camera";
 "声音录制" = "Audio Only";
+
+/* Omi 选择窗口网格页（2026-11-16） */
+"下一步" = "Next";
+"按住⌘键后可进行多选 / 反选" = "Hold ⌘ to multi-select / toggle";
+"选中的 %lld 个窗口都已关闭，无内容可录" = "All %lld selected windows are closed; nothing to record";

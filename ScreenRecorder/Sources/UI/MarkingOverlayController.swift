@@ -354,6 +354,15 @@ final class MarkingOverlayController: ObservableObject {
             displayID = Self.displayID(containingWindow: windowID)
         case .app(let bundleID):
             displayID = Self.displayID(containingAppBundle: bundleID)
+        case .windows(let windowIDs):
+            // 多窗口：union 包围盒中心落点的显示器 id（多窗口 filter 锚屏口径；
+            // CGWindowList 同步读帧——recordedDisplayFrame 是同步缝，不走 SCK）。
+            guard let canvas = Self.unionFrame(ofWindowIDs: windowIDs) else { return nil }
+            displayID = Self.displayID(containingCGPoint: CGPoint(x: canvas.midX, y: canvas.midY))
+        case .windowsRegion(let windowIDs, _):
+            // 多窗口区域：同 .windows（union 锚屏口径；裁剪子集在 union 内，锚屏一致）。
+            guard let canvas = Self.unionFrame(ofWindowIDs: windowIDs) else { return nil }
+            displayID = Self.displayID(containingCGPoint: CGPoint(x: canvas.midX, y: canvas.midY))
         case .audioOnly:
             displayID = nil
         case .cameraOnly:
@@ -373,6 +382,24 @@ final class MarkingOverlayController: ObservableObject {
               let boundsDict = window[kCGWindowBounds as String] as? [String: Any],
               let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { return nil }
         return displayID(containingCGPoint: CGPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    /// 多窗口 union 包围盒（2026-11-16，.windows/.windowsRegion 锚屏判定共用）：on-screen
+    /// 窗口清单按 id 过滤取 CG bounds 求并。全灭/清单不可读取回 nil（面板保持原 frame）。
+    private static func unionFrame(ofWindowIDs windowIDs: [CGWindowID]) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+                as? [[String: Any]] else { return nil }
+        let idSet = Set(windowIDs)
+        var canvas = CGRect.null
+        for info in list {
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  idSet.contains(id),
+                  let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
+                  let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
+            canvas = canvas.union(bounds)
+        }
+        guard !canvas.isNull else { return nil }
+        return canvas
     }
 
     /// App（P3a）union 包围盒中心落点的显示器 id：bundle 的 on-screen 普通层窗口 CG
