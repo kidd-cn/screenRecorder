@@ -331,6 +331,9 @@ struct WindowPickerView: View {
     /// 「下一步」确认回调（2026-11-16 Omi 55.png 多选补齐）：透传当前选中窗口 id 集
     ///（≥1；单选 = 单窗语义，多选 = 多窗口录制/union 区域，装配层按流程分流）。
     var onConfirm: ([CGWindowID]) -> Void
+    /// App 范围「下一步」确认回调（2026-11-20 Omi 38.png 多选补齐）：选中 bundle 集
+    ///（单选 = 既有 `.app` 语义，多选 = `.apps` 多应用合成）。
+    var onConfirmApps: ([String]) -> Void
 
     @State private var scope: Scope
     @State private var candidates: [WindowCandidate] = []
@@ -339,18 +342,21 @@ struct WindowPickerView: View {
     @State private var isLoading = true
     /// 网格当前选中（Omi 多选：⌘-点击切换；单选语义 = 集合恰一元素）。
     @State private var selectedIDs: Set<CGWindowID> = []
+    @State private var selectedAppIDs: Set<String> = []
 
     /// `initialScope` 决定打开时落在哪个范围（菜单「App…」= .apps，既有入口 = .windows）；
-    /// `onAppSelect`/`onConfirm` 缺省空闭包：未接线的调用点（若未来出现）编译期无需感知。
+    /// 各回调缺省空闭包：未接线的调用点（若未来出现）编译期无需感知新参数。
     init(
         onSelect: @escaping (CGWindowID) -> Void,
         onAppSelect: @escaping (String) -> Void = { _ in },
         onConfirm: @escaping ([CGWindowID]) -> Void = { _ in },
+        onConfirmApps: @escaping ([String]) -> Void = { _ in },
         initialScope: Scope = .windows
     ) {
         self.onSelect = onSelect
         self.onAppSelect = onAppSelect
         self.onConfirm = onConfirm
+        self.onConfirmApps = onConfirmApps
         _scope = State(initialValue: initialScope)
     }
 
@@ -404,11 +410,17 @@ struct WindowPickerView: View {
                     .foregroundStyle(OmiStyle.subtleText)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                WindowPickerTable(
-                    rows: apps.map(PickerRow.app),
-                    onActivate: { row in
-                        if case .app(let app) = row { onAppSelect(app.bundleID) }
-                    })
+                // App 范围 = Omi 38.png 图标网格页（2026-11-20 像素级复刻）：5 列大图标
+                // + 应用名；选中绿框；底部 下一步 + ⌘ 多选提示。双击 = 既有即选即走。
+                VStack(spacing: 0) {
+                    AppGridView(
+                        candidates: apps,
+                        selectedBundleIDs: $selectedAppIDs,
+                        onActivate: { bundleID in onAppSelect(bundleID) })
+                    nextStepBar(disabled: selectedAppIDs.isEmpty) {
+                        onConfirmApps(selectedAppIDs.sorted())
+                    }
+                }
             }
         } else if candidates.isEmpty {
             Text("没有可录制的窗口")
@@ -423,28 +435,34 @@ struct WindowPickerView: View {
                     candidates: candidates,
                     selectedIDs: $selectedIDs,
                     onActivate: { id in onSelect(id) })
-                VStack(spacing: 6) {
-                    Button {
-                        onConfirm(selectedIDs.sorted())
-                    } label: {
-                        Text("下一步")
-                            .frame(width: 110, height: 26)
-                    }
-                    .buttonStyle(NextStepButtonStyle())
-                    .disabled(selectedIDs.isEmpty)
-                    Text("按住⌘键后可进行多选 / 反选")
-                        .font(.footnote)
-                        .foregroundStyle(OmiStyle.subtleText)
+                nextStepBar(disabled: selectedIDs.isEmpty) {
+                    onConfirm(selectedIDs.sorted())
                 }
-                .padding(.vertical, 10)
             }
         }
+    }
+
+    /// 底部「下一步」+ ⌘ 多选提示（Omi 同款；两范围共用）。
+    private func nextStepBar(disabled: Bool, action: @escaping () -> Void) -> some View {
+        VStack(spacing: 6) {
+            Button(action: action) {
+                Text("下一步")
+                    .frame(width: 110, height: 26)
+            }
+            .buttonStyle(NextStepButtonStyle())
+            .disabled(disabled)
+            Text("按住⌘键后可进行多选 / 反选")
+                .font(.footnote)
+                .foregroundStyle(OmiStyle.subtleText)
+        }
+        .padding(.vertical, 10)
     }
 
     private func load() async {
         isLoading = true
         failureText = nil
         selectedIDs = [] // 候选重枚举（复用窗口重开/换范围）：旧选择全灭（陈旧 id 无意义）
+        selectedAppIDs = []
         do {
             switch scope {
             case .windows:
@@ -953,5 +971,265 @@ struct NextStepButtonStyle: ButtonStyle {
             .font(.system(size: 14, weight: .medium))
             .foregroundStyle(Color.white.opacity(configuration.isPressed ? 0.75 : 1))
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.18)))
+    }
+}
+
+// MARK: - Omi 选择 App 图标网格页（2026-11-20 38.png 像素级复刻）
+//
+// 与窗口网格同纪律：手建窗 SwiftUI 手势层死 → AppKit 原生 NSCollectionView + 自管
+// 选择（单击替换/⌘ 切换；双击即选即走）。视觉 = 5 列大应用图标 + 下方名称 + 选中绿框。
+
+/// App 网格几何（internal 供无头钉测）。
+enum AppGridGeometry {
+    static let columns = 5
+    /// 图标视觉边长（Omi 38.png 目测 ~76pt；图标本体按系统图标绘制）。
+    static let iconSide: CGFloat = 76
+    static let labelHeight: CGFloat = 24
+    static let spacing: CGFloat = 26
+    static let sectionInset: CGFloat = 28
+    static let fallbackTileWidth: CGFloat = 130
+
+    static var itemHeight: CGFloat { iconSide + labelHeight + 8 }
+
+    /// 视图宽 → 瓦片尺寸（等分列数扣间距；超窄/非法回退标称瓦片）。
+    static func tileSize(forViewWidth width: CGFloat) -> CGSize {
+        let computed = floor(
+            (width - spacing * CGFloat(columns - 1) - sectionInset * 2) / CGFloat(columns))
+        guard computed.isFinite, computed > 60 else {
+            return CGSize(width: fallbackTileWidth, height: itemHeight)
+        }
+        return CGSize(width: computed, height: itemHeight)
+    }
+}
+
+/// App 图标网格桥（NSCollectionView）：AppCandidate → 大图标 + 名称瓦片，选中绿框。
+struct AppGridView: NSViewRepresentable {
+    let candidates: [AppCandidate]
+    @Binding var selectedBundleIDs: Set<String>
+    /// 双击瓦片（即选即走，既有 onAppSelect 语义）。
+    let onActivate: (String) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+
+        let layout = NSCollectionViewFlowLayout()
+        layout.minimumLineSpacing = AppGridGeometry.spacing
+        layout.minimumInteritemSpacing = AppGridGeometry.spacing
+        layout.sectionInset = NSEdgeInsets(
+            top: AppGridGeometry.sectionInset,
+            left: AppGridGeometry.sectionInset,
+            bottom: AppGridGeometry.sectionInset,
+            right: AppGridGeometry.sectionInset)
+        layout.itemSize = AppGridGeometry.tileSize(forViewWidth: scrollView.frame.width)
+
+        let grid = NSCollectionView(frame: .zero)
+        grid.collectionViewLayout = layout
+        grid.dataSource = context.coordinator
+        grid.delegate = context.coordinator
+        grid.isSelectable = true
+        grid.allowsMultipleSelection = true
+        grid.backgroundColors = [.clear]
+        grid.register(
+            AppGridItem.self,
+            forItemWithIdentifier: NSUserInterfaceItemIdentifier("appTile"))
+        scrollView.documentView = grid
+        context.coordinator.grid = grid
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.parent = self
+        coordinator.syncSelection(selectedBundleIDs)
+        guard let grid = coordinator.grid else { return }
+        if coordinator.candidates.map(\.bundleID) != candidates.map(\.bundleID) {
+            coordinator.candidates = candidates
+            let layout = grid.collectionViewLayout as? NSCollectionViewFlowLayout
+            layout?.itemSize = AppGridGeometry.tileSize(forViewWidth: scrollView.frame.width)
+            grid.reloadData()
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSCollectionViewDataSource, NSCollectionViewDelegate {
+        var parent: AppGridView
+        var candidates: [AppCandidate] = []
+        var grid: NSCollectionView?
+
+        init(parent: AppGridView) {
+            self.parent = parent
+        }
+
+        func numberOfSections(in collectionView: NSCollectionView) -> Int { 1 }
+
+        func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
+            candidates.count
+        }
+
+        func collectionView(_ collectionView: NSCollectionView, itemForRepresentedObjectAt indexPath: IndexPath) -> NSCollectionViewItem {
+            let item = collectionView.makeItem(
+                withIdentifier: NSUserInterfaceItemIdentifier("appTile"),
+                for: indexPath)
+            if let tile = item as? AppGridItem,
+               indexPath.item < candidates.count {
+                tile.configure(with: candidates[indexPath.item])
+            }
+            return item
+        }
+
+        /// 双击转发（即选即走）。
+        fileprivate func forwardActivation(at index: Int) {
+            guard index < candidates.count else { return }
+            parent.onActivate(candidates[index].bundleID)
+        }
+
+        /// 单击选择（自管；系统 NSCollectionView 内部单击选择在本宿主不可依赖）。
+        fileprivate func handleTap(at index: Int, commandPressed: Bool) {
+            guard index < candidates.count, let grid else { return }
+            let bundleID = candidates[index].bundleID
+            var ids = Set(grid.selectionIndexPaths.compactMap { self.bundleID(at: $0.item) })
+            if commandPressed {
+                if ids.contains(bundleID) { ids.remove(bundleID) } else { ids.insert(bundleID) }
+            } else {
+                ids = [bundleID]
+            }
+            applySelection(ids)
+        }
+
+        fileprivate func applySelection(_ ids: Set<String>) {
+            guard let grid else { return }
+            let indexByBundle = Dictionary(
+                uniqueKeysWithValues: candidates.enumerated().map { ($1.bundleID, $0) })
+            grid.selectionIndexPaths = Set(
+                ids.compactMap { indexByBundle[$0] }.map { IndexPath(item: $0, section: 0) })
+            if parent.selectedBundleIDs != ids {
+                parent.selectedBundleIDs = ids
+            }
+        }
+
+        func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
+            let ids = Set(collectionView.selectionIndexPaths.compactMap { bundleID(at: $0.item) })
+            if parent.selectedBundleIDs != ids {
+                parent.selectedBundleIDs = ids
+            }
+        }
+
+        func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
+            let ids = Set(collectionView.selectionIndexPaths.compactMap { bundleID(at: $0.item) })
+            if parent.selectedBundleIDs != ids {
+                parent.selectedBundleIDs = ids
+            }
+        }
+
+        func syncSelection(_ ids: Set<String>) {
+            guard let grid else { return }
+            let current = Set(grid.selectionIndexPaths.compactMap { bundleID(at: $0.item) })
+            guard current != ids else { return }
+            applySelection(ids)
+        }
+
+        private func bundleID(at index: Int) -> String? {
+            index < candidates.count ? candidates[index].bundleID : nil
+        }
+    }
+}
+
+/// App 图标瓦片（NSCollectionViewItem）：大图标（NSWorkspace 取应用图标）+ 名称；
+/// 选中绿框（包图标区，同窗口网格观感）。
+@MainActor
+final class AppGridItem: NSCollectionViewItem {
+    private let iconContainer = NSView()
+    private let iconView = NSImageView()
+    private let label = NSTextField(labelWithString: "")
+
+    override func loadView() {
+        let container = NSView(frame: NSRect(
+            x: 0, y: 0, width: AppGridGeometry.fallbackTileWidth, height: AppGridGeometry.itemHeight))
+        container.wantsLayer = true
+
+        iconContainer.wantsLayer = true
+        iconContainer.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.layer?.cornerRadius = 12
+        iconView.imageScaling = .scaleProportionallyUpOrDown
+        iconView.translatesAutoresizingMaskIntoConstraints = false
+        iconContainer.addSubview(iconView)
+
+        label.font = .systemFont(ofSize: 13)
+        label.textColor = .white
+        label.alignment = .center
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        container.addSubview(iconContainer)
+        container.addSubview(label)
+        let iconSide = AppGridGeometry.iconSide
+        NSLayoutConstraint.activate([
+            iconContainer.topAnchor.constraint(equalTo: container.topAnchor),
+            iconContainer.centerXAnchor.constraint(equalTo: container.centerXAnchor),
+            iconContainer.widthAnchor.constraint(equalToConstant: iconSide),
+            iconContainer.heightAnchor.constraint(equalToConstant: iconSide),
+            iconView.topAnchor.constraint(equalTo: iconContainer.topAnchor, constant: 4),
+            iconView.bottomAnchor.constraint(equalTo: iconContainer.bottomAnchor, constant: -4),
+            iconView.leadingAnchor.constraint(equalTo: iconContainer.leadingAnchor, constant: 4),
+            iconView.trailingAnchor.constraint(equalTo: iconContainer.trailingAnchor, constant: -4),
+            label.topAnchor.constraint(equalTo: iconContainer.bottomAnchor, constant: 6),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            label.heightAnchor.constraint(equalToConstant: AppGridGeometry.labelHeight - 8),
+        ])
+        view = container
+    }
+
+    func configure(with candidate: AppCandidate) {
+        iconView.image = AppIconProvider.icon(forBundleID: candidate.bundleID)
+        label.stringValue = candidate.appName
+        refreshSelectionVisual()
+    }
+
+    override var isSelected: Bool {
+        didSet { refreshSelectionVisual() }
+    }
+
+    private func refreshSelectionVisual() {
+        iconContainer.layer?.borderWidth = isSelected ? 2 : 0
+        iconContainer.layer?.borderColor = NSColor.systemGreen.cgColor
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let indexPath = collectionView?.indexPath(for: self),
+              let coordinator = collectionView?.delegate as? AppGridView.Coordinator else {
+            return super.mouseDown(with: event)
+        }
+        if event.clickCount >= 2 {
+            coordinator.forwardActivation(at: indexPath.item)
+            return
+        }
+        coordinator.handleTap(at: indexPath.item, commandPressed: event.modifierFlags.contains(.command))
+    }
+}
+
+/// 应用图标缓存（NSWorkspace 按 bundle id 解析一次；图标集合主线程消费）。
+@MainActor
+enum AppIconProvider {
+    private static var cache: [String: NSImage] = [:]
+
+    static func icon(forBundleID bundleID: String) -> NSImage {
+        if let cached = cache[bundleID] { return cached }
+        let icon: NSImage
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+            icon = NSWorkspace.shared.icon(forFile: url.path)
+        } else {
+            icon = NSWorkspace.shared.icon(for: .applicationBundle)
+        }
+        cache[bundleID] = icon
+        return icon
     }
 }

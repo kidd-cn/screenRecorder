@@ -19,6 +19,11 @@ enum CaptureMode: Equatable, Codable {
     /// `SCContentFilter(display:including:)`（零窗口 → 走 begin 失败路径）；
     /// 录制期新开窗口不入画、部分关闭继续录、全部关闭走源丢失自动保存（规格画布纪律）。
     case app(bundleID: String)
+    /// 多 App 内容录制（2026-11-20 Omi 38.png 选择 App 页多选补齐）：多个应用各自全部
+    /// 普通层窗口的并集合成单一采集源（union 包围盒画布，`SCContentFilter(display:
+    /// including:)`）。窗口集在 start 时定格（同 `.app`）；任一 bundle 零窗口 = 该 app
+    /// 无贡献，全灭抛错走 begin 失败路径。
+    case apps([String])
     /// 多窗口内容录制（2026-11-16 Omi 55.png 选择窗口页多选补齐）：一组可见窗口合成
     /// 单一采集源（union 包围盒画布，`SCContentFilter(display:including:)`——与 `.app`
     /// 同族多窗口构造）。id 集在 start 时定格：录制期新开窗口不入画、部分关闭继续
@@ -61,7 +66,7 @@ extension CaptureMode {
     /// display/window/region/app/windowRegion = 屏幕视频画布在；audioOnly/cameraOnly = 无。
     var hasVideoCanvas: Bool {
         switch self {
-        case .display, .window, .region, .app, .windowRegion, .windows, .windowsRegion:
+        case .display, .window, .region, .app, .windowRegion, .windows, .windowsRegion, .apps:
             return true
         case .audioOnly, .cameraOnly:
             return false

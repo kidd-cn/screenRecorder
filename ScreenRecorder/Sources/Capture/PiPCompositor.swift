@@ -99,6 +99,20 @@ struct PiPCaptureGeometry {
                 captureOriginInCGPoints: canvas.origin,
                 scale: 1,
                 capturePixelSize: canvas.size)
+        case .apps(let bundleIDs):
+            // 多 App（2026-11-20）：各 bundle 全部可录窗口 union 包围盒（SCStreamRecorder
+            // filter 构造同口径）。
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true) else { return nil }
+            let snapshots = WindowPicker.shareableSnapshots(from: content.windows)
+            let selected = bundleIDs.flatMap { bundleID in
+                WindowPicker.appWindows(ofBundleID: bundleID, from: snapshots)
+            }
+            guard !selected.isEmpty else { return nil }
+            let canvas = selected.reduce(CGRect.null) { $0.union($1.frame) }
+            return PiPCaptureGeometry(
+                captureOriginInCGPoints: canvas.origin,
+                scale: 1,
+                capturePixelSize: canvas.size)
         case .windows(let windowIDs):
             // 多窗口（2026-11-16）：画布 = 选中窗口 union 包围盒（与 SCStreamRecorder
             // filter 构造同口径）。存活过滤：全灭 nil = 本场纯屏幕，部分灭按存活集。

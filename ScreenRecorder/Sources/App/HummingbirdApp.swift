@@ -1286,11 +1286,34 @@ final class AppAssembly: ObservableObject {
             bannerText: bannerText,
             onSelect: { [weak self] windowID in self?.windowPickerSelected(windowID) },
             onAppSelect: { [weak self] bundleID in self?.appPickerSelected(bundleID) },
-            onConfirm: { [weak self] windowIDs in self?.windowPickerConfirmed(windowIDs) }
+            onConfirm: { [weak self] windowIDs in self?.windowPickerConfirmed(windowIDs) },
+            onConfirmApps: { [weak self] bundleIDs in self?.appPickerConfirmed(bundleIDs) }
         ))
         NSApp.activate(ignoringOtherApps: true)
         windowPickerWindowController?.showWindow(nil)
         windowPickerWindowController?.window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// App「下一步」确认（2026-11-20 Omi 38.png 多选补齐）：单选 = 既有 `.app` 语义
+    ///（`onAppSelect` 同一条路）；多选 = `.apps` 多应用合成录制。偏好设置入口多选无
+    /// 落点（同窗口流程纪律：多选只在「选定即开始」场景有意义）。
+    private func appPickerConfirmed(_ bundleIDs: [String]) {
+        guard controller.state == .idle else {
+            NSLog("WindowPicker: 忽略选定 App 集（当前状态非 idle：\(controller.state)）")
+            dismissWindowPicker()
+            return
+        }
+        guard !bundleIDs.isEmpty else { return }
+        if bundleIDs.count == 1 {
+            appPickerSelected(bundleIDs[0])
+            return
+        }
+        let startsRecording = pendingWindowPickerStartsRecording
+        dismissWindowPicker()
+        NSLog("WindowPicker: 多 App 录制启动（\(bundleIDs.count) 个应用）")
+        if startsRecording {
+            startRecording(mode: .apps(bundleIDs))
+        }
     }
 
     /// App 选定回调（P3a，`WindowPickerView` App 行双击触发）：idle 预检（同窗口选定纪律，
@@ -1492,6 +1515,7 @@ private struct WindowPickerHostView: View {
     let onSelect: (CGWindowID) -> Void
     let onAppSelect: (String) -> Void
     let onConfirm: ([CGWindowID]) -> Void
+    let onConfirmApps: ([String]) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1507,6 +1531,7 @@ private struct WindowPickerHostView: View {
                 onSelect: onSelect,
                 onAppSelect: onAppSelect,
                 onConfirm: onConfirm,
+                onConfirmApps: onConfirmApps,
                 initialScope: scope)
         }
     }

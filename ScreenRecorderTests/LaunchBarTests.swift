@@ -90,3 +90,27 @@ final class DisplayLocalRectTests: XCTestCase {
         XCTAssertEqual(local.size, rect.size, "裁剪尺寸不受换算影响")
     }
 }
+
+/// App 图标网格几何钉测（2026-11-20 Omi 38.png 复刻）：5 列等分 + 超窄回退。
+final class AppGridGeometryTests: XCTestCase {
+    func testTileSizeDividesViewWidthIntoFiveColumns() {
+        // 900 - 2×28 inset - 4×26 间距 = 740 → 每列 148
+        XCTAssertEqual(
+            AppGridGeometry.tileSize(forViewWidth: 900),
+            CGSize(width: 148, height: AppGridGeometry.itemHeight))
+    }
+
+    func testTileSizeFallsBackOnTooNarrowView() {
+        let fallback = CGSize(width: AppGridGeometry.fallbackTileWidth,
+                              height: AppGridGeometry.itemHeight)
+        XCTAssertEqual(AppGridGeometry.tileSize(forViewWidth: 0), fallback)
+    }
+
+    /// 多 App 模式 Codable 往返保值 + 屏幕画布表态在。
+    func testAppsModeCodable() throws {
+        let mode = CaptureMode.apps(["com.apple.Safari", "com.apple.Terminal"])
+        let decoded = try JSONDecoder().decode(CaptureMode.self, from: JSONEncoder().encode(mode))
+        XCTAssertEqual(decoded, mode)
+        XCTAssertTrue(mode.hasVideoCanvas)
+    }
+}

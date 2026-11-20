@@ -354,6 +354,11 @@ final class MarkingOverlayController: ObservableObject {
             displayID = Self.displayID(containingWindow: windowID)
         case .app(let bundleID):
             displayID = Self.displayID(containingAppBundle: bundleID)
+        case .apps(let bundleIDs):
+            // 多 App（2026-11-20）：多 bundle 窗口 union 中心落点的显示器（CGWindowList
+            // 同步读帧；recordedDisplayFrame 是同步缝）。
+            guard let canvas = Self.unionFrame(ofBundleIDs: bundleIDs) else { return nil }
+            displayID = Self.displayID(containingCGPoint: CGPoint(x: canvas.midX, y: canvas.midY))
         case .windows(let windowIDs):
             // 多窗口：union 包围盒中心落点的显示器 id（多窗口 filter 锚屏口径；
             // CGWindowList 同步读帧——recordedDisplayFrame 是同步缝，不走 SCK）。
@@ -387,13 +392,33 @@ final class MarkingOverlayController: ObservableObject {
     /// 多窗口 union 包围盒（2026-11-16，.windows/.windowsRegion 锚屏判定共用）：on-screen
     /// 窗口清单按 id 过滤取 CG bounds 求并。全灭/清单不可读取回 nil（面板保持原 frame）。
     private static func unionFrame(ofWindowIDs windowIDs: [CGWindowID]) -> CGRect? {
+        unionFrame(ofWindowIDs: windowIDs, ofBundleIDs: nil)
+    }
+
+    /// 多 App union 包围盒（2026-11-20）：按所有者 PID → bundle id 归属过滤（同
+    /// displayID(containingAppBundle) 口径）。
+    private static func unionFrame(ofBundleIDs bundleIDs: [String]) -> CGRect? {
+        unionFrame(ofWindowIDs: [], ofBundleIDs: Set(bundleIDs))
+    }
+
+    /// union 包围盒共用实现：窗口 id 集与/或 bundle id 集按条件合并（普通层窗口）。
+    private static func unionFrame(ofWindowIDs windowIDs: [CGWindowID],
+                                   ofBundleIDs bundleIDs: Set<String>?) -> CGRect? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
                 as? [[String: Any]] else { return nil }
         let idSet = Set(windowIDs)
         var canvas = CGRect.null
         for info in list {
-            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
-                  idSet.contains(id),
+            guard (info[kCGWindowLayer as String] as? Int ?? 0) == 0 else { continue }
+            let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+            var matched = id.map(idSet.contains) ?? false
+            if !matched, let bundleIDs,
+               let pid = info[kCGWindowOwnerPID as String] as? Int,
+               let bundleID = NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier,
+               bundleIDs.contains(bundleID) {
+                matched = true
+            }
+            guard matched,
                   let boundsDict = info[kCGWindowBounds as String] as? [String: Any],
                   let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary) else { continue }
             canvas = canvas.union(bounds)

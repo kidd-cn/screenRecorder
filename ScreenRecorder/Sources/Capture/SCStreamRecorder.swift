@@ -50,6 +50,8 @@ final class SCStreamRecorder: NSObject {
         case windowRegionClippedEmpty(CGWindowID)
         /// 多窗口模式（2026-11-16）：start 时一个选中 id 都枚举不到（全部已关闭）。
         case windowsNotFound(count: Int)
+        /// 多 App 模式（2026-11-20）：所选应用都没有可录窗口（全退出/全关窗）。
+        case appsNotFound(count: Int)
 
         var errorDescription: String? {
             switch self {
@@ -63,6 +65,8 @@ final class SCStreamRecorder: NSObject {
                 return String(format: NSLocalizedString("窗口（id=%lld）已缩小到上次所选区域之外，无内容可录，请重新选择窗口区域", comment: "msg"), id)
             case .windowsNotFound(let count):
                 return String(format: NSLocalizedString("选中的 %lld 个窗口都已关闭，无内容可录", comment: "msg"), count)
+            case .appsNotFound(let count):
+                return String(format: NSLocalizedString("选中的 %lld 个应用都没有可录制的窗口（可能已退出）", comment: "msg"), count)
             }
         }
     }
@@ -529,6 +533,28 @@ final class SCStreamRecorder: NSObject {
                 filter: SCContentFilter(display: display, excludingWindows: []),
                 pixelSize: rect.size,
                 sourceRect: rect
+            )
+        case .apps(let bundleIDs):
+            // 多 App（2026-11-20 Omi 38.png）：各 bundle 的全部可录窗口并集 → 与 `.app`/
+            // `.windows` 同族多窗口 filter + union 画布 + 锚屏局部系裁剪。任一 bundle 零
+            // 窗口不致命（按有窗口者继续），全灭抛错走 begin 失败路径。
+            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            let snapshots = WindowPicker.shareableSnapshots(from: content.windows)
+            let selected = bundleIDs.flatMap { bundleID in
+                WindowPicker.appWindows(ofBundleID: bundleID, from: snapshots)
+            }
+            let ids = Set(selected.map(\.windowID))
+            let windows = content.windows.filter { ids.contains($0.windowID) }
+            guard !windows.isEmpty else {
+                throw SCStreamRecorderError.appsNotFound(count: bundleIDs.count)
+            }
+            let canvas = windows.reduce(CGRect.null) { $0.union($1.frame) }
+            let anchor = Self.displayID(containingPoint: CGPoint(x: canvas.midX, y: canvas.midY)) ?? CGMainDisplayID()
+            let display = try await findDisplay(anchor)
+            return ResolvedTarget(
+                filter: SCContentFilter(display: display, including: windows),
+                pixelSize: canvas.size,
+                sourceRect: Self.displayLocalRect(canvas, displayID: anchor)
             )
         case .windows(let windowIDs):
             // 多窗口（2026-11-16 Omi 55.png 多选补齐）：与 `.app` 同族多窗口构造

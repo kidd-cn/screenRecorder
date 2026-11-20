@@ -690,6 +690,7 @@ final class CaptureController: ObservableObject {
         case .region(_, let displayID): return displayID
         case .window, .windowRegion: return nil
         case .app: return nil
+        case .apps: return nil
         case .windows, .windowsRegion: return nil
         case .audioOnly: return nil
         case .cameraOnly: return nil
