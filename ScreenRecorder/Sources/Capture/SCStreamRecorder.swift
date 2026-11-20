@@ -515,10 +515,13 @@ final class SCStreamRecorder: NSObject {
             // 取不到回主屏；跨屏窗口集仅保证锚屏窗口入画——SCK 多窗口捕获的已知口径）。
             let anchor = Self.displayID(containingPoint: CGPoint(x: canvas.midX, y: canvas.midY)) ?? CGMainDisplayID()
             let display = try await findDisplay(anchor)
+            // 2026-11-20 修复：显示器锚 filter 的采样坐标系 = 锚显示器局部系（左上原点），
+            // 画布 union 是 CG 全局系——必须用 sourceRect 把「显示器局部系的 union」裁出来，
+            // 否则流从显示器左上角取 canvas 尺寸的内容（错位，只看到左上角那个窗口）。
             return ResolvedTarget(
                 filter: SCContentFilter(display: display, including: windows),
                 pixelSize: canvas.size,
-                sourceRect: nil
+                sourceRect: Self.displayLocalRect(canvas, displayID: anchor)
             )
         case .region(let rect, let displayID):
             let display = try await findDisplay(displayID)
@@ -541,10 +544,11 @@ final class SCStreamRecorder: NSObject {
             let canvas = windows.reduce(CGRect.null) { $0.union($1.frame) }
             let anchor = Self.displayID(containingPoint: CGPoint(x: canvas.midX, y: canvas.midY)) ?? CGMainDisplayID()
             let display = try await findDisplay(anchor)
+            // 同 `.app` 修复：sourceRect = union 在锚显示器局部系的矩形（否则错位）。
             return ResolvedTarget(
                 filter: SCContentFilter(display: display, including: windows),
                 pixelSize: canvas.size,
-                sourceRect: nil
+                sourceRect: Self.displayLocalRect(canvas, displayID: anchor)
             )
         case .windowRegion(let windowID, let rect):
             // P3b：窗口锚定区域 = 单窗口 filter（一期窗口模式同款装配）+ sourceRect 裁剪
@@ -585,10 +589,13 @@ final class SCStreamRecorder: NSObject {
             }
             let anchor = Self.displayID(containingPoint: CGPoint(x: canvas.midX, y: canvas.midY)) ?? CGMainDisplayID()
             let display = try await findDisplay(anchor)
+            // 同上：clampedRect 是 union 相对系 → 平移进锚显示器局部系再裁。
+            let displayRect = Self.displayLocalRect(
+                clampedRect.offsetBy(dx: canvas.minX, dy: canvas.minY), displayID: anchor)
             return ResolvedTarget(
                 filter: SCContentFilter(display: display, including: windows),
                 pixelSize: clampedRect.size,
-                sourceRect: clampedRect
+                sourceRect: displayRect
             )
         case .audioOnly:
             // P7a：仅声音无目标窗口/显示器——nil 形语义。调用方（start）据 nil 走仅音频
@@ -603,8 +610,16 @@ final class SCStreamRecorder: NSObject {
         }
     }
 
-    private func findDisplay(_ displayID: CGDirectDisplayID) async throws -> SCDisplay {
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+    /// CG 全局矩形 → 某显示器局部系（显示器左上原点，points）——显示器锚 filter 的
+    /// sourceRect 坐标系（2026-11-20 多窗口错位修复的单一换算点）。显示器 frame 取
+    /// CGDisplayBounds；取不到按主屏包围盒（保守回退：调用方只在锚屏内取 union）。
+    static func displayLocalRect(_ globalRect: CGRect, displayID: CGDirectDisplayID) -> CGRect {
+        let bounds = CGDisplayBounds(displayID)
+        guard bounds.width > 0, bounds.height > 0 else { return globalRect }
+        return globalRect.offsetBy(dx: -bounds.minX, dy: -bounds.minY)
+    }
+
+    private func findDisplay(_ displayID: CGDirectDisplayID) async throws -> SCDisplay {        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw SCStreamRecorderError.displayNotFound(displayID)
         }

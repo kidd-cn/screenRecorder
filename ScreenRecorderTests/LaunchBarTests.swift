@@ -71,3 +71,22 @@ final class WindowGridGeometryTests: XCTestCase {
         }
     }
 }
+
+/// 多窗口采样子集换算钉测（2026-11-20「多个瓦片只看到一个窗口」修复）：显示器锚
+/// filter 的 sourceRect 是显示器局部系，union 画布是 CG 全局系——换算必须平移掉
+/// 显示器 origin，否则流从显示器左上角取画布尺寸内容（错位只见一个窗口）。
+final class DisplayLocalRectTests: XCTestCase {
+    /// 主屏（origin 0,0）：恒等平移。
+    func testMainDisplayIdentity() {
+        let rect = CGRect(x: 120, y: 80, width: 600, height: 400)
+        XCTAssertEqual(
+            SCStreamRecorder.displayLocalRect(rect, displayID: CGMainDisplayID()), rect)
+    }
+
+    /// 换算只平移不缩放：任意显示器上输出尺寸恒等于输入尺寸。
+    func testDisplayLocalRectPreservesSize() {
+        let rect = CGRect(x: 10, y: 20, width: 300, height: 200)
+        let local = SCStreamRecorder.displayLocalRect(rect, displayID: CGMainDisplayID())
+        XCTAssertEqual(local.size, rect.size, "裁剪尺寸不受换算影响")
+    }
+}
