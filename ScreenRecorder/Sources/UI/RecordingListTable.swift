@@ -406,20 +406,19 @@ final class RecordingActionCell: NSView {
     private var item: RecordingFileMetadata?
     private var onAction: ((RowAction) -> Void)?
     private let playButton = CircularGlyphButton(symbol: "play.fill", accessibility: "播放")
-    private let revealButton = CircularGlyphButton(symbol: "arrow.down.forward.square", accessibility: "在 Finder 中显示")
+    /// 在 Finder 中显示：单一文件夹轮廓（此前 box+arrow 符号在圆钮内形成「方框套圆」
+    /// 双重边框，2026-11-20 用户反馈太丑——改成单形图标）。
+    private let revealButton = CircularGlyphButton(symbol: "folder", accessibility: "在 Finder 中显示")
     private let editButton = CircularGlyphButton(symbol: "scissors", accessibility: "编辑")
 
     init() {
         super.init(frame: .zero)
-        let stack = NSStackView(views: [playButton, revealButton, editButton])
-        stack.spacing = 10
-        stack.orientation = .horizontal
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
+        // 手工帧布局（2026-11-20 用户反馈：圆要正圆、图标要小、三个必须完整可见）：
+        // NSStackView 会把按钮拉成椭圆，改为固定 30×30 帧右对齐排布，完全可控。
+        for button in [playButton, revealButton, editButton] {
+            button.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(button)
+        }
         playButton.target = self
         playButton.action = #selector(playTapped)
         revealButton.target = self
@@ -431,6 +430,23 @@ final class RecordingActionCell: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) 不支持（代码构建视图）")
+    }
+
+    /// 三个 30×30 正圆左对齐（左内边距 8、间距 10）；纵向居中。左对齐原因：表格内容宽
+    /// 实测比窗口可视宽多 37pt（NSTableView 自动布局行为），右对齐时第三个钮被窗口
+    /// 右缘裁掉；列内左侧起始即可完整显示（2026-11-20 用户反馈三轮定稿）。
+    override func layout() {
+        super.layout()
+        let side = CircularGlyphButton.diameter
+        let spacing: CGFloat = 10
+        let buttons = [playButton, revealButton, editButton]
+        var x: CGFloat = 8
+        let y = (bounds.height - side) / 2
+        for button in buttons {
+            button.frame = NSRect(x: x, y: y, width: side, height: side)
+            button.layer?.cornerRadius = side / 2
+            x += side + spacing
+        }
     }
 
     /// 按行配置：条目 + 动作闭包；音频无视频轨不可编辑（编辑按钮置灰）。
@@ -450,23 +466,29 @@ final class RecordingActionCell: NSView {
 /// 白描边圆形符号按钮（Omi 操作列观感）：26pt 圆 + 1.5pt 白描边 + 白色符号。
 @MainActor
 final class CircularGlyphButton: NSButton {
-    private static let diameter: CGFloat = 26
+    static let diameter: CGFloat = 30
 
     init(symbol: String, accessibility: String) {
         super.init(frame: NSRect(x: 0, y: 0, width: Self.diameter, height: Self.diameter))
         isBordered = false
         bezelStyle = .regularSquare
-        image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibility)
+        // 2026-11-20 用户三轮反馈定稿：30×30 正圆（帧布局由宿主控制器给出，不再被栈
+        // 拉伸成椭圆）、图标 12pt 常规字重（更小、更精致）、1.5pt 白描边。
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibility)?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
         imagePosition = .imageOnly
         imageScaling = .scaleProportionallyDown
         contentTintColor = .white
         wantsLayer = true
         layer?.cornerRadius = Self.diameter / 2
         layer?.borderWidth = 1.5
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.85).cgColor
-        translatesAutoresizingMaskIntoConstraints = false
-        widthAnchor.constraint(equalToConstant: Self.diameter).isActive = true
-        heightAnchor.constraint(equalToConstant: Self.diameter).isActive = true
+        layer?.borderColor = NSColor.white.withAlphaComponent(0.9).cgColor
+    }
+
+    /// 正圆恒等：任何尺寸变化后同步圆角（防椭圆）。
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = min(bounds.width, bounds.height) / 2
     }
 
     @available(*, unavailable)
