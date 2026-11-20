@@ -63,6 +63,21 @@ enum CaptureMode: Equatable, Codable {
 /// AppAssembly.refreshMarkingSurfaces）与源丢失监视武装门（CaptureController）等消费点
 /// 使用，避免各处手写 `mode != .audioOnly && mode != .cameraOnly` 漂移。
 extension CaptureMode {
+    /// 成片文件名前缀（2026-11-20 Omi 文件列表页「类型」列）：每场录制按模式取名
+    ///（屏幕/窗口/区域/App/摄像头/声音），列表页据此显示类型；历史文件无此约定时
+    /// 按扩展名回退（见 RecordingListFormat.kindText）。
+    var filePrefixKey: String {
+        switch self {
+        case .display: return "屏幕"
+        case .window, .windows: return "窗口"
+        case .region: return "区域"
+        case .windowRegion, .windowsRegion: return "窗口区域"
+        case .app, .apps: return "App"
+        case .audioOnly: return "声音"
+        case .cameraOnly: return "摄像头"
+        }
+    }
+
     /// display/window/region/app/windowRegion = 屏幕视频画布在；audioOnly/cameraOnly = 无。
     var hasVideoCanvas: Bool {
         switch self {

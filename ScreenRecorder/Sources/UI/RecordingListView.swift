@@ -38,19 +38,12 @@ struct RecordingListView: View {
                 RecordingListTable(
                     items: viewModel.items,
                     menuProvider: { selection in self.makeMenu(for: selection) },
-                    onDoubleClick: { item in NSWorkspace.shared.open(item.url) } // 双击行：播放
-                )
-                // 卡片容器（Omi 风格，2026-11-15）：表格底色由圆角卡提供。
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(OmiStyle.cardBackground))
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .padding(.horizontal, 12)
-                .padding(.top, 12)
+                    onDoubleClick: { item in NSWorkspace.shared.open(item.url) }, // 双击行：播放
+                    onRowAction: { item, action in handleRowAction(item, action) })
             }
             bottomBar
         }
-        .background(OmiStyle.panelBackground) // Omi 化（2026-11-14）：面板底 + 卡片留白
+        .background(Color(nsColor: .windowBackgroundColor)) // 窗口整页深色（窗口外观钉 darkAqua）
         .sheet(item: $renameTarget) { item in
             renameSheet(item: item)
         }
@@ -114,6 +107,20 @@ struct RecordingListView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    // MARK: - 行内操作（Omi 操作列三个圆形按钮）
+
+    /// 播放 / 在 Finder 中显示 / 编辑（缩放分段编辑器）——与右键菜单同一批行为。
+    private func handleRowAction(_ item: RecordingFileMetadata, _ action: RowAction) {
+        switch action {
+        case .play:
+            NSWorkspace.shared.open(item.url)
+        case .reveal:
+            viewModel.revealInFinder(item)
+        case .edit:
+            ZoomEditorWindowOpener.open(for: item, viewModel: viewModel)
+        }
     }
 
     // MARK: - 行操作（原生右键菜单；选中集非单选时部分操作收敛）

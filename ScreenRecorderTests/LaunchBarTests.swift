@@ -114,3 +114,48 @@ final class AppGridGeometryTests: XCTestCase {
         XCTAssertTrue(mode.hasVideoCanvas)
     }
 }
+
+// MARK: - Omi 文件列表页（2026-11-20 47.png 复刻）钉测
+
+/// 类型列推导 + 成片文件名前缀：模式 → 前缀键一一对应；列表「类型」列按前缀显示，
+/// 历史文件按扩展名回退。
+final class RecordingListKindTests: XCTestCase {
+    func testCaptureModeFilePrefixes() {
+        XCTAssertEqual(CaptureMode.display(1).filePrefixKey, "屏幕")
+        XCTAssertEqual(CaptureMode.window(1).filePrefixKey, "窗口")
+        XCTAssertEqual(CaptureMode.windows([1, 2]).filePrefixKey, "窗口")
+        XCTAssertEqual(CaptureMode.region(rect: .zero, displayID: 1).filePrefixKey, "区域")
+        XCTAssertEqual(CaptureMode.windowRegion(window: 1, rect: .zero).filePrefixKey, "窗口区域")
+        XCTAssertEqual(CaptureMode.windowsRegion(windows: [1], rect: .zero).filePrefixKey, "窗口区域")
+        XCTAssertEqual(CaptureMode.app(bundleID: "a").filePrefixKey, "App")
+        XCTAssertEqual(CaptureMode.apps(["a", "b"]).filePrefixKey, "App")
+        XCTAssertEqual(CaptureMode.audioOnly.filePrefixKey, "声音")
+        XCTAssertEqual(CaptureMode.cameraOnly.filePrefixKey, "摄像头")
+    }
+
+    /// 类型列：已知前缀取前缀；未知前缀按扩展名回退（m4a=声音、png=截图、其余=屏幕）。
+    func testKindTextFromPrefixAndExtensionFallback() {
+        func item(_ name: String) -> RecordingFileMetadata {
+            let url = URL(fileURLWithPath: "/tmp/\(name)")
+            return RecordingFileMetadata(
+                id: url, url: url, name: name, sizeBytes: 1, createdAt: nil, duration: nil)
+        }
+        XCTAssertEqual(RecordingListFormat.kindText(for: item("窗口_2026-11-20_23-15-54.mp4")), "窗口")
+        XCTAssertEqual(RecordingListFormat.kindText(for: item("窗口区域_2026-11-20_23-15-54.mp4")), "窗口区域")
+        XCTAssertEqual(RecordingListFormat.kindText(for: item("App_2026-11-20_23-15-54.mp4")), "App")
+        XCTAssertEqual(RecordingListFormat.kindText(for: item("声音_2026-11-20_23-15-54.m4a")), "声音")
+        XCTAssertEqual(RecordingListFormat.kindText(for: item("录屏_2026-11-20_23-15-54.mp4")), "屏幕",
+                       "历史文件无前缀 → 屏幕回退")
+        XCTAssertEqual(RecordingListFormat.kindText(for: item("random.m4a")), "声音",
+                       "无前缀按扩展名回退")
+        XCTAssertEqual(RecordingListFormat.kindText(for: item("shot.png")), "截图")
+    }
+
+    /// 时长格式（Omi 同款定宽）：分钟秒补零、小时段三段式、缺省破折号。
+    func testDurationTextFormat() {
+        XCTAssertEqual(RecordingListFormat.durationText(5), "00:05")
+        XCTAssertEqual(RecordingListFormat.durationText(99), "01:39")
+        XCTAssertEqual(RecordingListFormat.durationText(3661), "1:01:01")
+        XCTAssertEqual(RecordingListFormat.durationText(nil), "—")
+    }
+}

@@ -581,10 +581,14 @@ final class AppAssembly: ObservableObject {
         try? fileStore.ensureDirectory()
         // P7a：仅声音输出 .m4a（纯音轨容器）；其余模式缺省 mp4（既有调用形状不变）。
         let outputExtension: String = if case .audioOnly = mode { "m4a" } else { "mp4" }
+        // 2026-11-20 Omi 文件列表页：成片名带类型前缀（屏幕/窗口/区域/App/摄像头/声音），
+        // 列表「类型」列据此展示；截图前缀「截图」由截图入口自理。
         let config = Self.makeConfiguration(
             settings: settings,
             mode: mode,
-            outputURL: fileStore.nextFileURL(extension: outputExtension))
+            outputURL: fileStore.nextFileURL(
+                extension: outputExtension,
+                prefix: NSLocalizedString(mode.filePrefixKey, comment: "Recording file prefix")))
         return Task { await controller.start(mode: mode, config: config, bypassCountdown: bypassCountdown) }
     }
 
@@ -1010,12 +1014,14 @@ final class AppAssembly: ObservableObject {
                 return true
             })
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 720, height: 420),
+                contentRect: NSRect(x: 0, y: 0, width: 1000, height: 620),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered,
                 defer: false
             )
             window.title = NSLocalizedString("文件列表", comment: "Recording list window title")
+            // 2026-11-20 Omi 47.png 文件列表页：整窗深色（行/表头/缩略图观感基准同 Omi）。
+            window.appearance = NSAppearance(named: .darkAqua)
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: RecordingListView(viewModel: viewModel))
             window.center()
