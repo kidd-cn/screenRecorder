@@ -66,6 +66,50 @@ enum ZoomTimelineGeometry {
         return best
     }
 
+    /// 磁吸主逻辑（剪映对齐·带粘滞与穿越检测）：
+    /// 1. **粘滞**——上一吸附点仍在 1.5× 容差内 → 保持吸附（磁点「咬住」手感，防抖动
+    ///    交替吸脱）；
+    /// 2. **邻近**——proposed 容差内有磁点 → 吸最近；
+    /// 3. **穿越**——previous → proposed 光标路径跨越磁点即吸（鼠标事件合并使快速拖动
+    ///    单格跳 10-20px、直接越过容差窗——只做邻近检测磁吸会「体感不存在」的根因），
+    ///    取被穿越者中距 proposed 最近者；
+    /// 4. 均未命中 → nil（调用方清指示线、用原值）。
+    static func magnetSnap(proposed: TimeInterval,
+                           previous: TimeInterval?,
+                           activeSnap: TimeInterval?,
+                           candidates: [TimeInterval],
+                           toleranceSeconds: TimeInterval) -> (time: TimeInterval, snapped: Bool)? {
+        guard toleranceSeconds > 0, !candidates.isEmpty else { return nil }
+        if let active = activeSnap, abs(proposed - active) <= toleranceSeconds * 1.5 {
+            return (active, true) // 粘滞
+        }
+        var nearest: TimeInterval?
+        var nearestDistance = toleranceSeconds
+        for candidate in candidates {
+            let distance = abs(candidate - proposed)
+            if distance < nearestDistance {
+                nearest = candidate
+                nearestDistance = distance
+            }
+        }
+        if let nearest { return (nearest, true) } // 邻近
+        if let previous {
+            let lo = min(previous, proposed)
+            let hi = max(previous, proposed)
+            var crossed: TimeInterval?
+            var crossedDistance = TimeInterval.greatestFiniteMagnitude
+            for candidate in candidates where lo < candidate && candidate < hi {
+                let distance = abs(candidate - proposed)
+                if distance < crossedDistance {
+                    crossed = candidate
+                    crossedDistance = distance
+                }
+            }
+            if let crossed { return (crossed, true) } // 穿越
+        }
+        return nil
+    }
+
     /// 时间码（剪映同款 HH:MM:SS:FF，帧率缺省 30）：totalFrames = round(seconds × fps)
     /// ——0.999s @30 → 00:00:00:30（帧位 30 属上溢？不：30 帧 @30fps = 1.0s 边界，
     /// round 后恰进位到秒位，故 ff 恒 < fps）。fps ≤ 0 → "—"。
@@ -224,9 +268,13 @@ final class ZoomTimelineCanvas: NSView {
         }
         let kind: Kind
         let startX: CGFloat
+        /// 上一事件的光标/被拖端点时间（磁吸穿越检测基准；逐 mouseDragged 更新）。
+        var lastSnappedTime: TimeInterval
     }
 
     private var dragSession: DragSession?
+    /// 当前激活的磁吸点（拖拽中画黄色指示线；松手/脱吸清除）。
+    private var activeSnapIndicator: TimeInterval?
 
     override var isOpaque: Bool { false }
 
@@ -385,6 +433,14 @@ final class ZoomTimelineCanvas: NSView {
                 width: handle, height: block.rect.height)).fill()
         }
 
+        // 磁吸指示线（剪映对齐·黄色竖线：拖拽中吸附生效的可视反馈，盖段块之上）。
+        if let snapTime = activeSnapIndicator, dragSession != nil {
+            let snapX = ZoomTimelineGeometry.timeToX(
+                snapTime, pxPerSec: scale, offset: offset)
+            NSColor.systemYellow.setFill()
+            NSBezierPath(rect: CGRect(x: snapX - 0.5, y: 0, width: 1, height: bounds.height)).fill()
+        }
+
         // 播放头竖线。
         let playheadX = ZoomTimelineGeometry.playheadX(
             playhead: model.playhead, scale: scale, width: bounds.width, offset: offset)
@@ -420,34 +476,71 @@ final class ZoomTimelineCanvas: NSView {
             }
         case .background:
             // 空白按下：先按「新建剪除段拖选」武装（拖出 ≥4px 才成预览）；松手未拖
-            // = 点击背景跳播（旧语义）。
+            // = 点击背景跳播（旧语义）。锚点即参与磁吸（剪映同款——按下即吸边）。
+            let rawAnchor = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
+            let snapped = ZoomTimelineGeometry.magnetSnap(
+                proposed: rawAnchor, previous: nil, activeSnap: nil,
+                candidates: magnetCandidates(model: model), toleranceSeconds: snapTolerance(pxPerSec: scale))
+            let anchor = snapped?.time ?? rawAnchor
+            activeSnapIndicator = snapped != nil ? anchor : nil
             dragSession = DragSession(
-                kind: .cutCreate(anchor: ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)),
-                startX: point.x)
+                kind: .cutCreate(anchor: anchor), startX: point.x,
+                lastSnappedTime: anchor)
         }
     }
 
     private func beginZoomDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
         guard model.segments.indices.contains(index) else { return }
         let segment = model.segments[index]
+        let origin = isLeading ? segment.start : segment.end
         dragSession = DragSession(
             kind: .zoomHandle(index: index, isLeading: isLeading,
                               originalStart: segment.start, originalEnd: segment.end),
-            startX: startX)
+            startX: startX, lastSnappedTime: origin)
     }
 
     private func beginCutDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
         guard model.cuts.indices.contains(index) else { return }
         let cut = model.cuts[index]
+        let origin = isLeading ? cut.start : cut.end
         dragSession = DragSession(
             kind: .cutHandle(index: index, isLeading: isLeading,
                              originalStart: cut.start, originalEnd: cut.end),
-            startX: startX)
+            startX: startX, lastSnappedTime: origin)
     }
 
-    /// 磁点容差（吸附剪映对齐）：把手宽度换算秒（0.75 折减——吸在段边内沿）。
+    /// 磁点容差（吸附剪映对齐）：把手宽度换算秒（1.25×——磁吸窗略宽于把手，配合粘滞）。
     private func snapTolerance(pxPerSec: CGFloat) -> TimeInterval {
-        TimeInterval(ZoomTimelineGeometry.handleWidth / max(pxPerSec, 0.001)) * 0.75
+        TimeInterval(ZoomTimelineGeometry.handleWidth / max(pxPerSec, 0.001)) * 1.25
+    }
+
+    /// 磁点收集（剪映对齐）：0 / 源时长 / 播放头 / 各剪除段与缩放段端点（排除集由调用方过滤）。
+    private func magnetCandidates(model: ZoomEditorModel, excludingCut cutIndex: Int? = nil,
+                                  excludingZoom zoomIndex: Int? = nil) -> [TimeInterval] {
+        var candidates: [TimeInterval] = [0, model.sourceDuration, model.playhead]
+        for (index, cut) in model.cuts.enumerated() where index != cutIndex {
+            candidates.append(contentsOf: [cut.start, cut.end])
+        }
+        for (index, segment) in model.segments.enumerated() where index != zoomIndex {
+            candidates.append(contentsOf: [segment.start, segment.end])
+        }
+        return candidates
+    }
+
+    /// 磁吸一步（邻近/粘滞/穿越 + 指示线维护）：返回生效时间；nil = 不吸附（清线用原值）。
+    private func magnet(_ proposed: TimeInterval, previous: TimeInterval,
+                        model: ZoomEditorModel, scale: CGFloat,
+                        excludingCut cutIndex: Int? = nil, excludingZoom zoomIndex: Int? = nil) -> TimeInterval {
+        let result = ZoomTimelineGeometry.magnetSnap(
+            proposed: proposed, previous: previous, activeSnap: activeSnapIndicator,
+            candidates: magnetCandidates(model: model, excludingCut: cutIndex, excludingZoom: zoomIndex),
+            toleranceSeconds: snapTolerance(pxPerSec: scale))
+        if let result {
+            activeSnapIndicator = result.time
+            return result.time
+        }
+        activeSnapIndicator = nil
+        return proposed
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -456,49 +549,47 @@ final class ZoomTimelineCanvas: NSView {
         let scale = pxPerSec(model: model)
         let offset = model.timelineOffset
         let delta = (point.x - session.startX) / scale
-        let tolerance = snapTolerance(pxPerSec: scale)
-        func snap(_ proposed: TimeInterval, cutIndex: Int? = nil, zoomIndex: Int? = nil) -> TimeInterval {
-            var candidates: [TimeInterval] = [0, model.sourceDuration, model.playhead]
-            for (index, cut) in model.cuts.enumerated() where index != cutIndex {
-                candidates.append(contentsOf: [cut.start, cut.end])
-            }
-            for (index, segment) in model.segments.enumerated() where index != zoomIndex {
-                candidates.append(contentsOf: [segment.start, segment.end])
-            }
-            return ZoomTimelineGeometry.snapped(proposed, candidates: candidates, toleranceSeconds: tolerance)
-        }
         switch session.kind {
         case .zoomHandle(let index, let isLeading, let originalStart, let originalEnd):
-            let start = isLeading ? originalStart + delta : originalStart
-            let end = isLeading ? originalEnd : originalEnd + delta
-            let snappedStart = isLeading ? snap(start, zoomIndex: index) : start
-            let snappedEnd = isLeading ? end : snap(end, zoomIndex: index)
-            model.dragPreview = ZoomEditorModel.DragPreview(index: index, start: snappedStart, end: snappedEnd)
-            model.scrub(to: isLeading ? snappedStart : snappedEnd) // 拖动扫查：预览跟随被拖端点
+            let previous = session.lastSnappedTime
+            let raw = isLeading ? originalStart + delta : originalEnd + delta
+            let snappedEnd = magnet(raw, previous: previous, model: model, scale: scale,
+                                    excludingZoom: index)
+            let start = isLeading ? snappedEnd : originalStart
+            let end = isLeading ? originalEnd : snappedEnd
+            model.dragPreview = ZoomEditorModel.DragPreview(index: index, start: start, end: end)
+            model.scrub(to: snappedEnd) // 拖动扫查：预览跟随被拖端点
+            dragSession?.lastSnappedTime = snappedEnd
         case .cutHandle(let index, let isLeading, let originalStart, let originalEnd):
-            let start = isLeading ? originalStart + delta : originalStart
-            let end = isLeading ? originalEnd : originalEnd + delta
-            let snappedStart = isLeading ? snap(start, cutIndex: index) : start
-            let snappedEnd = isLeading ? end : snap(end, cutIndex: index)
-            model.cutDragPreview = ZoomEditorModel.CutDragPreview(index: index, start: snappedStart, end: snappedEnd)
-            model.scrub(to: isLeading ? snappedStart : snappedEnd) // 拖动扫查：预览跟随被拖端点
+            let previous = session.lastSnappedTime
+            let raw = isLeading ? originalStart + delta : originalEnd + delta
+            let snappedEnd = magnet(raw, previous: previous, model: model, scale: scale,
+                                    excludingCut: index)
+            let start = isLeading ? snappedEnd : originalStart
+            let end = isLeading ? originalEnd : snappedEnd
+            model.cutDragPreview = ZoomEditorModel.CutDragPreview(index: index, start: start, end: end)
+            model.scrub(to: snappedEnd) // 拖动扫查：预览跟随被拖端点
+            dragSession?.lastSnappedTime = snappedEnd
         case .cutCreate(let anchor):
             // 拖出 ≥4px 才成预览（亚拖动 = 点击，松手跳播）；拖动扫查：预览跟随光标
             //（scrub 原始跳转——光标在既有剪除段内也照实显示，扫查 ≠ 播放语义）。
             guard abs(point.x - session.startX) >= 4 else { return }
-            let currentTime = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
-            let snappedTime = snap(currentTime)
+            let previous = session.lastSnappedTime
+            let raw = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
+            let snappedTime = magnet(raw, previous: previous, model: model, scale: scale)
             model.cutDragPreview = ZoomEditorModel.CutDragPreview(
                 index: nil,
                 start: min(anchor, snappedTime),
                 end: max(anchor, snappedTime))
             model.scrub(to: snappedTime)
+            dragSession?.lastSnappedTime = snappedTime
         }
     }
 
     override func mouseUp(with event: NSEvent) {
         defer {
             dragSession = nil
+            activeSnapIndicator = nil // 磁吸指示线松手即清
             if model?.cutDragPreview != nil { model?.cutDragPreview = nil }
             if model?.dragPreview != nil { model?.dragPreview = nil }
         }

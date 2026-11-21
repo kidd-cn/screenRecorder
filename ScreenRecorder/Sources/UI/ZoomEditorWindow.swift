@@ -605,7 +605,7 @@ struct ZoomEditorView: View {
                     }
                     ZoomTimelineStrip(model: model)
                         .frame(height: 64) // 时间线条高（旧 64pt；圆角由画布 layer 自裁）
-                    Text("空白处按住拖选 = 剪除该段（红色块，掐头去尾/删中段）；点空白 = 跳播；红块双击删除，两端可拖微调；⌘+滚轮缩放；空格播放，←→ 逐帧，⌘Z 撤销。")
+                    Text("空白处按住拖选 = 剪除该段（红色块）；拖到段边/播放头附近出现黄色竖线 = 磁吸咬合；点空白 = 跳播；红块双击删除；⌘+滚轮缩放；空格播放，←→ 逐帧，⌘Z 撤销。")
                         .font(.caption2)
                         .foregroundStyle(OmiStyle.faintText)
                 }

@@ -119,6 +119,45 @@ final class ZoomTimelineGeometryTests: XCTestCase {
                        3.5, "零容差 = 不吸附")
     }
 
+    /// 磁吸主逻辑钉测（剪映对齐·粘滞/邻近/穿越/无吸附四态；穿越态是「快速拖动事件
+    /// 合并跳过容差窗」的根因修复——磁吸「体感不存在」的解药）。
+    func testMagnetSnap() {
+        let candidates: [TimeInterval] = [0, 3.0, 3.19, 12.18, 48.4]
+        // 邻近：容差内吸最近
+        XCTAssertEqual(
+            ZoomTimelineGeometry.magnetSnap(proposed: 3.15, previous: nil, activeSnap: nil,
+                                            candidates: candidates, toleranceSeconds: 0.1)?.time,
+            3.19)
+        // 粘滞：上一吸附点在 1.5× 容差内 → 咬住不放（即使已出邻近容差）
+        XCTAssertEqual(
+            ZoomTimelineGeometry.magnetSnap(proposed: 3.32, previous: 3.32, activeSnap: 3.19,
+                                            candidates: candidates, toleranceSeconds: 0.1)?.time,
+            3.19, "1.5×容差内粘滞咬住")
+        // 粘滞解除：拉出 1.5× 容差且邻近无磁点 → 无吸附
+        XCTAssertNil(
+            ZoomTimelineGeometry.magnetSnap(proposed: 3.4, previous: 3.32, activeSnap: 3.19,
+                                            candidates: candidates, toleranceSeconds: 0.1))
+        // 穿越：光标从 3.5 一步跳到 12.5（事件合并形态）——路径跨过 12.18 → 吸之
+        XCTAssertEqual(
+            ZoomTimelineGeometry.magnetSnap(proposed: 12.5, previous: 3.5, activeSnap: nil,
+                                            candidates: candidates, toleranceSeconds: 0.1)?.time,
+            12.18, "快速拖动跨越磁点也吸附")
+        // 穿越：反方向
+        XCTAssertEqual(
+            ZoomTimelineGeometry.magnetSnap(proposed: 2.9, previous: 3.5, activeSnap: nil,
+                                            candidates: candidates, toleranceSeconds: 0.1)?.time,
+            3.0, "反向跨越同样吸附")
+        // 无吸附：容差外且路径无磁点
+        XCTAssertNil(
+            ZoomTimelineGeometry.magnetSnap(proposed: 6.0, previous: 5.8, activeSnap: nil,
+                                            candidates: candidates, toleranceSeconds: 0.1))
+        // 零容差 = 磁吸关闭
+        XCTAssertNil(
+            ZoomTimelineGeometry.magnetSnap(proposed: 3.19, previous: 3.19, activeSnap: nil,
+                                            candidates: candidates, toleranceSeconds: 0))
+        // 穿越不吸「被拖段自身端点」的语义由调用方排除候选保证（magnetSnap 不再单测）
+    }
+
     /// 时间码钉测（剪映同款 HH:MM:SS:FF @30）。
     func testTimecodeFormat() {
         XCTAssertEqual(ZoomTimelineGeometry.timecode(0), "00:00:00:00")
