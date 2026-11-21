@@ -141,6 +141,33 @@ final class ZoomEditorModel: ObservableObject {
     /// 左缘时间（秒，钳制随 zoom）。
     @Published var timelineOffset: TimeInterval = 0
 
+    // MARK: 音频波形（剪映对齐·批次 2：看波形找停顿点下刀）
+
+    /// 波形桶（0.02s/桶采样真源在 OfflineZoomRenderer.sampleWaveform；空 = 无音轨/解码失败）。
+    @Published private(set) var waveform: [OfflineZoomRenderer.WaveformBucket] = []
+    /// 波形进程级缓存（同片重开编辑器零解码；主线程读写——loadWaveform hop 回主线程入库）。
+    nonisolated(unsafe) private static var waveformCache: [URL: [OfflineZoomRenderer.WaveformBucket]] = [:]
+    /// 波形加载去重（同实例重复 .task 防御）。
+    private var waveformLoaded = false
+
+    /// 后台加载波形（解码不占主线程；完成回主线程入库+发布；进程缓存命中即用）。
+    func loadWaveform() {
+        guard !waveformLoaded else { return }
+        waveformLoaded = true
+        let url = item.url
+        if let cached = Self.waveformCache[url] {
+            waveform = cached
+            return
+        }
+        Task.detached(priority: .utility) { [weak self] in
+            let buckets = await OfflineZoomRenderer.sampleWaveform(sourceURL: url)
+            await MainActor.run {
+                Self.waveformCache[url] = buckets
+                self?.waveform = buckets
+            }
+        }
+    }
+
     struct DragPreview {
         let index: Int
         let start: TimeInterval
@@ -618,6 +645,7 @@ struct ZoomEditorView: View {
         .frame(width: 720)
         .background(OmiStyle.panelBackground) // Omi 化（2026-11-14）：分区卡片 + 绿 accent
         .task { await model.loadMediaInfo() }
+        .task { model.loadWaveform() } // 波形解码后台进行（剪映对齐·批次 2）
     }
 
     // MARK: 播放行

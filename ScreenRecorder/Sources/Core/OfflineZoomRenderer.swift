@@ -150,6 +150,144 @@ enum OfflineZoomRenderer {
         return output
     }
 
+    // MARK: - 波形数据（剪映对齐·批次 2：音频波形轨的采样真源）
+
+    /// 波形采样配置（每 bucket 的最小/最大 RMS 对；bucketSeconds 由调用方按目标像素率定）。
+    struct WaveformBucket: Equatable {
+        /// bucket 起始时间（秒）。
+        let start: TimeInterval
+        /// 该 bucket 内样本绝对值的最大值（0…1 归一化；静音 bucket = 0）。
+        let minimum: Float
+        let maximum: Float
+    }
+
+    /// 从 PCM 样本缓冲提取 min/max（16-bit 整型或 32-bit 浮点 interleaved；
+    /// CoreAudio Float32 的 ±1 口径即归一化）。返回 nil = 格式不支持/无载荷。
+    static func waveformExtremes(of sample: CMSampleBuffer) -> (minimum: Float, maximum: Float)? {
+        guard let blockBuffer = CMSampleBufferGetDataBuffer(sample) else { return nil }
+        var length = 0
+        var dataPointer: UnsafeMutablePointer<CChar>?
+        guard CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+                                         totalLengthOut: &length, dataPointerOut: &dataPointer) == kCMBlockBufferNoErr,
+              let rawPointer = dataPointer, length > 0 else { return nil }
+        let pointer = UnsafeMutableRawPointer(rawPointer)
+        guard let description = CMSampleBufferGetFormatDescription(sample),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee else { return nil }
+        var minimum = Float.greatestFiniteMagnitude
+        var maximum = -Float.greatestFiniteMagnitude
+        let channels = max(Int(asbd.mChannelsPerFrame), 1)
+        switch asbd.mFormatID {
+        case kAudioFormatLinearPCM where asbd.mBitsPerChannel == 16:
+            // 16-bit 整型：归一化除以 32768（interleaved 按首声道取样）。
+            let stride = channels * 2
+            let usable = length - length % stride
+            let typed = pointer.bindMemory(to: Int16.self, capacity: usable / 2)
+            let frames = usable / stride
+            for frame in 0..<frames {
+                let value = Float(typed[frame * channels]) / 32768.0
+                minimum = min(minimum, value)
+                maximum = max(maximum, value)
+            }
+        case kAudioFormatLinearPCM where asbd.mBitsPerChannel == 32 && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0:
+            let stride = channels * 4
+            let usable = length - length % stride
+            let typed = pointer.bindMemory(to: Float.self, capacity: usable / 4)
+            let frames = usable / stride
+            for frame in 0..<frames {
+                let value = typed[frame * channels]
+                minimum = min(minimum, value)
+                maximum = max(maximum, value)
+            }
+        default:
+            return nil // 其他位深/格式暂不支持（波形尽力而为副通道）
+        }
+        guard minimum <= maximum else { return nil }
+        // 钳进归一化口径：minimum ∈ [-1, 0]、maximum ∈ [0, 1]（正半周样本 min 恒 0 起画）。
+        return (max(min(minimum, 0), -1), min(max(maximum, 0), 1))
+    }
+
+    /// 波形采样（离线全曲一次）：AVAssetReader PCM 解码 → 按 bucketSeconds 聚合
+    /// min/max → 桶数组。失败/无音轨 → 空数组（调用方显示空波形或占位）。
+    /// 两遍法（2026-11-21）：解码器会合并出 8192 帧大包（PTS 步进 0.186s/包）——
+    /// 一遍法按 PTS 打戳会把整包数据全落进第一个桶；先收包（PTS+时长+极值），再按
+    /// 桶网格双指针扫掠聚合，包的时长跨越多少桶就喂多少桶。
+    /// - parameter bucketSeconds: 每桶时长（秒）——采样一次按最细桶采（0.02s），
+    ///   缩放时聚合，避免重复解码。
+    static func sampleWaveform(sourceURL: URL, bucketSeconds: TimeInterval = 0.02) async -> [WaveformBucket] {
+        guard bucketSeconds > 0 else { return [] }
+        let asset = AVURLAsset(url: sourceURL)
+        guard let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first else { return [] }
+        let reader: AVAssetReader
+        let output: AVAssetReaderTrackOutput
+        do {
+            reader = try AVAssetReader(asset: asset)
+            output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+            ])
+            output.alwaysCopiesSampleData = false
+            reader.add(output)
+        } catch {
+            return []
+        }
+        guard reader.startReading() else { return [] }
+        // 第一遍：收包（纯 copyNextSampleBuffer 驱动——macOS 上 reader.status 会提前翻
+        // .completed，带状态门的循环被掐断只剩首包数据）。
+        struct Packet {
+            let start: TimeInterval
+            let duration: TimeInterval
+            let minimum: Float
+            let maximum: Float
+        }
+        var packets: [Packet] = []
+        while let sample = output.copyNextSampleBuffer() {
+            let seconds = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            guard seconds.isFinite, seconds >= 0, CMSampleBufferIsValid(sample) else { continue }
+            var duration = CMTimeGetSeconds(CMSampleBufferGetDuration(sample))
+            if !(duration.isFinite) || duration <= 0 { duration = bucketSeconds }
+            if let extremes = waveformExtremes(of: sample) {
+                packets.append(Packet(
+                    start: seconds, duration: duration,
+                    minimum: extremes.minimum, maximum: extremes.maximum))
+            }
+        }
+        guard let last = packets.last else { return [] }
+        let bucketCount = max(Int(((last.start + last.duration) / bucketSeconds).rounded(.up)), 1)
+        // 第二遍：桶网格 × 双指针扫掠（包按 PTS 升序——reader 产出序即时间序）。
+        var buckets: [WaveformBucket] = []
+        buckets.reserveCapacity(bucketCount)
+        var packetIndex = 0
+        for index in 0..<bucketCount {
+            let start = TimeInterval(index) * bucketSeconds
+            let end = start + bucketSeconds
+            while packetIndex < packets.count,
+                  packets[packetIndex].start + packets[packetIndex].duration <= start {
+                packetIndex += 1 // 完全在本桶之前的包淘汰
+            }
+            var minimum = Float(1)
+            var maximum = Float(-1)
+            var scan = packetIndex
+            while scan < packets.count, packets[scan].start < end {
+                let packet = packets[scan]
+                if packet.start + packet.duration > start { // 与本桶相交
+                    minimum = min(minimum, packet.minimum)
+                    maximum = max(maximum, packet.maximum)
+                }
+                scan += 1
+            }
+            if maximum >= minimum {
+                buckets.append(WaveformBucket(start: start, minimum: minimum, maximum: maximum))
+            } else {
+                buckets.append(WaveformBucket(start: start, minimum: 0, maximum: 0)) // 空桶 = 静音
+            }
+        }
+        reader.cancelReading()
+        return buckets
+    }
+
     // MARK: - R1 F2 有界看门狗（appenders 共用；timeout/poll 提参为无头钉测缝）
 
     /// 等输入受理（离线无丢帧轮询）：isReady 翻真即返回；取消感知、writer 失败即抛

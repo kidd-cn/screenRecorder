@@ -381,6 +381,37 @@ final class ZoomTimelineCanvas: NSView {
         NSColor.quaternaryLabelColor.setFill()
         NSBezierPath(rect: bounds).fill()
 
+        // 音频波形带（剪映对齐·批次 2）：可见范围逐像素列聚合桶 min/max，中线对称
+        // 画在 [0.25h, 0.75h] 带（蓝色半透明；在红块之下——剪除区音频被红罩压暗可见）。
+        // 波形数据未就绪/无音轨 → 空过（条带保持背景）。
+        let waveform = model.waveform
+        if !waveform.isEmpty, scale > 0 {
+            let bucketSeconds = 0.02
+            let bandTop = bounds.height * 0.75
+            let bandHeight = bounds.height * 0.5
+            NSColor.systemBlue.withAlphaComponent(0.45).setFill()
+            let columns = Int(bounds.width)
+            for column in 0..<max(columns, 0) {
+                let t0 = offset + Double(column) / scale
+                let t1 = t0 + 1 / scale
+                var index0 = max(0, Int(t0 / bucketSeconds))
+                var index1 = min(waveform.count - 1, Int(t1 / bucketSeconds))
+                if index1 < index0 { swap(&index0, &index1) }
+                guard index0 <= index1 else { continue } // 列在波形时间轴之外
+                var minimum = Float(1)
+                var maximum = Float(-1)
+                for index in index0...index1 {
+                    minimum = min(minimum, waveform[index].minimum)
+                    maximum = max(maximum, waveform[index].maximum)
+                }
+                guard maximum > minimum else { continue } // 静音列
+                let x = CGFloat(column)
+                let top = bandTop - CGFloat(maximum) * bandHeight / 2
+                let bottom = bandTop - CGFloat(minimum) * bandHeight / 2
+                NSBezierPath(rect: CGRect(x: x, y: bottom, width: 1, height: max(top - bottom, 1))).fill()
+            }
+        }
+
         // 剪除段块（下层、全高、红）：把手视觉与缩放段同款白 0.75。
         let cutBlocks = currentCutBlocks(scale: scale)
         for block in cutBlocks {
