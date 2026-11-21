@@ -327,11 +327,12 @@ struct MenuBarView: View {
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
                   spacing: 12) {
             OmiTileButton(title: "区域截图", icon: "viewfinder", tint: .green,
-                          isEnabled: isIdle) {
+                          isEnabled: isScreenshotEnabled) {
                 dismissPanelWindow() // 全屏选区遮罩不被面板遮挡
                 onTakeRegionScreenshot()
             }
-            displayMenuTile("全屏截图", icon: "photo", tint: .green) {
+            displayMenuTile("全屏截图", icon: "photo", tint: .green,
+                            isEnabled: isScreenshotEnabled) {
                 dismissPanelWindow() // 整屏截图不收面板会把自己拍进去（CG 路径即刻取帧）
                 onTakeFullScreenScreenshot($0)
             }
@@ -339,13 +340,16 @@ struct MenuBarView: View {
     }
 
     private var isIdle: Bool { controller.state == .idle }
+    /// 截图入口可用态（2026-11-21 用户要求：录制中也能截图）——见 `CaptureState.allowsScreenshot`。
+    private var isScreenshotEnabled: Bool { controller.state.allowsScreenshot }
 
     /// 显示器列表磁贴（多显示器选择语义保留）。命名同旧菜单：本地化屏名 + points，
     /// 主屏追加「（主）」。标签与 OmiTileButton 共用 `OmiTileLabel`（逐字同构）。
     private func displayMenuTile(_ title: LocalizedStringKey, icon: String, tint: OmiStyle.TileTint,
+                                 isEnabled: Bool? = nil,
                                  action: @escaping (CGDirectDisplayID) -> Void) -> some View {
         DisplayMenuTile(
-            title: title, icon: icon, tint: tint, isIdle: isIdle,
+            title: title, icon: icon, tint: tint, isEnabled: isEnabled ?? isIdle,
             options: displayOptions.map { ($0.name, $0.isMain, $0.displayID) },
             onSelect: action)
     }
@@ -453,7 +457,7 @@ private struct DisplayMenuTile: View {
     let title: LocalizedStringKey
     let icon: String
     let tint: OmiStyle.TileTint
-    let isIdle: Bool
+    let isEnabled: Bool
     /// 显示器列表（名称 / 主屏标记 / displayID）。
     let options: [(name: String, isMain: Bool, displayID: CGDirectDisplayID)]
     let onSelect: (CGDirectDisplayID) -> Void
@@ -465,7 +469,7 @@ private struct DisplayMenuTile: View {
         Button {
             presentDisplayMenu()
         } label: {
-            OmiTileLabel(title: title, icon: icon, tint: tint, isEnabled: isIdle)
+            OmiTileLabel(title: title, icon: icon, tint: tint, isEnabled: isEnabled)
                 .background(
                     GeometryReader { geo in
                         Color.clear
@@ -474,7 +478,7 @@ private struct DisplayMenuTile: View {
                     })
         }
         .buttonStyle(.plain)
-        .disabled(!isIdle)
+        .disabled(!isEnabled)
     }
 
     private func presentDisplayMenu() {

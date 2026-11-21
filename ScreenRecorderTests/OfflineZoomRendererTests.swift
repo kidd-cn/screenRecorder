@@ -198,6 +198,86 @@ final class OfflineZoomRendererTests: XCTestCase {
         }
     }
 
+    // MARK: - 剪辑 v1：剪除段折叠（PTS 平移 + 命名分流 + 全剪防线）
+
+    /// 折叠钉测：2s 夹具剪除 [0.25, 0.75)（0.5s）→ 输出时长 1.5s、命名 `_剪辑.mp4`、
+    /// 音画轨时长同步折叠；像素探针证明 PTS 平移正确——输出 t 的画面 = 源 t+0.5 的
+    /// 画面（运动标记位置逐点对齐，恒等直通路径）。
+    func testRenderWithCutsFoldsTimelineAndRenames() async throws {
+        let sourceURL = directory.appendingPathComponent("剪辑夹具源.mp4")
+        try await makeFixtureVideo(at: sourceURL)
+
+        let outputURL = try await OfflineZoomRenderer.render(
+            sourceURL: sourceURL,
+            segments: [],
+            cuts: [CutSegment(start: 0.25, end: 0.75)],
+            options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+            progress: { _ in },
+            context: CIContext(options: [.useSoftwareRenderer: true]))
+
+        XCTAssertEqual(outputURL.lastPathComponent, "剪辑夹具源_剪辑.mp4", "含剪除段 → `_剪辑` 命名")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outputURL.path), "输出成片在盘")
+
+        let output = AVURLAsset(url: outputURL)
+        let outputDuration = try await output.load(.duration).seconds
+        XCTAssertEqual(outputDuration, 1.5, accuracy: 0.05, "输出时长 = 2.0 − 0.5 折叠")
+        let outputVideoTracks = try await output.loadTracks(withMediaType: .video)
+        let outputVideo = try XCTUnwrap(outputVideoTracks.first)
+        let outputVideoDuration = try await outputVideo.load(.timeRange).duration.seconds
+        XCTAssertEqual(outputVideoDuration, 1.5, accuracy: 0.05, "视频轨时长折叠")
+        let outputAudioTracks = try await output.loadTracks(withMediaType: .audio)
+        let outputAudio = try XCTUnwrap(outputAudioTracks.first)
+        let outputAudioDuration = try await outputAudio.load(.timeRange).duration.seconds
+        XCTAssertEqual(outputAudioDuration, 1.5, accuracy: 0.1, "音轨随视频同缝折叠")
+
+        // PTS 平移像素证明：输出 t ↔ 源 t+0.5 同一画面。运动标记中心 x = (0.25 + 0.04·sin(2π·帧/60))w，
+        // 帧宽条 ±0.03w——取整后探针仍居条内。
+        let source = AVURLAsset(url: sourceURL)
+        let generator = AVAssetImageGenerator(asset: output)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let sourceGenerator = AVAssetImageGenerator(asset: source)
+        sourceGenerator.appliesPreferredTrackTransform = true
+        sourceGenerator.requestedTimeToleranceBefore = .zero
+        sourceGenerator.requestedTimeToleranceAfter = .zero
+        for (outputTime, sourceTime) in [(0.3, 0.8), (1.0, 1.5), (1.45, 1.95)] {
+            let frame = Int((sourceTime * 30).rounded(.down))
+            let markerX = Int(((0.25 + 0.04 * sin(Double(frame) / 60.0 * 2 * Double.pi)) * 320).rounded())
+            let outImage = try await generator.image(at: CMTime(seconds: outputTime, preferredTimescale: 600)).image
+            let srcImage = try await sourceGenerator.image(at: CMTime(seconds: sourceTime, preferredTimescale: 600)).image
+            try assertPixel(outImage, x: markerX, y: 90, near: marker, "输出 \(outputTime)s：标记与源 \(sourceTime)s 同位")
+            try assertPixel(srcImage, x: markerX, y: 90, near: marker, "源 \(sourceTime)s：标记基准在位")
+            try assertPixel(outImage, x: 300, y: 90, near: background, "输出 \(outputTime)s：右缘背景（标记不在错位处）")
+        }
+    }
+
+    /// 全片被剪 → 零存活样本，startWriting 前抛 `.noRenderableSamples` 且不留半截成片
+    ///（R1 F3 防线在折叠语义下的自然延伸）。
+    func testRenderFullyCutSourceThrowsWithoutResidue() async throws {
+        let sourceURL = directory.appendingPathComponent("全剪夹具源.mp4")
+        try await makeFixtureVideo(at: sourceURL)
+        do {
+            _ = try await OfflineZoomRenderer.render(
+                sourceURL: sourceURL,
+                segments: [],
+                cuts: [CutSegment(start: 0, end: 2)],
+                options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+                progress: { _ in },
+                context: CIContext(options: [.useSoftwareRenderer: true]))
+            XCTFail("全剪必须抛 noRenderableSamples")
+        } catch let error as OfflineZoomRenderer.RenderError {
+            guard case .noRenderableSamples = error else {
+                XCTFail("期望 noRenderableSamples，实得 \(error)")
+                return
+            }
+        }
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: OfflineZoomRenderer.editedDestinationURL(for: sourceURL).path),
+            "失败路径不留半截成片")
+    }
+
     // MARK: - R1 修复钉测（会话锚点 / 损坏源防线）
 
     func testRenderLateAudioHeadGapKeepsTimeline() async throws {

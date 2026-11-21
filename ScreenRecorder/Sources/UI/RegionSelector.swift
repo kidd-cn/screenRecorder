@@ -531,6 +531,9 @@ final class RegionSelector {
         window.ignoresMouseEvents = false
         window.hidesOnDeactivate = false
         window.isMovableByWindowBackground = false
+        // 采集排除（2026-11-21 录制中截图）：遮罩不得进入本 App 的录制流；
+        // 截图自身的 SCK 取帧同样排除它（拍到的始终是遮罩下方的真实画面）。
+        window.sharingType = .none
         return window
     }
 

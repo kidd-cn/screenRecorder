@@ -25,13 +25,16 @@ enum ZoomTimelineGeometry {
         let rect: CGRect
     }
 
-    /// 命中分类：把手优先于段体（窄段两端把手重叠时入点把手优先——与视觉自左向右
-    /// 一致）；点不在任何段块内 → 背景。
+    /// 命中分类：缩放段把手/段体优先（视觉上层），剪除段其次（剪辑 v1：红块全高、
+    /// 视觉在下层），背景兜底。剪除段把手与段体的窄段把手重叠裁决与缩放段同款。
     enum Hit: Equatable {
         case background
         case leadingHandle(index: Int)
         case trailingHandle(index: Int)
         case segment(index: Int)
+        case cutLeadingHandle(index: Int)
+        case cutTrailingHandle(index: Int)
+        case cutBlock(index: Int)
     }
 
     /// 段块矩形（画布坐标）：x = max(start × scale, 0)，宽 = max((end − start) × scale,
@@ -45,6 +48,34 @@ enum ZoomTimelineGeometry {
             return Block(
                 index: range.index,
                 rect: CGRect(x: x, y: verticalInset, width: width, height: blockHeight))
+        }
+    }
+
+    /// 剪除段块矩形（剪辑 v1）：全高 [0, height]——与缩放段块（内缩 4pt）同 x 口径，
+    /// 纵向铺满以视觉区分「剪除 = 整条时间轴上抹掉」。
+    static func cutBlocks(ranges: [(index: Int, start: TimeInterval, end: TimeInterval)],
+                          scale: CGFloat, height: CGFloat) -> [Block] {
+        ranges.map { range in
+            let x = max(range.start * scale, 0)
+            let width = max((range.end - range.start) * scale, minimumBlockWidth)
+            return Block(
+                index: range.index,
+                rect: CGRect(x: x, y: 0, width: width, height: height))
+        }
+    }
+
+    /// 双层命中：先缩放段层（视觉上层），后剪除段层；都未命中 → 背景。
+    static func hit(at point: CGPoint, zoomBlocks: [Block], cutBlocks: [Block]) -> Hit {
+        switch hit(at: point, in: zoomBlocks) {
+        case .background: break
+        case let hit: return hit
+        }
+        switch hit(at: point, in: cutBlocks) {
+        case .background: return .background
+        case .leadingHandle(let index): return .cutLeadingHandle(index: index)
+        case .trailingHandle(let index): return .cutTrailingHandle(index: index)
+        case .segment(let index): return .cutBlock(index: index)
+        default: return .background
         }
     }
 
@@ -93,16 +124,19 @@ struct ZoomTimelineStrip: NSViewRepresentable {
 final class ZoomTimelineCanvas: NSView {
     weak var model: ZoomEditorModel?
 
-    /// 端点拖拽会话（mouseDown 建立、mouseDragged 出预览、mouseUp 经统一闸提交）。
-    private struct DragState {
-        let index: Int
-        let isLeading: Bool
-        let originalStart: TimeInterval
-        let originalEnd: TimeInterval
+    /// 拖拽会话（mouseDown 建立、mouseDragged 出预览、mouseUp 经统一闸提交）：
+    /// 缩放段端点（既有）/ 剪除段端点（剪辑 v1）/ 空白处新建剪除段拖选（剪辑 v1）。
+    private struct DragSession {
+        enum Kind {
+            case zoomHandle(index: Int, isLeading: Bool, originalStart: TimeInterval, originalEnd: TimeInterval)
+            case cutHandle(index: Int, isLeading: Bool, originalStart: TimeInterval, originalEnd: TimeInterval)
+            case cutCreate(anchor: TimeInterval)
+        }
+        let kind: Kind
         let startX: CGFloat
     }
 
-    private var dragState: DragState?
+    private var dragSession: DragSession?
 
     override var isOpaque: Bool { false }
 
@@ -124,12 +158,30 @@ final class ZoomTimelineCanvas: NSView {
         }
     }
 
+    /// 剪除段显示区间（含拖拽预览；新建预览 index nil 追加在表尾）。
+    private func currentCutRanges() -> [(index: Int, start: TimeInterval, end: TimeInterval)] {
+        guard let model else { return [] }
+        var ranges = model.cuts.indices.map { index in
+            let range = model.displayedCutRange(at: index)
+            return (index, range.start, range.end)
+        }
+        if let preview = model.cutDragPreview, preview.index == nil {
+            ranges.append((Int.min, preview.start, preview.end)) // 新建预览块（命中按背景兜底——index Int.min 不入表）
+        }
+        return ranges
+    }
+
     private func currentBlocks(scale: CGFloat) -> [ZoomTimelineGeometry.Block] {
         ZoomTimelineGeometry.blocks(ranges: currentRanges(), scale: scale, height: bounds.height)
     }
 
+    private func currentCutBlocks(scale: CGFloat) -> [ZoomTimelineGeometry.Block] {
+        ZoomTimelineGeometry.cutBlocks(ranges: currentCutRanges(), scale: scale, height: bounds.height)
+    }
+
     // MARK: 绘制（旧版视觉逐项对齐：背景 .quaternary 近似 / 段块选中 0.55、未选 0.3 /
-    // 缓入出白端帽 0.35 / 端点把手白 0.75 / 播放头 accent 1.5pt）
+    // 缓入出白端帽 0.35 / 端点把手白 0.75 / 播放头 accent 1.5pt；剪辑 v1 追加：剪除段
+    // 红块全高 0.35 + 白把手，先画（下层），缩放段块后画（上层）盖过重叠区）
 
     override func draw(_ dirtyRect: NSRect) {
         guard let model else { return }
@@ -137,6 +189,21 @@ final class ZoomTimelineCanvas: NSView {
 
         NSColor.quaternaryLabelColor.setFill()
         NSBezierPath(rect: bounds).fill()
+
+        // 剪除段块（下层、全高、红）：把手视觉与缩放段同款白 0.75。
+        let cutBlocks = currentCutBlocks(scale: scale)
+        for block in cutBlocks {
+            NSColor.systemRed.withAlphaComponent(0.35).setFill()
+            NSBezierPath(roundedRect: block.rect, xRadius: 3, yRadius: 3).fill()
+            NSColor.white.withAlphaComponent(0.75).setFill()
+            let handle = min(ZoomTimelineGeometry.handleWidth, block.rect.width)
+            NSBezierPath(rect: CGRect(
+                x: block.rect.minX, y: block.rect.minY,
+                width: handle, height: block.rect.height)).fill()
+            NSBezierPath(rect: CGRect(
+                x: block.rect.maxX - handle, y: block.rect.minY,
+                width: handle, height: block.rect.height)).fill()
+        }
 
         let ranges = currentRanges()
         let blocks = ZoomTimelineGeometry.blocks(ranges: ranges, scale: scale, height: bounds.height)
@@ -190,63 +257,121 @@ final class ZoomTimelineCanvas: NSView {
         guard let model else { return }
         let point = convert(event.locationInWindow, from: nil)
         let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
-        switch ZoomTimelineGeometry.hit(at: point, in: currentBlocks(scale: scale)) {
+        switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: currentBlocks(scale: scale),
+                                        cutBlocks: currentCutBlocks(scale: scale)) {
         case .leadingHandle(let index):
-            beginDrag(index: index, isLeading: true, startX: point.x, model: model)
+            beginZoomDrag(index: index, isLeading: true, startX: point.x, model: model)
         case .trailingHandle(let index):
-            beginDrag(index: index, isLeading: false, startX: point.x, model: model)
+            beginZoomDrag(index: index, isLeading: false, startX: point.x, model: model)
         case .segment(let index):
             model.selectedIndex = index
+        case .cutLeadingHandle(let index):
+            beginCutDrag(index: index, isLeading: true, startX: point.x, model: model)
+        case .cutTrailingHandle(let index):
+            beginCutDrag(index: index, isLeading: false, startX: point.x, model: model)
+        case .cutBlock(let index):
+            // 双击删剪除段（v1 剪除段无选中态，块上单击无动作）。
+            if event.clickCount >= 2 {
+                model.removeCut(at: index)
+            }
         case .background:
-            model.seek(to: point.x / scale) // 点击背景跳播（旧 DragGesture(minimumDistance: 0) 语义）
+            // 空白按下：先按「新建剪除段拖选」武装（拖出 ≥4px 才成预览）；松手未拖
+            // = 点击背景跳播（旧语义）。
+            dragSession = DragSession(
+                kind: .cutCreate(anchor: point.x / scale), startX: point.x)
         }
     }
 
-    private func beginDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
+    private func beginZoomDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
         guard model.segments.indices.contains(index) else { return }
         let segment = model.segments[index]
-        dragState = DragState(
-            index: index, isLeading: isLeading,
-            originalStart: segment.start, originalEnd: segment.end,
+        dragSession = DragSession(
+            kind: .zoomHandle(index: index, isLeading: isLeading,
+                              originalStart: segment.start, originalEnd: segment.end),
+            startX: startX)
+    }
+
+    private func beginCutDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
+        guard model.cuts.indices.contains(index) else { return }
+        let cut = model.cuts[index]
+        dragSession = DragSession(
+            kind: .cutHandle(index: index, isLeading: isLeading,
+                             originalStart: cut.start, originalEnd: cut.end),
             startX: startX)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard let state = dragState, let model else { return }
+        guard let session = dragSession, let model else { return }
         let point = convert(event.locationInWindow, from: nil)
         let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
-        let delta = (point.x - state.startX) / scale // 旧版 translation.width / scale
-        model.dragPreview = ZoomEditorModel.DragPreview(
-            index: state.index,
-            start: state.isLeading ? state.originalStart + delta : state.originalStart,
-            end: state.isLeading ? state.originalEnd : state.originalEnd + delta)
+        let delta = (point.x - session.startX) / scale
+        switch session.kind {
+        case .zoomHandle(let index, let isLeading, let originalStart, let originalEnd):
+            model.dragPreview = ZoomEditorModel.DragPreview(
+                index: index,
+                start: isLeading ? originalStart + delta : originalStart,
+                end: isLeading ? originalEnd : originalEnd + delta)
+        case .cutHandle(let index, let isLeading, let originalStart, let originalEnd):
+            model.cutDragPreview = ZoomEditorModel.CutDragPreview(
+                index: index,
+                start: isLeading ? originalStart + delta : originalStart,
+                end: isLeading ? originalEnd : originalEnd + delta)
+        case .cutCreate(let anchor):
+            // 拖出 ≥4px 才成预览（亚拖动 = 点击，松手跳播）。
+            guard abs(point.x - session.startX) >= 4 else { return }
+            let currentTime = point.x / scale
+            model.cutDragPreview = ZoomEditorModel.CutDragPreview(
+                index: nil,
+                start: min(anchor, currentTime),
+                end: max(anchor, currentTime))
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
-        defer { dragState = nil }
-        guard dragState != nil, let model else { return }
-        if let preview = model.dragPreview {
-            model.commitDrag(index: preview.index, start: preview.start, end: preview.end)
+        defer {
+            dragSession = nil
+            if model?.cutDragPreview != nil { model?.cutDragPreview = nil }
+            if model?.dragPreview != nil { model?.dragPreview = nil }
         }
-        model.dragPreview = nil // 旧版 onEnded 同款：无论有无预览都清预览
+        guard let session = dragSession, let model else { return }
+        let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
+        switch session.kind {
+        case .zoomHandle(let index, _, _, _):
+            if let preview = model.dragPreview {
+                model.commitDrag(index: index, start: preview.start, end: preview.end)
+            }
+        case .cutHandle(let index, _, _, _):
+            if let preview = model.cutDragPreview {
+                model.commitCutDrag(index: index, start: preview.start, end: preview.end)
+            }
+        case .cutCreate(let anchor):
+            if let preview = model.cutDragPreview {
+                // 拖选成段：经修剪闸提交（不足最短时长 → 静默丢弃）。
+                model.commitCutCreation(anchor: anchor, start: preview.start, end: preview.end)
+            } else {
+                model.seek(to: session.startX / scale) // 点击背景跳播（旧语义）
+            }
+        }
     }
 
-    /// 右键（含 Control+左键）落在任一段块上 → 先选中该段，再弹「删除分段」菜单；
-    /// 背景右键无菜单（旧版 contextMenu 只挂在段块上）。
+    /// 右键（含 Control+左键）：缩放段块 → 先选中再弹「删除分段」；剪除段块 → 弹
+    /// 「删除剪除段」；背景右键无菜单（旧版同款）。
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let model else { return nil }
         let point = convert(event.locationInWindow, from: nil)
         let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
-        let index: Int
-        switch ZoomTimelineGeometry.hit(at: point, in: currentBlocks(scale: scale)) {
+        switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: currentBlocks(scale: scale),
+                                        cutBlocks: currentCutBlocks(scale: scale)) {
         case .leadingHandle(let hitIndex), .trailingHandle(let hitIndex), .segment(let hitIndex):
-            index = hitIndex
+            guard model.segments.indices.contains(hitIndex) else { return nil }
+            model.selectedIndex = hitIndex
+            return ZoomEditorMenus.deleteSegment(at: hitIndex, model: model)
+        case .cutLeadingHandle(let hitIndex), .cutTrailingHandle(let hitIndex), .cutBlock(let hitIndex):
+            guard model.cuts.indices.contains(hitIndex) else { return nil }
+            return ZoomEditorMenus.deleteCut(at: hitIndex, model: model)
         case .background:
             return nil
         }
-        guard model.segments.indices.contains(index) else { return nil }
-        model.selectedIndex = index
-        return ZoomEditorMenus.deleteSegment(at: index, model: model)
     }
 }
 
@@ -260,6 +385,20 @@ enum ZoomEditorMenus {
         }
         let item = NSMenuItem(
             title: NSLocalizedString("删除分段", comment: "Segment menu delete"), action: #selector(MenuActionProxy.picked), keyEquivalent: "")
+        item.target = proxy
+        menu.addItem(item)
+        menu.retainedProxies = [proxy]
+        return menu
+    }
+
+    /// 剪除段右键菜单（剪辑 v1）。
+    static func deleteCut(at index: Int, model: ZoomEditorModel) -> NSMenu {
+        let menu = RetainingMenu()
+        let proxy = MenuActionProxy { [weak model] in
+            Task { @MainActor in model?.removeCut(at: index) }
+        }
+        let item = NSMenuItem(
+            title: NSLocalizedString("删除剪除段", comment: "Cut menu delete"), action: #selector(MenuActionProxy.picked), keyEquivalent: "")
         item.target = proxy
         menu.addItem(item)
         menu.retainedProxies = [proxy]

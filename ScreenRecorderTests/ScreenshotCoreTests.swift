@@ -170,3 +170,15 @@ final class ScreenshotCoreTests: XCTestCase {
         XCTAssertEqual([UInt8](data.prefix(2)), [0x89, 0x50], "PNG 魔数")
     }
 }
+
+/// 截图可用态钉测（2026-11-21 用户要求「录屏时同时要能截图」）：除收尾落盘
+/// （`.finishing`）外全部放行——录制/暂停/倒计时/空闲均可截图。
+final class ScreenshotAvailabilityTests: XCTestCase {
+    func testScreenshotAllowedDuringRecordingAndPaused() {
+        XCTAssertTrue(CaptureState.idle.allowsScreenshot)
+        XCTAssertTrue(CaptureState.countdown(secondsLeft: 3).allowsScreenshot)
+        XCTAssertTrue(CaptureState.recording.allowsScreenshot, "录屏中可截图")
+        XCTAssertTrue(CaptureState.paused.allowsScreenshot, "暂停中可截图")
+        XCTAssertFalse(CaptureState.finishing.allowsScreenshot, "收尾落盘中不开新采集")
+    }
+}

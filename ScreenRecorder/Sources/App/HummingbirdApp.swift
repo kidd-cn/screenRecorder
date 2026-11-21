@@ -453,10 +453,10 @@ final class AppAssembly: ObservableObject {
     /// nil（ESC / 点击无拖动 / 目标屏不在位）= 静默放弃——无文件、无通知。
     func takeRegionScreenshot() {
         Task { @MainActor in
-            // 菜单项已按状态置灰，此 guard 兜非菜单路径：选区遮罩不得在录制中途弹出
-            //（同 startRegionRecording 纪律）。
-            guard controller.state == .idle else {
-                NSLog("ScreenshotMenu: 忽略区域截图入口（当前状态非 idle：\(controller.state)）")
+            // 菜单项已按状态置灰，此 guard 兜非菜单路径：录制中允许截图（2026-11-21），
+            // 仅收尾落盘（.finishing）拒绝。
+            guard controller.state.allowsScreenshot else {
+                NSLog("ScreenshotMenu: 忽略区域截图入口（当前状态不可截图：\(controller.state)）")
                 return
             }
             let displayID = Self.regionAnchorDisplayID() ?? CGMainDisplayID()
@@ -484,9 +484,10 @@ final class AppAssembly: ObservableObject {
     func takeScreenshot(displayID: CGDirectDisplayID, regionInGlobalPoints: CGRect?) async {
         // 沙盒兜底：保存目录无访问权时引导重选（截图写盘同样受沙盒约束）。
         guard ensureOutputAccess() else { return }
-        // 菜单项已按状态置灰，此 guard 兜非菜单路径：截图不与录制会话并发。
-        guard controller.state == .idle else {
-            NSLog("Screenshot: 忽略截图入口（当前状态非 idle：\(controller.state)）")
+        // 菜单项已按状态置灰，此 guard 兜非菜单路径：录制中允许截图（2026-11-21），
+        // 仅收尾落盘（.finishing）拒绝。
+        guard controller.state.allowsScreenshot else {
+            NSLog("Screenshot: 忽略截图入口（当前状态不可截图：\(controller.state)）")
             return
         }
         let bounds = CGDisplayBounds(displayID)
@@ -496,10 +497,10 @@ final class AppAssembly: ObservableObject {
         }
         let region = regionInGlobalPoints ?? bounds
         try? await Task.sleep(nanoseconds: 150_000_000)
-        // 审查 Minor#2（fail-safe 一行）：settle 等待窗口内用户可能经全局热键/定时起录
-        //——取帧前复检状态，截图绝不与录制会话并发（菜单置灰 + 入口守卫之外第三道闸）。
-        guard controller.state == .idle else {
-            NSLog("Screenshot: settle 后状态已非 idle（被并发起录抢先），放弃截图")
+        // fail-safe：settle 等待窗口内状态可能切到 .finishing（收尾落盘）——取帧前
+        // 复检截图可用态（菜单置灰 + 入口守卫之外第三道闸）；录制/暂停中照常放行。
+        guard controller.state.allowsScreenshot else {
+            NSLog("Screenshot: settle 后状态不可截图（\(controller.state)），放弃截图")
             return
         }
         // SCK 取帧（替代废弃的 CGDisplayCreateImage）：显示器像素尺寸作配置，

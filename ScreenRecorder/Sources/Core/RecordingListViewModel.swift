@@ -22,7 +22,7 @@ protocol ExportServing {
 /// 0…1 严格递增、终值恰一次、主线程外调用（UI/编排侧自行 hop）。
 protocol ZoomRendering {
     func render(
-        sourceURL: URL, segments: [ZoomSegment], options: ExportVideoOptions,
+        sourceURL: URL, segments: [ZoomSegment], cuts: [CutSegment], options: ExportVideoOptions,
         progress: @escaping (Double) -> Void
     ) async throws -> URL
 }
@@ -30,11 +30,11 @@ protocol ZoomRendering {
 /// `ZoomRendering` 生产实现：直调 OfflineZoomRenderer 静态函数（T17 消费契约零损耗转发）。
 struct OfflineZoomRendererService: ZoomRendering {
     func render(
-        sourceURL: URL, segments: [ZoomSegment], options: ExportVideoOptions,
+        sourceURL: URL, segments: [ZoomSegment], cuts: [CutSegment], options: ExportVideoOptions,
         progress: @escaping (Double) -> Void
     ) async throws -> URL {
         try await OfflineZoomRenderer.render(
-            sourceURL: sourceURL, segments: segments, options: options, progress: progress)
+            sourceURL: sourceURL, segments: segments, cuts: cuts, options: options, progress: progress)
     }
 }
 
@@ -301,37 +301,50 @@ final class RecordingListViewModel: ObservableObject {
         }
     }
 
-    // MARK: - 缩放分段草稿持久化（P9/T18）
+    // MARK: - 剪辑草稿持久化（剪辑 v1：EditDocument = 剪除段 + 缩放段，P9/T18 沿革）
 
     /// 草稿文件 URL：`<成片>.zoomdraft.json`——**成片全名追加** `.zoomdraft.json` 后缀
-    /// （含原扩展名），与成片同目录。字面读法（成片 = 含扩展名的文件）且同名不同扩展的
-    /// 成片（`foo.mp4` / `foo.m4a`）草稿互不串档。
+    ///（含原扩展名），与成片同目录。字面读法（成片 = 含扩展名的文件）且同名不同扩展的
+    /// 成片（`foo.mp4` / `foo.m4a`）草稿互不串档。文件名沿用既有（剪辑 v1 只换载荷
+    /// 格式），删除/重命名随删随移的既有生命周期零改动。
     static func draftURL(for movieURL: URL) -> URL {
         movieURL.appendingPathExtension("zoomdraft.json")
     }
 
-    /// 读草稿：`ZoomSegment` JSON 数组；文件缺失/非 JSON 归空表（按无草稿开新编辑，不抛）；
-    /// 解码成功仍过 `ZoomSegment.validate`（再**用**前的闸——手改草稿野值在进编辑器前归一）。
-    func loadDraft(for item: RecordingFileMetadata) -> [ZoomSegment] {
-        guard let data = try? Data(contentsOf: Self.draftURL(for: item.url)),
-              let decoded = try? JSONDecoder().decode([ZoomSegment].self, from: data)
-        else { return [] }
-        return ZoomSegment.validate(decoded)
+    /// 读草稿：`EditDocument` JSON（剪除段 + 缩放段）；文件缺失/非 JSON 归空文档
+    ///（按无草稿开新编辑，不抛）；解码成功仍过 `EditDocument.validate`（再**用**前的
+    /// 闸——手改草稿野值在进编辑器前归一）。**旧格式回退**：剪辑 v1 之前的草稿载荷是
+    /// 纯 `[ZoomSegment]` 数组——解码为文档失败再试数组（缩放段保留、剪除段空）。
+    func loadDraft(for item: RecordingFileMetadata) -> EditDocument {
+        guard let data = try? Data(contentsOf: Self.draftURL(for: item.url)) else {
+            return EditDocument.empty
+        }
+        if let decoded = try? JSONDecoder().decode(EditDocument.self, from: data) {
+            return EditDocument.validate(decoded)
+        }
+        if let legacy = try? JSONDecoder().decode([ZoomSegment].self, from: data) {
+            return EditDocument(cuts: [], zoomSegments: ZoomSegment.validate(legacy))
+        }
+        return EditDocument.empty
     }
 
-    /// 写草稿：先过 `ZoomSegment.validate`（**存**前的闸——编辑器统一闸之后的第二道防线，
-    /// 幂等）再原子落盘；磁盘失败照抛（调用方编辑器侧尽力而为 `try?`）。
-    func saveDraft(_ segments: [ZoomSegment], for item: RecordingFileMetadata) throws {
-        let data = try JSONEncoder().encode(ZoomSegment.validate(segments))
+    /// 写草稿：先过 `EditDocument.validate`（**存**前的闸——编辑器统一闸之后的第二道
+    /// 防线，幂等）再原子落盘；磁盘失败照抛（调用方编辑器侧尽力而为 `try?`）。
+    func saveDraft(_ document: EditDocument, for item: RecordingFileMetadata) throws {
+        let data = try JSONEncoder().encode(EditDocument.validate(document))
         try data.write(to: Self.draftURL(for: item.url), options: [.atomic])
     }
 
     // MARK: - 缩放渲染编排（P9/T18）
 
-    /// 建议缩放导出名（编辑器小窗预填）：`<原名>_缩放.mp4`；冲突 " (n)" 惯例在
-    /// OfflineZoomRenderer 命名助手（T17 单一事实源，含对真实目录的存在性探测）。
-    func suggestedZoomedDestinationName(for item: RecordingFileMetadata) -> String {
-        OfflineZoomRenderer.zoomedDestinationURL(for: item.url).lastPathComponent
+    /// 建议编辑导出名（编辑器小窗预填，剪辑 v1 分流）：文档含剪除段 → `<原名>_剪辑.mp4`；
+    /// 纯缩放段 → `<原名>_缩放.mp4`（既有用户不受扰动）。冲突 " (n)" 惯例在
+    /// OfflineZoomRenderer 命名助手（单一事实源，含对真实目录的存在性探测）。
+    func suggestedEditedDestinationName(for item: RecordingFileMetadata, hasCuts: Bool) -> String {
+        let url = hasCuts
+            ? OfflineZoomRenderer.editedDestinationURL(for: item.url)
+            : OfflineZoomRenderer.zoomedDestinationURL(for: item.url)
+        return url.lastPathComponent
     }
 
     /// 缩放渲染编排（编辑器「开始导出」）：单飞门 + 进度 @MainActor hop + 编排边界
@@ -352,7 +365,7 @@ final class RecordingListViewModel: ObservableObject {
     /// - 出场：defer 内 `zoomRenderRunID += 1` 换代——本代结束后晚到的 hop 被代际
     ///   校验丢弃，不冒充下一代（钉测 testLateProgressHopFromFinishedGenerationIsDropped）。
     func renderZoom(_ item: RecordingFileMetadata, segments: [ZoomSegment],
-                    options: ExportVideoOptions) async {
+                    cuts: [CutSegment] = [], options: ExportVideoOptions) async {
         guard !zoomRenderInFlight, !exportInFlight else { return }
         zoomRenderInFlight = true
         zoomRenderRunID += 1
@@ -373,6 +386,7 @@ final class RecordingListViewModel: ObservableObject {
         do {
             let outputURL = try await zoomRenderer.render(
                 sourceURL: item.url, segments: ZoomSegment.validate(segments),
+                cuts: CutSegment.validate(cuts),
                 options: options, progress: forward)
             await refresh() // 自动入列（成功产物立即可见；_压缩.mp4 先例）
             // Q6 编辑导出后动作（仅本编排挂钩）：偏好**导出完成时刻**读缝（两次导出间

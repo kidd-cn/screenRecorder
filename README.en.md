@@ -22,7 +22,7 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 - **Global hotkeys**: `⇧⌘R` start/stop (remembers last mode), `⇧⌘P` pause/resume, `⇧⌘W` record a chosen window — rebindable in preferences, no Accessibility permission needed
 - **Countdown**: 0 / 3 / 5 / 10 s with an on-screen overlay, cancellable
 - **Scheduled recording**: start automatically at a chosen time (or in N minutes) with the last-used mode, with an optional duration cap that stops on time; a missed schedule (sleep) sends a follow-up notification with a "Start recording" action, and busy/locked sessions are skipped with a notice
-- **Screenshots**: a "Screenshots" menu in the menu bar — region rubber-band or full-screen (per-display), saved as PNG to the output directory (`截图_*.png`, never listed among recordings), with a system notification on success
+- **Screenshots**: a "Screenshots" menu in the menu bar — region rubber-band or full-screen (per-display), saved as PNG to the output directory (`截图_*.png`, never listed among recordings), with a system notification on success; screenshots also work while recording (the selection overlay and floating UI are excluded from capture and never appear in the recording)
 - **Long-recording reminder**: for every full interval of net recording time (pauses excluded) — 1 / 2 / 3 hours, or "never" — one notification fires; each integer multiple reminds exactly once per recording
 - **Launch at login**: one-click login item (SMAppService); a failed registration reverts the toggle and notifies
 - **Encoding**: H.264 / HEVC (hardware), 30 or 60 fps
@@ -31,7 +31,7 @@ A macOS screen recording app for tutorials and meetings. Built from scratch on S
 - **Quit protection**: quitting mid-recording offers Save & Quit / Discard & Quit / Cancel
 - **Recording list**: play, reveal in Finder, rename, delete, remove from list (file stays in place)
 - **Export**: right-click "Export GIF…" (frame rate / width / loop options) and "Compress…" (H.264/HEVC, 720/1080) with an options sheet + progress; the GIF lands beside the source, the compressed file joins the list
-- **Zoom segment editor**: right-click "Edit…" opens a timeline window — video preview + playhead; add/remove segments, drag endpoints, zoom levels 1.35x / 1.6x / 1.9x, nine-grid center placement; export parameters (frame rate / resolution / codec) with a size estimate + progress; segment drafts persist beside the take, the rendered `<原名>_缩放.mp4` joins the list; optional post-export open-in-Finder / delete-original (both off by default)
+- **Zoom segment editor**: right-click "Edit…" opens a timeline window — video preview + playhead; add/remove segments, drag endpoints, zoom levels 1.35x / 1.6x / 1.9x, nine-grid center placement; **timeline cutting (edit v1)**: drag on empty timeline to mark red cut regions (trim head/tail or chop middles — endpoints draggable, double-click or right-click to remove), the playhead skips cut regions, and export folds the timeline with audio cut in sync; export parameters (frame rate / resolution / codec) with a size estimate + progress; drafts persist beside the take (cuts + zoom segments in one document), renders to `<原名>_剪辑.mp4` when cuts exist or `<原名>_缩放.mp4` for zoom-only, joining the list; optional post-export open-in-Finder / delete-original (both off by default)
 - **Menu bar**: state-aware icon (idle/countdown/recording/paused/finishing) with full menu access
 
 ## Requirements

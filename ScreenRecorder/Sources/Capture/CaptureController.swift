@@ -13,6 +13,17 @@ enum CaptureState: Equatable {
     case recording
     case paused
     case finishing
+
+    /// 截图可用态（2026-11-21 用户要求「录屏时同时要能截图」）：空闲/倒计时/录制/暂停
+    /// 均可；`.finishing` 正在收尾落盘，不再开新采集（避免与收尾争用 SCK 资源）。
+    /// 截图与录制会话并发安全：截图是独立的一次性 SCK 取帧，不改动录制流；本 App 的
+    /// 悬浮 UI 与选区遮罩均 `sharingType = .none`，绝不入成片。
+    var allowsScreenshot: Bool {
+        switch self {
+        case .idle, .countdown, .recording, .paused: return true
+        case .finishing: return false
+        }
+    }
 }
 
 /// 采集会话抽象：真实实现 `RecordingSessionCoordinator` 包
