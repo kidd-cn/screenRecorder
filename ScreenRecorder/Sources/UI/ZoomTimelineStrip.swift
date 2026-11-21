@@ -193,6 +193,20 @@ enum ZoomTimelineGeometry {
         return .background
     }
 
+    /// 波形桶区间（纯函数，含越界钳制）：源时间区间 → bucket 下标闭区间；两端钳进
+    /// [0, count-1]（音轨可短于视频——钳一端后交换会越界，2026-11-21 draw 崩溃根因）。
+    /// count ≤ 0 → nil。
+    static func clampedBucketRange(sourceStart: TimeInterval, sourceEnd: TimeInterval,
+                                   bucketSeconds: TimeInterval, count: Int) -> ClosedRange<Int>? {
+        guard count > 0, bucketSeconds > 0 else { return nil }
+        var lower = Int(sourceStart / bucketSeconds)
+        var upper = Int(sourceEnd / bucketSeconds)
+        if upper < lower { swap(&lower, &upper) }
+        lower = min(max(lower, 0), count - 1)
+        upper = min(max(upper, 0), count - 1)
+        return lower...upper
+    }
+
     /// 播放头横坐标（含平移；钳在 [−playheadWidth, width − playheadWidth]——zoom 后
     /// 播放头可在视图左缘之外）。
     static func playheadX(playhead: TimeInterval, scale: CGFloat, width: CGFloat,
@@ -423,14 +437,12 @@ final class ZoomTimelineCanvas: NSView {
                 let outputT1 = outputT0 + 1 / scale
                 guard let sourceT0 = model.clipsDocument.sourceTime(forOutputTime: outputT0),
                       let sourceT1 = model.clipsDocument.sourceTime(forOutputTime: min(outputT1, model.outputDuration)) else { continue }
-                let sourceSpeed = model.clipsDocument.speed(atSourceTime: sourceT0) ?? 1
-                var index0 = max(0, Int(sourceT0 / bucketSeconds))
-                var index1 = min(waveform.count - 1, Int(sourceT1 / bucketSeconds))
-                if index1 < index0 { swap(&index0, &index1) }
-                guard index0 <= index1 else { continue } // 静音列
+                guard let bucketRange = ZoomTimelineGeometry.clampedBucketRange(
+                    sourceStart: sourceT0, sourceEnd: sourceT1,
+                    bucketSeconds: bucketSeconds, count: waveform.count) else { continue }
                 var minimum = Float(1)
                 var maximum = Float(-1)
-                for index in index0...index1 {
+                for index in bucketRange {
                     minimum = min(minimum, waveform[index].minimum)
                     maximum = max(maximum, waveform[index].maximum)
                 }

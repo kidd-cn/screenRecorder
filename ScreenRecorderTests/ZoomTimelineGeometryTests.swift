@@ -158,6 +158,32 @@ final class ZoomTimelineGeometryTests: XCTestCase {
         // 穿越不吸「被拖段自身端点」的语义由调用方排除候选保证（magnetSnap 不再单测）
     }
 
+    /// 波形桶区间钳制钉测（2026-11-21 draw 崩溃回归）：源时间超桶表时两端都钳。
+    func testClampedBucketRange() {
+        // 正常区间
+        XCTAssertEqual(
+            ZoomTimelineGeometry.clampedBucketRange(sourceStart: 0.30, sourceEnd: 0.50,
+                                                    bucketSeconds: 0.02, count: 100),
+            15...25)
+        // 起点超桶表上界（音轨短于视频）→ 两端钳到 count-1，不越界
+        XCTAssertEqual(
+            ZoomTimelineGeometry.clampedBucketRange(sourceStart: 900, sourceEnd: 901,
+                                                    bucketSeconds: 0.02, count: 100),
+            99...99, "超上界钳 count-1（曾交换后越界崩溃）")
+        // 负时间钳 0
+        XCTAssertEqual(
+            ZoomTimelineGeometry.clampedBucketRange(sourceStart: -1, sourceEnd: 0.04,
+                                                    bucketSeconds: 0.02, count: 100),
+            0...2)
+        // 倒序区间自动交换
+        XCTAssertEqual(
+            ZoomTimelineGeometry.clampedBucketRange(sourceStart: 0.50, sourceEnd: 0.30,
+                                                    bucketSeconds: 0.02, count: 100),
+            15...25)
+        XCTAssertNil(ZoomTimelineGeometry.clampedBucketRange(sourceStart: 0, sourceEnd: 1,
+                                                             bucketSeconds: 0.02, count: 0))
+    }
+
     /// 时间码钉测（剪映同款 HH:MM:SS:FF @30）。
     func testTimecodeFormat() {
         XCTAssertEqual(ZoomTimelineGeometry.timecode(0), "00:00:00:00")
