@@ -358,21 +358,24 @@ final class ZoomTimelineCanvas: NSView {
         NSColor.quaternaryLabelColor.setFill()
         NSBezierPath(rect: bounds).fill()
 
-        // 轨道缩略图 filmstrip（剪映对齐·批次 3）：槽位网格锚定源时间（每槽 = 1 个
-        // 抽帧间隔），宽度随缩放重排；aspect-fill 铺满条高。在波形/红块之下——剪除区
-        // 缩略图被红罩压暗可见。未就绪/无视频轨 → 空过。
+        // 轨道缩略图 filmstrip（剪映对齐·批次 3+4a）：槽位网格锚定**源时间**，成品轴
+        // 定位经 outputTime 映射（波纹删除后缩略图随接缝重排——被删源区间的槽位无映射
+        // 即跳过）；槽宽按所在 clip 速度折算。未就绪/无视频轨 → 空过。
         if let strip = model.filmstrip, scale > 0 {
-            let slotWidth = CGFloat(strip.interval) * scale
-            if slotWidth >= 2 { // 亚 2pt 槽不画（缩太小看不清，省绘制）
-                let firstSlot = max(0, Int(offset / strip.interval))
-                let lastSlot = min(Int(model.sourceDuration / strip.interval),
-                                   Int((offset + Double(bounds.width) / scale) / strip.interval))
-                for slot in firstSlot...max(lastSlot, firstSlot) {
-                    guard let image = strip.images[TimeInterval(slot) * strip.interval] else { continue }
-                    let x = ZoomTimelineGeometry.timeToX(
-                        TimeInterval(slot) * strip.interval, pxPerSec: scale, offset: offset)
-                    let rect = CGRect(x: x, y: 0, width: slotWidth, height: bounds.height)
-                    drawAspectFill(image, in: rect)
+            let lastSlot = Int(model.sourceDuration / strip.interval)
+            if lastSlot >= 0 {
+                let viewLeft = offset
+                let viewRight = offset + Double(bounds.width) / max(scale, 0.001)
+                for slot in 0...max(lastSlot, 0) {
+                    let sourceTime = TimeInterval(slot) * strip.interval
+                    guard let outputTime = model.clipsDocument.outputTime(forSourceTime: sourceTime),
+                          outputTime >= viewLeft - strip.interval,
+                          outputTime <= viewRight + strip.interval else { continue } // 被删/可视外槽位
+                    guard let image = strip.images[sourceTime] else { continue }
+                    let speed = model.clipsDocument.speed(atSourceTime: sourceTime) ?? 1
+                    let slotWidth = max(CGFloat(strip.interval / speed) * scale, 2)
+                    let x = ZoomTimelineGeometry.timeToX(outputTime, pxPerSec: scale, offset: offset)
+                    drawAspectFill(image, in: CGRect(x: x, y: 0, width: slotWidth, height: bounds.height))
                 }
             }
         }
@@ -415,19 +418,23 @@ final class ZoomTimelineCanvas: NSView {
             NSColor.systemBlue.withAlphaComponent(0.45).setFill()
             let columns = Int(bounds.width)
             for column in 0..<max(columns, 0) {
-                let t0 = offset + Double(column) / scale
-                let t1 = t0 + 1 / scale
-                var index0 = max(0, Int(t0 / bucketSeconds))
-                var index1 = min(waveform.count - 1, Int(t1 / bucketSeconds))
+                // 成品时间 → 源时间（波纹删除后列与源桶的对应经映射；裁掉列跳过）
+                let outputT0 = offset + Double(column) / scale
+                let outputT1 = outputT0 + 1 / scale
+                guard let sourceT0 = model.clipsDocument.sourceTime(forOutputTime: outputT0),
+                      let sourceT1 = model.clipsDocument.sourceTime(forOutputTime: min(outputT1, model.outputDuration)) else { continue }
+                let sourceSpeed = model.clipsDocument.speed(atSourceTime: sourceT0) ?? 1
+                var index0 = max(0, Int(sourceT0 / bucketSeconds))
+                var index1 = min(waveform.count - 1, Int(sourceT1 / bucketSeconds))
                 if index1 < index0 { swap(&index0, &index1) }
-                guard index0 <= index1 else { continue } // 列在波形时间轴之外
+                guard index0 <= index1 else { continue } // 静音列
                 var minimum = Float(1)
                 var maximum = Float(-1)
                 for index in index0...index1 {
                     minimum = min(minimum, waveform[index].minimum)
                     maximum = max(maximum, waveform[index].maximum)
                 }
-                guard maximum > minimum else { continue } // 静音列
+                guard maximum > minimum else { continue }
                 let x = CGFloat(column)
                 let top = bandTop - CGFloat(maximum) * bandHeight / 2
                 let bottom = bandTop - CGFloat(minimum) * bandHeight / 2
