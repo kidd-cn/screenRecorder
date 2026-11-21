@@ -153,16 +153,26 @@ enum ZoomTimelineGeometry {
 
     /// 命中（缩放段层 + 接缝把手）：缩放段块优先，接缝把手其次（接缝竖线 ± 把手宽
     /// 热区），背景兜底。
+    /// 接缝热区半宽（4pt——比把手窄；热区过宽会在短 clip 密集时盖满整条时间线，
+    /// 波纹删除武装不起来——2026-11-21 用户反馈根因）。
+    static let seamHitHalfWidth: CGFloat = 4
+
+    /// 命中（缩放段层 + 接缝把手）：缩放段块优先；接缝取**最近**一条且 ≤4pt
+    ///（多接缝拥挤时先到先得会武断吞掉相邻热区）。
     static func hit(at point: CGPoint, zoomBlocks: [Block],
                     seamPositions: [CGFloat], height: CGFloat) -> Hit {
         let zoomHit = hit(at: point, in: zoomBlocks)
         if zoomHit != .background { return zoomHit }
-        let half = handleWidth
+        var nearestIndex: Int?
+        var nearestDistance = seamHitHalfWidth
         for (index, x) in seamPositions.enumerated() {
-            if abs(point.x - x) <= half {
-                return .seamHandle(index: index)
+            let distance = abs(point.x - x)
+            if distance <= nearestDistance {
+                nearestIndex = index
+                nearestDistance = distance
             }
         }
+        if let nearestIndex { return .seamHandle(index: nearestIndex) }
         _ = height
         return .background
     }
@@ -461,6 +471,14 @@ final class ZoomTimelineCanvas: NSView {
             NSBezierPath(rect: CGRect(
                 x: block.rect.maxX - handle, y: block.rect.minY,
                 width: handle, height: block.rect.height)).fill()
+        }
+
+        // 波纹删除拖选红罩预览（成品区间，盖段块之上——松手即删除接合）。
+        if let preview = model.ripplePreview {
+            let x0 = ZoomTimelineGeometry.timeToX(preview.0, pxPerSec: scale, offset: offset)
+            let x1 = ZoomTimelineGeometry.timeToX(preview.1, pxPerSec: scale, offset: offset)
+            NSColor.systemRed.withAlphaComponent(0.35).setFill()
+            NSBezierPath(rect: CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: bounds.height)).fill()
         }
 
         // 磁吸指示线（剪映对齐·黄色竖线：拖拽中吸附生效的可视反馈，盖段块之上）。
