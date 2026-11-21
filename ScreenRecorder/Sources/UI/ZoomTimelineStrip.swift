@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 
 /// 时间线条几何（纯逻辑，无头钉测面）：时间 → 像素映射与命中测试。
@@ -111,18 +112,45 @@ struct ZoomTimelineStrip: NSViewRepresentable {
     func makeNSView(context: Context) -> ZoomTimelineCanvas {
         let canvas = ZoomTimelineCanvas()
         canvas.model = model
+        // 圆角由画布自身 layer 裁切（圆角贴合卡面；SwiftUI .clipShape 不用——见类内
+        // 订阅注释：本窗口族 SwiftUI 桥半残，能少依赖就少依赖）。
+        canvas.wantsLayer = true
+        canvas.layer?.cornerRadius = 8
+        canvas.layer?.masksToBounds = true
         return canvas
     }
 
     func updateNSView(_ canvas: ZoomTimelineCanvas, context: Context) {
-        canvas.model = model
+        canvas.model = model // didSet 重挂订阅；本通道在本窗口族只走一次（探针实证）
         canvas.needsDisplay = true
+        canvas.displayIfNeeded()
     }
 }
 
 @MainActor
 final class ZoomTimelineCanvas: NSView {
-    weak var model: ZoomEditorModel?
+    weak var model: ZoomEditorModel? {
+        didSet { observeModel() }
+    }
+
+    /// 模型变化 → 重绘订阅（2026-11-21「红块不可见」根因修复）：本窗口族（手建
+    /// `NSWindow + NSHostingView`）的 SwiftUI→NSViewRepresentable 更新通道实测**只走
+    /// 一次**（探针实证：updateNSView 恰一次且 pre-layout，后续模型变化不再抵达——
+    /// 同窗口族手势/菜单层死文档化的病理族）。画布自持 objectWillChange 订阅驱动重绘
+    ///（FloatingControlBarPanel `$state` 订阅同款纪律），绕过宿主桥。
+    private var changeObservation: AnyCancellable?
+
+    private func observeModel() {
+        changeObservation?.cancel()
+        guard let model else { return }
+        changeObservation = model.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { // objectWillChange 先于变更落地——hop 一拍再重绘
+                guard let self else { return }
+                self.needsDisplay = true
+                self.displayIfNeeded()
+            }
+        }
+    }
 
     /// 拖拽会话（mouseDown 建立、mouseDragged 出预览、mouseUp 经统一闸提交）：
     /// 缩放段端点（既有）/ 剪除段端点（剪辑 v1）/ 空白处新建剪除段拖选（剪辑 v1）。

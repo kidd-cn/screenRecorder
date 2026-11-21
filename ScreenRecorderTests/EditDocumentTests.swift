@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreGraphics
 import XCTest
 
@@ -170,5 +171,78 @@ final class EditDocumentTests: XCTestCase {
         let decoded = try JSONDecoder().decode(
             EditDocument.self, from: JSONEncoder().encode(document))
         XCTAssertEqual(decoded, document, "Codable 往返保值")
+    }
+}
+
+/// 模型链路钉测（「拖不出红块」排查，2026-11-21）：ZoomEditorModel 的剪除段提交路径
+/// ——真实 mp4 夹具补齐 sourceDuration（loadMediaInfo）→ commitCutCreation 全链
+///（trim 闸 → validate → 落库 → 草稿）。
+@MainActor
+final class CutCreationModelTests: XCTestCase {
+    /// 程序生成 1s@30fps 纯色 mp4（供 AVURLAsset 真实时长探针；adaptor 直写像素缓冲，
+    /// OfflineZoomRendererTests 夹具同法简化版）。
+    private func makeFixtureMovie(at url: URL) async throws {
+        let writer = try AVAssetWriter(url: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 320,
+            AVVideoHeightKey: 180,
+        ])
+        input.expectsMediaDataInRealTime = true
+        XCTAssertTrue(writer.canAdd(input))
+        writer.add(input)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: 320,
+                kCVPixelBufferHeightKey as String: 180,
+            ])
+        XCTAssertTrue(writer.startWriting())
+        writer.startSession(atSourceTime: .zero)
+        for frame in 0..<30 {
+            while !input.isReadyForMoreMediaData { Thread.sleep(forTimeInterval: 0.002) }
+            var pixelBuffer: CVPixelBuffer?
+            XCTAssertEqual(CVPixelBufferCreate(
+                kCFAllocatorDefault, 320, 180, kCVPixelFormatType_32BGRA, nil, &pixelBuffer),
+                kCVReturnSuccess)
+            let buffer = try XCTUnwrap(pixelBuffer)
+            XCTAssertTrue(adaptor.append(
+                buffer, withPresentationTime: CMTime(value: CMTimeValue(frame), timescale: 30)),
+                "夹具帧 \(frame) 写入失败：\(String(describing: writer.error))")
+        }
+        input.markAsFinished()
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            writer.finishWriting { continuation.resume() }
+        }
+        XCTAssertEqual(writer.status, .completed)
+    }
+
+    func testCommitCutCreationOnRealMovie() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CutCreationModelTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("剪辑模型夹具.mp4")
+        try await makeFixtureMovie(at: url)
+
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+        XCTAssertEqual(model.sourceDuration, 1.0, accuracy: 0.05, "真实时长探针就绪")
+
+        // 提交路径全链：锚 0.2s、提案 [0.1, 0.6] → 剪除段落库 + 草稿
+        model.commitCutCreation(anchor: 0.2, start: 0.1, end: 0.6)
+        XCTAssertEqual(model.cuts, [CutSegment(start: 0.1, end: 0.6)], "剪除段经修剪闸落库")
+        XCTAssertEqual(vm.loadDraft(for: item).cuts, model.cuts, "草稿即时落盘")
+        XCTAssertEqual(model.totalCutSeconds, 0.5, accuracy: 1e-9)
+
+        // 亚最短提案被静默丢弃
+        model.commitCutCreation(anchor: 0.8, start: 0.81, end: 0.82)
+        XCTAssertEqual(model.cuts.count, 1, "不足 0.1s 的拖选不产生剪除段")
     }
 }

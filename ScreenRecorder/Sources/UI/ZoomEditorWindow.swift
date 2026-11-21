@@ -444,8 +444,10 @@ struct ZoomEditorView: View {
                             .foregroundStyle(OmiStyle.subtleText)
                     }
                     ZoomTimelineStrip(model: model)
-                        .frame(height: 64) // 时间线条高（旧 64pt）
-                        .clipShape(RoundedRectangle(cornerRadius: 8)) // 圆角贴合卡面
+                        .frame(height: 64) // 时间线条高（旧 64pt；圆角由画布 layer 自裁）
+                    Text("空白处按住拖选 = 剪除该段（红色块，掐头去尾/删中段）；点空白 = 跳播；红块双击删除，两端可拖微调。")
+                        .font(.caption2)
+                        .foregroundStyle(OmiStyle.faintText)
                 }
             }
             OmiCard { segmentSection }
