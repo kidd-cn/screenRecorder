@@ -110,6 +110,10 @@ final class ZoomEditorModel: ObservableObject {
     let player: AVPlayer
     private let listViewModel: RecordingListViewModel
     private var timeObserver: Any?
+    /// 剪除段边界观察器（2026-11-21 用户要求「播放跳过已删片段」）：播放头穿过任一
+    /// 剪除段起点即精确跳到段尾（0.25s periodic 观察器留作兜底——边界观察是主通道，
+    /// 无残帧）。剪除段每次变化重挂（rearm）。
+    private var cutBoundaryObserver: Any?
 
     /// 分段表（已过 validate：有序、档位/中心合法、无重叠）——唯一写入口是 `applyEdit`。
     @Published private(set) var segments: [ZoomSegment] = []
@@ -181,6 +185,7 @@ final class ZoomEditorModel: ObservableObject {
         segments = document.zoomSegments
         cuts = document.cuts
         mountTimeObserver()
+        rearmCutBoundaryObservers()
     }
 
     /// 源时长补齐（视图 `.task` 调用）：时间线比例尺 + 预估大小 + 新增段贴界的数据面。
@@ -190,13 +195,44 @@ final class ZoomEditorModel: ObservableObject {
         sourceDuration = seconds
     }
 
-    /// 关窗清理（窗口 opener 的 willClose 通知调用）：停播 + 摘除 periodic 观察器
+    /// 关窗清理（窗口 opener 的 willClose 通知调用）：停播 + 摘除 periodic/边界观察器
     ///（草稿已随每次编辑即时落盘，关窗无额外持久化动作）。
     func prepareForClose() {
         player.pause()
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
+        }
+        removeCutBoundaryObservers()
+    }
+
+    // MARK: 剪除段边界观察（播放跳剪主通道）
+
+    /// 重挂边界观察器：每个剪除段起点一个边界，播放头穿过即跳到段尾（播放中）。
+    /// 剪除段每次增删/调端点后调用（幂等：先摘后挂）。
+    private func rearmCutBoundaryObservers() {
+        removeCutBoundaryObservers()
+        guard !cuts.isEmpty else { return }
+        let boundaries = cuts.map { NSValue(time: CMTime(seconds: $0.start, preferredTimescale: 600)) }
+        cutBoundaryObserver = player.addBoundaryTimeObserver(
+            forTimes: boundaries, queue: .main
+        ) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.player.timeControlStatus == .playing else { return }
+                let current = self.player.currentTime().seconds
+                let skipped = EditTimeline.skipCuts(from: current, cuts: self.cuts)
+                if skipped > current {
+                    self.player.seek(to: CMTime(seconds: skipped, preferredTimescale: 600))
+                    self.playhead = skipped
+                }
+            }
+        }
+    }
+
+    private func removeCutBoundaryObservers() {
+        if let cutBoundaryObserver {
+            player.removeTimeObserver(cutBoundaryObserver)
+            self.cutBoundaryObserver = nil
         }
     }
 
@@ -207,6 +243,7 @@ final class ZoomEditorModel: ObservableObject {
             player.pause()
             isPlaying = false
         } else {
+            settlePlayhead() // 起播落位：播放头落在剪除段内则先跳到段尾
             player.play()
             isPlaying = true
         }
@@ -218,6 +255,19 @@ final class ZoomEditorModel: ObservableObject {
         clamped = EditTimeline.skipCuts(from: clamped, cuts: cuts)
         player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
         playhead = clamped // seek 完成前的即时反馈（观察器随后校准）
+    }
+
+    /// 原始跳转（不避让剪除段，2026-11-21 用户要求「拖动时间线视频跟随」）：拖动扫查
+    /// 时预览逐点跟随光标——光标在剪除段内也照实显示源画面（扫查语义 ≠ 播放语义）。
+    func scrub(to time: TimeInterval) {
+        let clamped = sourceDuration > 0 ? min(max(0, time), sourceDuration) : max(0, time)
+        player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
+        playhead = clamped
+    }
+
+    /// 播放头落位：落在剪除段内则跳到段尾（seek 的避让语义）。起播前与剪除段提交后调用。
+    func settlePlayhead() {
+        seek(to: playhead)
     }
 
     // MARK: 分段编辑（唯一写入口：全部经 ZoomEditorLogic.applyEdit 统一闸）
@@ -347,12 +397,14 @@ final class ZoomEditorModel: ObservableObject {
         saveDocument()
     }
 
-    /// 剪除段统一闸：修改 → `CutSegment.validate` → 落库 → 草稿即时存盘（同 applyEdit 纪律）。
+    /// 剪除段统一闸：修改 → `CutSegment.validate` → 落库 → 草稿即时存盘（同 applyEdit 纪律）
+    /// → 边界观察器重挂（播放跳剪主通道跟随最新剪除段）。
     private func applyCutEdit(_ edit: (inout [CutSegment]) -> Void) {
         var next = cuts
         edit(&next)
         cuts = CutSegment.validate(next)
         saveDocument()
+        rearmCutBoundaryObservers()
     }
 
     /// 草稿落盘（两段表合一文档；尽力而为）。

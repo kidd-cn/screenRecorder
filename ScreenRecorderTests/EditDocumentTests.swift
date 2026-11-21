@@ -244,5 +244,17 @@ final class CutCreationModelTests: XCTestCase {
         // 亚最短提案被静默丢弃
         model.commitCutCreation(anchor: 0.8, start: 0.81, end: 0.82)
         XCTAssertEqual(model.cuts.count, 1, "不足 0.1s 的拖选不产生剪除段")
+
+        // scrub vs seek 差分（2026-11-21 用户要求「拖动时间线视频跟随」）：scrub 原始
+        // 落点（扫查光标在剪除段内也照实显示），seek 避让剪除段（播放落位语义）。
+        model.scrub(to: 0.3) // 0.1–0.6 剪除段内
+        XCTAssertEqual(model.playhead, 0.3, accuracy: 1e-9, "scrub 原始落点不避让")
+        model.seek(to: 0.3)
+        XCTAssertEqual(model.playhead, 0.6, accuracy: 1e-9, "seek 避让跳到段尾")
+        model.settlePlayhead() // 播放头已在段尾 → 原位
+        XCTAssertEqual(model.playhead, 0.6, accuracy: 1e-9)
+        model.scrub(to: 0.35)
+        model.settlePlayhead() // 播放头落在剪除段内 → 跳段尾
+        XCTAssertEqual(model.playhead, 0.6, accuracy: 1e-9, "settle 落位避让剪除段")
     }
 }

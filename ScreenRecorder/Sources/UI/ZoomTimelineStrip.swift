@@ -335,23 +335,25 @@ final class ZoomTimelineCanvas: NSView {
         let delta = (point.x - session.startX) / scale
         switch session.kind {
         case .zoomHandle(let index, let isLeading, let originalStart, let originalEnd):
-            model.dragPreview = ZoomEditorModel.DragPreview(
-                index: index,
-                start: isLeading ? originalStart + delta : originalStart,
-                end: isLeading ? originalEnd : originalEnd + delta)
+            let start = isLeading ? originalStart + delta : originalStart
+            let end = isLeading ? originalEnd : originalEnd + delta
+            model.dragPreview = ZoomEditorModel.DragPreview(index: index, start: start, end: end)
+            model.scrub(to: isLeading ? start : end) // 拖动扫查：预览跟随被拖端点
         case .cutHandle(let index, let isLeading, let originalStart, let originalEnd):
-            model.cutDragPreview = ZoomEditorModel.CutDragPreview(
-                index: index,
-                start: isLeading ? originalStart + delta : originalStart,
-                end: isLeading ? originalEnd : originalEnd + delta)
+            let start = isLeading ? originalStart + delta : originalStart
+            let end = isLeading ? originalEnd : originalEnd + delta
+            model.cutDragPreview = ZoomEditorModel.CutDragPreview(index: index, start: start, end: end)
+            model.scrub(to: isLeading ? start : end) // 拖动扫查：预览跟随被拖端点
         case .cutCreate(let anchor):
-            // 拖出 ≥4px 才成预览（亚拖动 = 点击，松手跳播）。
+            // 拖出 ≥4px 才成预览（亚拖动 = 点击，松手跳播）；拖动扫查：预览跟随光标
+            //（scrub 原始跳转——光标在既有剪除段内也照实显示，扫查 ≠ 播放语义）。
             guard abs(point.x - session.startX) >= 4 else { return }
             let currentTime = point.x / scale
             model.cutDragPreview = ZoomEditorModel.CutDragPreview(
                 index: nil,
                 start: min(anchor, currentTime),
                 end: max(anchor, currentTime))
+            model.scrub(to: currentTime)
         }
     }
 
@@ -374,8 +376,10 @@ final class ZoomTimelineCanvas: NSView {
             }
         case .cutCreate(let anchor):
             if let preview = model.cutDragPreview {
-                // 拖选成段：经修剪闸提交（不足最短时长 → 静默丢弃）。
+                // 拖选成段：经修剪闸提交（不足最短时长 → 静默丢弃）；提交后播放头落位
+                //（落在刚建的剪除段内 → 跳到段尾）。
                 model.commitCutCreation(anchor: anchor, start: preview.start, end: preview.end)
+                model.settlePlayhead()
             } else {
                 model.seek(to: session.startX / scale) // 点击背景跳播（旧语义）
             }
