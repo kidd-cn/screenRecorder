@@ -68,7 +68,7 @@ final class WaveformTests: XCTestCase {
     // MARK: sampleWaveform 端到端（响/静两段音频夹具）
 
     /// 程序生成 2s 音频-only mp4：前 1s ±0.8 正弦（440Hz），后 1s ±0.005 近静音。
-    private func makeLoudSilentFixture(at url: URL) async throws {
+    func makeLoudSilentFixture(at url: URL) async throws {
         let sampleRate = 44100.0
         let framesPerChunk = 4410 // 0.1s × 20 chunks = 2s
         let writer = try AVAssetWriter(url: url, fileType: .mp4)
@@ -209,5 +209,43 @@ final class WaveformTests: XCTestCase {
         // 大桶粒度（0.5s/桶）：4 桶覆盖 2s——任何「不推进」实现都会死循环挂死
         let buckets = await OfflineZoomRenderer.sampleWaveform(sourceURL: url, bucketSeconds: 0.5)
         XCTAssertEqual(buckets.count, 4, accuracy: 1, "0.5s/桶 × 2s ≈ 4 桶（游标推进收敛）")
+    }
+}
+
+/// 轨道缩略图钉测（剪映对齐·批次 3）：间隔纯函数（0.5s 下限 / ≤240 张自适应）、
+/// 真实 mp4 抽帧（键位落在请求网格、尺寸钳 maxSize）。
+final class FilmstripTests: XCTestCase {
+    func testFilmstripInterval() {
+        XCTAssertEqual(OfflineZoomRenderer.filmstripInterval(forDuration: 0), 1, "退化回退")
+        XCTAssertEqual(OfflineZoomRenderer.filmstripInterval(forDuration: 48.4), 0.5,
+                       "48.4/240 = 0.2 → 0.5s 下限兜住")
+        XCTAssertEqual(OfflineZoomRenderer.filmstripInterval(forDuration: 7200), 30,
+                       accuracy: 0.01, "2h → ≤240 张自适应")
+    }
+
+    func testSampleFilmstripOnRealMovie() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FilmstripTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("抽帧夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+
+        let filmstrip = await OfflineZoomRenderer.sampleFilmstrip(
+            sourceURL: url, interval: 0.5, maxSize: CGSize(width: 128, height: 72))
+        let strip = try XCTUnwrap(filmstrip, "有视频轨夹具应出缩略图")
+        XCTAssertGreaterThanOrEqual(strip.images.count, 2, "1s @0.5s → ≥2 张（0 / 0.5）")
+        for (time, image) in strip.images {
+            XCTAssertGreaterThanOrEqual(time, 0)
+            XCTAssertLessThan(time, 1.0, "键位在时长内")
+            XCTAssertLessThanOrEqual(image.width, 128, "宽度钳 maxSize")
+            XCTAssertLessThanOrEqual(image.height, 72)
+        }
+        // 无视频轨（纯音频夹具）→ nil
+        let audioURL = directory.appendingPathComponent("响静夹具.mp4")
+        try await WaveformTests().makeLoudSilentFixture(at: audioURL)
+        let audioStrip = await OfflineZoomRenderer.sampleFilmstrip(
+            sourceURL: audioURL, interval: 0.5, maxSize: CGSize(width: 128, height: 72))
+        XCTAssertNil(audioStrip, "无视频轨 → nil")
     }
 }

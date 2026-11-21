@@ -381,6 +381,25 @@ final class ZoomTimelineCanvas: NSView {
         NSColor.quaternaryLabelColor.setFill()
         NSBezierPath(rect: bounds).fill()
 
+        // 轨道缩略图 filmstrip（剪映对齐·批次 3）：槽位网格锚定源时间（每槽 = 1 个
+        // 抽帧间隔），宽度随缩放重排；aspect-fill 铺满条高。在波形/红块之下——剪除区
+        // 缩略图被红罩压暗可见。未就绪/无视频轨 → 空过。
+        if let strip = model.filmstrip, scale > 0 {
+            let slotWidth = CGFloat(strip.interval) * scale
+            if slotWidth >= 2 { // 亚 2pt 槽不画（缩太小看不清，省绘制）
+                let firstSlot = max(0, Int(offset / strip.interval))
+                let lastSlot = min(Int(model.sourceDuration / strip.interval),
+                                   Int((offset + Double(bounds.width) / scale) / strip.interval))
+                for slot in firstSlot...max(lastSlot, firstSlot) {
+                    guard let image = strip.images[TimeInterval(slot) * strip.interval] else { continue }
+                    let x = ZoomTimelineGeometry.timeToX(
+                        TimeInterval(slot) * strip.interval, pxPerSec: scale, offset: offset)
+                    let rect = CGRect(x: x, y: 0, width: slotWidth, height: bounds.height)
+                    drawAspectFill(image, in: rect)
+                }
+            }
+        }
+
         // 音频波形带（剪映对齐·批次 2）：可见范围逐像素列聚合桶 min/max，中线对称
         // 画在 [0.25h, 0.75h] 带（蓝色半透明；在红块之下——剪除区音频被红罩压暗可见）。
         // 波形数据未就绪/无音轨 → 空过（条带保持背景）。
@@ -479,6 +498,25 @@ final class ZoomTimelineCanvas: NSView {
         NSBezierPath(rect: CGRect(
             x: playheadX, y: 0,
             width: ZoomTimelineGeometry.playheadWidth, height: bounds.height)).fill()
+    }
+
+    /// aspect-fill 绘制（裁切铺满目标矩形——缩略图槽位同款裁切语义）。
+    private func drawAspectFill(_ image: CGImage, in rect: CGRect) {
+        let imageAspect = CGFloat(image.width) / CGFloat(image.height)
+        let rectAspect = rect.width / max(rect.height, 1)
+        var drawRect = rect
+        if imageAspect > rectAspect {
+            let width = rect.height * imageAspect
+            drawRect = CGRect(x: rect.midX - width / 2, y: rect.minY, width: width, height: rect.height)
+        } else {
+            let height = rect.width / imageAspect
+            drawRect = CGRect(x: rect.minX, y: rect.midY - height / 2, width: rect.width, height: height)
+        }
+        guard let context = NSGraphicsContext.current?.cgContext else { return }
+        context.saveGState()
+        context.clip(to: rect)
+        NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)).draw(in: drawRect)
+        context.restoreGState()
     }
 
     // MARK: 鼠标事件（原生通道）

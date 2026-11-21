@@ -150,6 +150,37 @@ final class ZoomEditorModel: ObservableObject {
     /// 波形加载去重（同实例重复 .task 防御）。
     private var waveformLoaded = false
 
+    // MARK: 轨道缩略图（剪映对齐·批次 3：filmstrip 随缩放重排）
+
+    /// 抽帧产物（槽位网格锚定源时间；nil = 生成中/无视频轨）。
+    @Published private(set) var filmstrip: OfflineZoomRenderer.Filmstrip?
+    /// 进程级缓存（同波形）。
+    nonisolated(unsafe) private static var filmstripCache: [URL: OfflineZoomRenderer.Filmstrip] = [:]
+    private var filmstripLoaded = false
+
+    /// 后台抽帧（时长就绪后调用；进程缓存命中即用）。
+    func loadFilmstrip() {
+        guard !filmstripLoaded else { return }
+        filmstripLoaded = true
+        let url = item.url
+        if let cached = Self.filmstripCache[url] {
+            filmstrip = cached
+            return
+        }
+        let interval = OfflineZoomRenderer.filmstripInterval(forDuration: sourceDuration)
+        let maxSize = CGSize(width: 128, height: 72) // 显示 64×36 槽位的 2x 余量
+        Task.detached(priority: .utility) { [weak self] in
+            let strip = await OfflineZoomRenderer.sampleFilmstrip(
+                sourceURL: url, interval: interval, maxSize: maxSize)
+            await MainActor.run {
+                if let strip {
+                    Self.filmstripCache[url] = strip
+                    self?.filmstrip = strip
+                }
+            }
+        }
+    }
+
     /// 后台加载波形（解码不占主线程；完成回主线程入库+发布；进程缓存命中即用）。
     func loadWaveform() {
         guard !waveformLoaded else { return }
@@ -645,6 +676,7 @@ struct ZoomEditorView: View {
         .frame(width: 720)
         .background(OmiStyle.panelBackground) // Omi 化（2026-11-14）：分区卡片 + 绿 accent
         .task { await model.loadMediaInfo() }
+        .task { await model.loadMediaInfo(); model.loadFilmstrip() } // 抽帧后台进行（时长就绪后）
         .task { model.loadWaveform() } // 波形解码后台进行（剪映对齐·批次 2）
     }
 

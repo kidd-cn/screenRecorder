@@ -150,6 +150,50 @@ enum OfflineZoomRenderer {
         return output
     }
 
+    // MARK: - 轨道缩略图（剪映对齐·批次 3：时间线 filmstrip 的抽帧真源）
+
+    /// 抽帧产物（进程级缓存载体；@unchecked Sendable——CGImage 不可变，跨线程只读）。
+    struct Filmstrip: @unchecked Sendable {
+        /// 相邻缩略图的时间间隔（秒；槽位网格锚定源时间，随缩放重排宽度）。
+        let interval: TimeInterval
+        /// 请求时间 → 抽帧（请求时间为键——actualTime 有容差漂移，不作为键）。
+        let images: [TimeInterval: CGImage]
+    }
+
+    /// 槽位间隔（纯函数）：默认 0.5s 下限；超长片按 ≤240 张自适应放大间隔
+    ///（240 × 128×72×4B ≈ 8.8MB 内存上限）。
+    static func filmstripInterval(forDuration duration: TimeInterval) -> TimeInterval {
+        guard duration.isFinite, duration > 0 else { return 1 }
+        return max(duration / 240, 0.5)
+    }
+
+    /// 离线抽帧：[0, duration) 按 interval 网格逐时间点抽帧（±半间隔容差换速度）。
+    /// 失败/无视频轨 → nil。逐张生成（调用方后台任务驱动；渐进上屏由调用方裁夺）。
+    static func sampleFilmstrip(sourceURL: URL, interval: TimeInterval,
+                                maxSize: CGSize) async -> Filmstrip? {
+        guard interval.isFinite, interval > 0 else { return nil }
+        let asset = AVURLAsset(url: sourceURL)
+        guard let videoTrack = try? await asset.loadTracks(withMediaType: .video).first else { return nil }
+        _ = videoTrack // 抽帧经 generator（track 存在性闸）
+        let durationSeconds = (try? await asset.load(.duration).seconds) ?? 0
+        guard durationSeconds.isFinite, durationSeconds > 0 else { return nil }
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = maxSize
+        let tolerance = CMTime(seconds: interval / 2, preferredTimescale: 600)
+        generator.requestedTimeToleranceBefore = tolerance
+        generator.requestedTimeToleranceAfter = tolerance
+        var images: [TimeInterval: CGImage] = [:]
+        var time: TimeInterval = 0
+        while time < durationSeconds {
+            if let result = try? await generator.image(at: CMTime(seconds: time, preferredTimescale: 600)) {
+                images[time] = result.image
+            }
+            time += interval
+        }
+        return images.isEmpty ? nil : Filmstrip(interval: interval, images: images)
+    }
+
     // MARK: - 波形数据（剪映对齐·批次 2：音频波形轨的采样真源）
 
     /// 波形采样配置（每 bucket 的最小/最大 RMS 对；bucketSeconds 由调用方按目标像素率定）。
