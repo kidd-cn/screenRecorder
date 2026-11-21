@@ -127,16 +127,13 @@ enum ZoomTimelineGeometry {
         let rect: CGRect
     }
 
-    /// 命中分类：缩放段把手/段体优先（视觉上层），剪除段其次（剪辑 v1：红块全高、
-    /// 视觉在下层），背景兜底。剪除段把手与段体的窄段把手重叠裁决与缩放段同款。
+    /// 命中分类（剪辑 v2 片段流）：缩放段把手/段体、接缝把手（含首尾裁切缝）、背景。
     enum Hit: Equatable {
         case background
         case leadingHandle(index: Int)
         case trailingHandle(index: Int)
         case segment(index: Int)
-        case cutLeadingHandle(index: Int)
-        case cutTrailingHandle(index: Int)
-        case cutBlock(index: Int)
+        case seamHandle(index: Int)
     }
 
     /// 段块矩形（画布坐标）：x = timeToX(start)（含平移），宽 = max((end − start) × scale,
@@ -154,33 +151,20 @@ enum ZoomTimelineGeometry {
         }
     }
 
-    /// 剪除段块矩形（剪辑 v1）：全高 [0, height]——与缩放段块（内缩 4pt）同 x 口径，
-    /// 纵向铺满以视觉区分「剪除 = 整条时间轴上抹掉」。
-    static func cutBlocks(ranges: [(index: Int, start: TimeInterval, end: TimeInterval)],
-                          scale: CGFloat, height: CGFloat,
-                          offset: TimeInterval = 0) -> [Block] {
-        ranges.map { range in
-            let x = max(timeToX(range.start, pxPerSec: scale, offset: offset), 0)
-            let width = max((range.end - range.start) * scale, minimumBlockWidth)
-            return Block(
-                index: range.index,
-                rect: CGRect(x: x, y: 0, width: width, height: height))
+    /// 命中（缩放段层 + 接缝把手）：缩放段块优先，接缝把手其次（接缝竖线 ± 把手宽
+    /// 热区），背景兜底。
+    static func hit(at point: CGPoint, zoomBlocks: [Block],
+                    seamPositions: [CGFloat], height: CGFloat) -> Hit {
+        let zoomHit = hit(at: point, in: zoomBlocks)
+        if zoomHit != .background { return zoomHit }
+        let half = handleWidth
+        for (index, x) in seamPositions.enumerated() {
+            if abs(point.x - x) <= half {
+                return .seamHandle(index: index)
+            }
         }
-    }
-
-    /// 双层命中：先缩放段层（视觉上层），后剪除段层；都未命中 → 背景。
-    static func hit(at point: CGPoint, zoomBlocks: [Block], cutBlocks: [Block]) -> Hit {
-        switch hit(at: point, in: zoomBlocks) {
-        case .background: break
-        case let hit: return hit
-        }
-        switch hit(at: point, in: cutBlocks) {
-        case .background: return .background
-        case .leadingHandle(let index): return .cutLeadingHandle(index: index)
-        case .trailingHandle(let index): return .cutTrailingHandle(index: index)
-        case .segment(let index): return .cutBlock(index: index)
-        default: return .background
-        }
+        _ = height
+        return .background
     }
 
     static func hit(at point: CGPoint, in blocks: [Block]) -> Hit {
@@ -263,8 +247,10 @@ final class ZoomTimelineCanvas: NSView {
     private struct DragSession {
         enum Kind {
             case zoomHandle(index: Int, isLeading: Bool, originalStart: TimeInterval, originalEnd: TimeInterval)
-            case cutHandle(index: Int, isLeading: Bool, originalStart: TimeInterval, originalEnd: TimeInterval)
-            case cutCreate(anchor: TimeInterval)
+            /// 接缝拖动（seamIndex ∈ 0...clips.count；baseSourceTime = 接缝当前源时间）。
+            case seamHandle(seamIndex: Int, baseSourceTime: TimeInterval)
+            /// 空白处波纹删除拖选（锚 = 成品时间）。
+            case rippleDelete(anchor: TimeInterval)
         }
         let kind: Kind
         let startX: CGFloat
@@ -344,28 +330,9 @@ final class ZoomTimelineCanvas: NSView {
         }
     }
 
-    /// 剪除段显示区间（含拖拽预览；新建预览 index nil 追加在表尾）。
-    private func currentCutRanges() -> [(index: Int, start: TimeInterval, end: TimeInterval)] {
-        guard let model else { return [] }
-        var ranges = model.cuts.indices.map { index in
-            let range = model.displayedCutRange(at: index)
-            return (index, range.start, range.end)
-        }
-        if let preview = model.cutDragPreview, preview.index == nil {
-            ranges.append((Int.min, preview.start, preview.end)) // 新建预览块（命中按背景兜底——index Int.min 不入表）
-        }
-        return ranges
-    }
-
     private func currentBlocks(scale: CGFloat) -> [ZoomTimelineGeometry.Block] {
         ZoomTimelineGeometry.blocks(
             ranges: currentRanges(), scale: scale, height: bounds.height,
-            offset: model?.timelineOffset ?? 0)
-    }
-
-    private func currentCutBlocks(scale: CGFloat) -> [ZoomTimelineGeometry.Block] {
-        ZoomTimelineGeometry.cutBlocks(
-            ranges: currentCutRanges(), scale: scale, height: bounds.height,
             offset: model?.timelineOffset ?? 0)
     }
 
@@ -396,6 +363,33 @@ final class ZoomTimelineCanvas: NSView {
                         TimeInterval(slot) * strip.interval, pxPerSec: scale, offset: offset)
                     let rect = CGRect(x: x, y: 0, width: slotWidth, height: bounds.height)
                     drawAspectFill(image, in: rect)
+                }
+            }
+        }
+
+        // 片段流：接缝竖线（白 1pt）+ 选中 clip 高亮（蓝 1pt 描边）；缩略图/波形经
+        // 成品→源映射逐列查采样。接缝位置数组供命中热区。
+        var seamPositions: [CGFloat] = []
+        if !model.clips.isEmpty {
+            var cursor: TimeInterval = 0
+            NSColor.white.withAlphaComponent(0.6).setFill()
+            for clip in model.clips {
+                cursor += clip.displayDuration
+                let x = ZoomTimelineGeometry.timeToX(cursor, pxPerSec: scale, offset: offset)
+                seamPositions.append(x)
+                NSBezierPath(rect: CGRect(x: x - 0.5, y: 0, width: 1, height: bounds.height)).fill()
+            }
+            if let selected = model.selectedClipIndex, model.clips.indices.contains(selected) {
+                var startCursor: TimeInterval = 0
+                for (index, clip) in model.clips.enumerated() {
+                    let clipStart = startCursor
+                    let clipEnd = startCursor + clip.displayDuration
+                    startCursor = clipEnd
+                    guard index == selected else { continue }
+                    let x0 = ZoomTimelineGeometry.timeToX(clipStart, pxPerSec: scale, offset: offset)
+                    let x1 = ZoomTimelineGeometry.timeToX(clipEnd, pxPerSec: scale, offset: offset)
+                    NSColor.systemBlue.withAlphaComponent(0.9).setStroke()
+                    NSBezierPath(rect: CGRect(x: x0 + 0.5, y: 0.5, width: max(x1 - x0 - 1, 1), height: bounds.height - 1)).stroke()
                 }
             }
         }
@@ -432,20 +426,6 @@ final class ZoomTimelineCanvas: NSView {
         }
 
         // 剪除段块（下层、全高、红）：把手视觉与缩放段同款白 0.75。
-        let cutBlocks = currentCutBlocks(scale: scale)
-        for block in cutBlocks {
-            NSColor.systemRed.withAlphaComponent(0.35).setFill()
-            NSBezierPath(roundedRect: block.rect, xRadius: 3, yRadius: 3).fill()
-            NSColor.white.withAlphaComponent(0.75).setFill()
-            let handle = min(ZoomTimelineGeometry.handleWidth, block.rect.width)
-            NSBezierPath(rect: CGRect(
-                x: block.rect.minX, y: block.rect.minY,
-                width: handle, height: block.rect.height)).fill()
-            NSBezierPath(rect: CGRect(
-                x: block.rect.maxX - handle, y: block.rect.minY,
-                width: handle, height: block.rect.height)).fill()
-        }
-
         let ranges = currentRanges()
         let blocks = ZoomTimelineGeometry.blocks(ranges: ranges, scale: scale, height: bounds.height)
         for (position, block) in blocks.enumerated() {
@@ -526,36 +506,54 @@ final class ZoomTimelineCanvas: NSView {
         let point = convert(event.locationInWindow, from: nil)
         let scale = pxPerSec(model: model)
         let offset = model.timelineOffset
-        switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: currentBlocks(scale: scale),
-                                        cutBlocks: currentCutBlocks(scale: scale)) {
+        let zoomBlocks = currentBlocks(scale: scale)
+        switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: zoomBlocks,
+                                        seamPositions: seamPositions(), height: bounds.height) {
         case .leadingHandle(let index):
             beginZoomDrag(index: index, isLeading: true, startX: point.x, model: model)
         case .trailingHandle(let index):
             beginZoomDrag(index: index, isLeading: false, startX: point.x, model: model)
         case .segment(let index):
             model.selectedIndex = index
-        case .cutLeadingHandle(let index):
-            beginCutDrag(index: index, isLeading: true, startX: point.x, model: model)
-        case .cutTrailingHandle(let index):
-            beginCutDrag(index: index, isLeading: false, startX: point.x, model: model)
-        case .cutBlock(let index):
-            // 双击删剪除段（v1 剪除段无选中态，块上单击无动作）。
-            if event.clickCount >= 2 {
-                model.removeCut(at: index)
-            }
+        case .seamHandle(let seamIndex):
+            // 接缝把手：base = 接缝当前源时间（输出边界 → 源时间）
+            let boundaryOutput = model.clips.prefix(seamIndex).reduce(0) { $0 + $1.displayDuration }
+            let baseSource = model.clipsDocument.sourceTime(forOutputTime: boundaryOutput)
+                ?? model.clipsDocument.sourceTime(forOutputTime: max(boundaryOutput - 0.01, 0))
+                ?? 0
+            dragSession = DragSession(
+                kind: .seamHandle(seamIndex: seamIndex, baseSourceTime: baseSource),
+                startX: point.x, lastSnappedTime: baseSource)
         case .background:
-            // 空白按下：先按「新建剪除段拖选」武装（拖出 ≥4px 才成预览）；松手未拖
-            // = 点击背景跳播（旧语义）。锚点即参与磁吸（剪映同款——按下即吸边）。
-            let rawAnchor = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
+            let rawTime = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
+            if event.modifierFlags.contains(.command), let clipIndex = model.clipIndex(atOutputTime: rawTime) {
+                // ⌘+点击 = 选中 clip（速度面板）
+                model.selectedClipIndex = model.selectedClipIndex == clipIndex ? nil : clipIndex
+                return
+            }
+            // 空白按下：波纹删除拖选武装（拖出 ≥4px 成红罩预览）；松手未拖 = 点击跳播。
+            // 锚点参与磁吸（吸缝边）。
             let snapped = ZoomTimelineGeometry.magnetSnap(
-                proposed: rawAnchor, previous: nil, activeSnap: nil,
+                proposed: rawTime, previous: nil, activeSnap: nil,
                 candidates: magnetCandidates(model: model), toleranceSeconds: snapTolerance(pxPerSec: scale))
-            let anchor = snapped?.time ?? rawAnchor
+            let anchor = snapped?.time ?? rawTime
             activeSnapIndicator = snapped != nil ? anchor : nil
             dragSession = DragSession(
-                kind: .cutCreate(anchor: anchor), startX: point.x,
-                lastSnappedTime: anchor)
+                kind: .rippleDelete(anchor: anchor), startX: point.x, lastSnappedTime: anchor)
         }
+    }
+
+    /// 接缝位置（成品坐标，绘制/命中共用）。
+    private func seamPositions() -> [CGFloat] {
+        guard let model else { return [] }
+        var positions: [CGFloat] = []
+        var cursor: TimeInterval = 0
+        let scale = pxPerSec(model: model)
+        for clip in model.clips {
+            cursor += clip.displayDuration
+            positions.append(ZoomTimelineGeometry.timeToX(cursor, pxPerSec: scale, offset: model.timelineOffset))
+        }
+        return positions
     }
 
     private func beginZoomDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
@@ -568,16 +566,6 @@ final class ZoomTimelineCanvas: NSView {
             startX: startX, lastSnappedTime: origin)
     }
 
-    private func beginCutDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
-        guard model.cuts.indices.contains(index) else { return }
-        let cut = model.cuts[index]
-        let origin = isLeading ? cut.start : cut.end
-        dragSession = DragSession(
-            kind: .cutHandle(index: index, isLeading: isLeading,
-                             originalStart: cut.start, originalEnd: cut.end),
-            startX: startX, lastSnappedTime: origin)
-    }
-
     /// 磁点容差（吸附剪映对齐）：把手宽度换算秒（1.25×——磁吸窗略宽于把手，配合粘滞）。
     private func snapTolerance(pxPerSec: CGFloat) -> TimeInterval {
         TimeInterval(ZoomTimelineGeometry.handleWidth / max(pxPerSec, 0.001)) * 1.25
@@ -587,8 +575,8 @@ final class ZoomTimelineCanvas: NSView {
     private func magnetCandidates(model: ZoomEditorModel, excludingCut cutIndex: Int? = nil,
                                   excludingZoom zoomIndex: Int? = nil) -> [TimeInterval] {
         var candidates: [TimeInterval] = [0, model.sourceDuration, model.playhead]
-        for (index, cut) in model.cuts.enumerated() where index != cutIndex {
-            candidates.append(contentsOf: [cut.start, cut.end])
+        for (index, clip) in model.clips.enumerated() where index != cutIndex {
+            candidates.append(contentsOf: [clip.sourceStart, clip.sourceEnd])
         }
         for (index, segment) in model.segments.enumerated() where index != zoomIndex {
             candidates.append(contentsOf: [segment.start, segment.end])
@@ -620,87 +608,71 @@ final class ZoomTimelineCanvas: NSView {
         let delta = (point.x - session.startX) / scale
         switch session.kind {
         case .zoomHandle(let index, let isLeading, let originalStart, let originalEnd):
-            let previous = session.lastSnappedTime
-            let raw = isLeading ? originalStart + delta : originalEnd + delta
-            let snappedEnd = magnet(raw, previous: previous, model: model, scale: scale,
-                                    excludingZoom: index)
-            let start = isLeading ? snappedEnd : originalStart
-            let end = isLeading ? originalEnd : snappedEnd
+            let start = isLeading ? originalStart + delta : originalStart
+            let end = isLeading ? originalEnd : originalEnd + delta
             model.dragPreview = ZoomEditorModel.DragPreview(index: index, start: start, end: end)
-            model.scrub(to: snappedEnd) // 拖动扫查：预览跟随被拖端点
-            dragSession?.lastSnappedTime = snappedEnd
-        case .cutHandle(let index, let isLeading, let originalStart, let originalEnd):
-            let previous = session.lastSnappedTime
-            let raw = isLeading ? originalStart + delta : originalEnd + delta
-            let snappedEnd = magnet(raw, previous: previous, model: model, scale: scale,
-                                    excludingCut: index)
-            let start = isLeading ? snappedEnd : originalStart
-            let end = isLeading ? originalEnd : snappedEnd
-            model.cutDragPreview = ZoomEditorModel.CutDragPreview(index: index, start: start, end: end)
-            model.scrub(to: snappedEnd) // 拖动扫查：预览跟随被拖端点
-            dragSession?.lastSnappedTime = snappedEnd
-        case .cutCreate(let anchor):
-            // 拖出 ≥4px 才成预览（亚拖动 = 点击，松手跳播）；拖动扫查：预览跟随光标
-            //（scrub 原始跳转——光标在既有剪除段内也照实显示，扫查 ≠ 播放语义）。
+            // 拖动扫查：预览跟随被拖端点（输出坐标）
+            model.scrub(to: isLeading ? start : end)
+        case .seamHandle(let seamIndex, let baseSourceTime):
+            // 接缝拖动：光标成品位移 → 源位移（× 邻接 clip 速度——取右 clip，越界回左）
+            let currentTime = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
+            let outputDelta = currentTime - session.lastSnappedTime
+            let neighbourSpeed = model.clips.indices.contains(seamIndex)
+                ? model.clips[seamIndex].speed
+                : (model.clips.last?.speed ?? 1)
+            let sourceTarget = baseSourceTime + outputDelta * neighbourSpeed
+            model.moveSeam(at: seamIndex, toSourceTime: sourceTarget)
+            model.scrub(to: currentTime)
+        case .rippleDelete(let anchor):
+            // 波纹删除拖选：红罩预览（含磁吸/穿越）；扫查跟随光标（原始成品坐标）。
             guard abs(point.x - session.startX) >= 4 else { return }
             let previous = session.lastSnappedTime
             let raw = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
             let snappedTime = magnet(raw, previous: previous, model: model, scale: scale)
-            model.cutDragPreview = ZoomEditorModel.CutDragPreview(
-                index: nil,
-                start: min(anchor, snappedTime),
-                end: max(anchor, snappedTime))
+            model.ripplePreview = (min(anchor, snappedTime), max(anchor, snappedTime))
             model.scrub(to: snappedTime)
             dragSession?.lastSnappedTime = snappedTime
         }
     }
-
     override func mouseUp(with event: NSEvent) {
         defer {
             dragSession = nil
             activeSnapIndicator = nil // 磁吸指示线松手即清
-            if model?.cutDragPreview != nil { model?.cutDragPreview = nil }
+            model?.ripplePreview = nil
             if model?.dragPreview != nil { model?.dragPreview = nil }
         }
         guard let session = dragSession, let model else { return }
-        let scale = pxPerSec(model: model)
         switch session.kind {
         case .zoomHandle(let index, _, _, _):
             if let preview = model.dragPreview {
                 model.commitDrag(index: index, start: preview.start, end: preview.end)
             }
-        case .cutHandle(let index, _, _, _):
-            if let preview = model.cutDragPreview {
-                model.commitCutDrag(index: index, start: preview.start, end: preview.end)
-            }
-        case .cutCreate(let anchor):
-            if let preview = model.cutDragPreview {
-                // 拖选成段：经修剪闸提交（不足最短时长 → 静默丢弃）；提交后播放头落位
-                //（落在刚建的剪除段内 → 跳到段尾）。
-                model.commitCutCreation(anchor: anchor, start: preview.start, end: preview.end)
+        case .seamHandle:
+            break // moveSeam 已逐拖拽事件提交（统一闸+撤销栈逐事件快照）
+        case .rippleDelete(let anchor):
+            if let preview = model.ripplePreview {
+                model.cutOutputRange(lower: preview.0, upper: preview.1)
                 model.settlePlayhead()
+                _ = anchor
             } else {
-                model.seek(to: ZoomTimelineGeometry.xToTime(
-                    session.startX, pxPerSec: scale, offset: model.timelineOffset)) // 点击背景跳播（旧语义）
+                model.seek(to: session.lastSnappedTime) // 点击背景跳播
             }
         }
     }
 
-    /// 右键（含 Control+左键）：缩放段块 → 先选中再弹「删除分段」；剪除段块 → 弹
-    /// 「删除剪除段」；背景右键无菜单（旧版同款）。
+    /// 右键（含 Control+左键）：缩放段块 → 先选中再弹「删除分段」菜单；接缝/背景无菜单。
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let model else { return nil }
         let point = convert(event.locationInWindow, from: nil)
         let scale = pxPerSec(model: model)
         switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: currentBlocks(scale: scale),
-                                        cutBlocks: currentCutBlocks(scale: scale)) {
+                                        seamPositions: seamPositions(), height: bounds.height) {
         case .leadingHandle(let hitIndex), .trailingHandle(let hitIndex), .segment(let hitIndex):
             guard model.segments.indices.contains(hitIndex) else { return nil }
             model.selectedIndex = hitIndex
             return ZoomEditorMenus.deleteSegment(at: hitIndex, model: model)
-        case .cutLeadingHandle(let hitIndex), .cutTrailingHandle(let hitIndex), .cutBlock(let hitIndex):
-            guard model.cuts.indices.contains(hitIndex) else { return nil }
-            return ZoomEditorMenus.deleteCut(at: hitIndex, model: model)
+        case .seamHandle:
+            return nil // 接缝无右键菜单（修剪=拖动；删除=拖选+撤销）
         case .background:
             return nil
         }
@@ -723,17 +695,4 @@ enum ZoomEditorMenus {
         return menu
     }
 
-    /// 剪除段右键菜单（剪辑 v1）。
-    static func deleteCut(at index: Int, model: ZoomEditorModel) -> NSMenu {
-        let menu = RetainingMenu()
-        let proxy = MenuActionProxy { [weak model] in
-            Task { @MainActor in model?.removeCut(at: index) }
-        }
-        let item = NSMenuItem(
-            title: NSLocalizedString("删除剪除段", comment: "Cut menu delete"), action: #selector(MenuActionProxy.picked), keyEquivalent: "")
-        item.target = proxy
-        menu.addItem(item)
-        menu.retainedProxies = [proxy]
-        return menu
-    }
 }

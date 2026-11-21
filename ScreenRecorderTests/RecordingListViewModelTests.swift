@@ -261,7 +261,7 @@ final class RecordingListViewModelTests: XCTestCase {
         init(outputURL: URL) { self.outputURL = outputURL }
 
         func render(
-            sourceURL: URL, segments: [ZoomSegment], cuts: [CutSegment], options: ExportVideoOptions,
+            sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], options: ExportVideoOptions,
             progress: @escaping (Double) -> Void
         ) async throws -> URL {
             try Data("zoomed".utf8).write(to: outputURL)
@@ -321,7 +321,7 @@ final class RecordingListViewModelTests: XCTestCase {
         let draftURL = RecordingListViewModel.draftURL(for: originalURL)
         // 预置草稿（用户编辑过的形态）
         try JSONEncoder().encode(
-            EditDocument(cuts: [CutSegment(start: 1, end: 2)], zoomSegments: [])).write(to: draftURL)
+            EditDocument(clips: [EditClip(sourceStart: 1, sourceEnd: 2)], zoomSegments: [])).write(to: draftURL)
         XCTAssertTrue(FileManager.default.fileExists(atPath: draftURL.path), "前置：草稿在盘")
 
         let spy = SpyExportNotifier()
@@ -334,7 +334,7 @@ final class RecordingListViewModelTests: XCTestCase {
 
         let item = makeItem(named: originalName)
         await vm.renderZoom(
-            item, segments: [], cuts: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
+            item, segments: [], clips: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: draftURL.path),
                        "导出成功后草稿已清（保留分支也清）")

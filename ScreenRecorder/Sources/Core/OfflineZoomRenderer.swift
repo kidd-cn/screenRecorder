@@ -194,6 +194,55 @@ enum OfflineZoomRenderer {
         return images.isEmpty ? nil : Filmstrip(interval: interval, images: images)
     }
 
+    /// 音频线性重采样（变速·v1 变调）：按 speed 对源 PCM 帧最近邻抽帧/复制，构造新
+    /// CMSampleBuffer（同格式描述；新时长 = 原时长 ÷ speed）。仅支持 LPCM（渲染器
+    /// 音轨解码输出恒 LPCM——16-bit int 或 32-bit float），其他格式返回 nil（调用方
+    /// 回退 PTS 平移透传）。
+    static func resampledAudioSample(_ sample: CMSampleBuffer, speed: Double,
+                                     outputPTS pts: CMTime) -> CMSampleBuffer? {
+        guard speed > 0, abs(speed - 1) > 1e-6,
+              let blockBuffer = CMSampleBufferGetDataBuffer(sample),
+              let description = CMSampleBufferGetFormatDescription(sample),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee,
+              asbd.mFormatID == kAudioFormatLinearPCM else { return nil }
+        var length = 0
+        var pointer: UnsafeMutablePointer<CChar>?
+        guard CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+                                         totalLengthOut: &length, dataPointerOut: &pointer) == kCMBlockBufferNoErr,
+              let raw = pointer, length > 0 else { return nil }
+        let bytesPerFrame = max(Int(asbd.mBytesPerFrame), 1)
+        let sourceFrames = length / bytesPerFrame
+        guard sourceFrames > 0 else { return nil }
+        let targetFrames = max(Int((Double(sourceFrames) / speed).rounded(.down)), 1)
+        let targetBytes = targetFrames * bytesPerFrame
+        var outBlock: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: targetBytes,
+            blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: targetBytes,
+            flags: 0, blockBufferOut: &outBlock) == kCMBlockBufferNoErr, let outBlock else { return nil }
+        let source = UnsafeMutableRawPointer(raw)
+        for frame in 0..<targetFrames {
+            let sourceFrame = min(Int((Double(frame) * speed).rounded(.down)), sourceFrames - 1)
+            let sourceOffset = sourceFrame * bytesPerFrame
+            let destinationOffset = frame * bytesPerFrame
+            let status = CMBlockBufferReplaceDataBytes(
+                with: source.advanced(by: sourceOffset), blockBuffer: outBlock,
+                offsetIntoDestination: destinationOffset, dataLength: bytesPerFrame)
+            guard status == kCMBlockBufferNoErr else { return nil }
+        }
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: CMTimeValue(targetFrames), timescale: CMTimeScale(asbd.mSampleRate)),
+            presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+        var output: CMSampleBuffer?
+        guard CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault, dataBuffer: outBlock, dataReady: true,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: description,
+            sampleCount: targetFrames, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &output) == noErr,
+            let output else { return nil }
+        return output
+    }
+
     // MARK: - 波形数据（剪映对齐·批次 2：音频波形轨的采样真源）
 
     /// 波形采样配置（每 bucket 的最小/最大 RMS 对；bucketSeconds 由调用方按目标像素率定）。
@@ -363,19 +412,21 @@ enum OfflineZoomRenderer {
 
     // MARK: - 渲染
 
-    /// 录像 → 缩放/剪辑成片 MP4。`segments`/`cuts` 各先经 validate 规整（排序/钳制/
-    /// 去重叠）；段表双空 = 全程恒等直通转码。折叠语义（剪辑 v1，2026-11-21）：全部段
-    /// 在**源时间轴**上——剪除段内的帧/音频样本直接跳过（不进输出），其后样本 PTS 平移
-    /// −其前剪除总量（`EditTimeline.outputSeconds` 折叠真源）；缩放段照常在源时间轴上
-    /// 查找变换，「剔除优先」由跳帧自然成立（交集帧不存在即被剪；完全落入的缩放段自然
-    /// 作废）。剪除段非空 → 输出命名 `_剪辑.mp4`，否则 `_缩放.mp4`。`context` 供
-    /// headless 测试注入软件渲染上下文（缺省 GPU——与实时 PiPCompositor 同口径）。
-    static func render(sourceURL: URL, segments: [ZoomSegment], cuts: [CutSegment] = [],
+    /// 录像 → 缩放/剪辑成片 MP4（剪辑 v2 片段流）。`segments`/`clips` 各先经 validate
+    /// 规整；clips 空 = 全程恒等直通转码。折叠语义：clips 定义成品轨——源帧 PTS t 经
+    /// `EditDocument.outputTime(t)` 映射（裁掉区间 nil = 跳帧；速度 ≠ 1 由映射折算），
+    /// 缩放段照常在源时间轴上查找变换（映射不动源坐标语义）。含剪辑痕迹 → 输出命名
+    /// `_剪辑.mp4`，否则 `_缩放.mp4`。`context` 供 headless 测试注入软件渲染上下文。
+    static func render(sourceURL: URL, segments: [ZoomSegment], clips: [EditClip]? = nil,
                        options: ExportVideoOptions,
                        progress: @escaping (Double) -> Void,
                        context: CIContext = CIContext(options: [.useSoftwareRenderer: false])) async throws -> URL {
         let timeline = ZoomSegment.validate(segments)
-        let cutRanges = CutSegment.validate(cuts)
+        // clips nil = 未剪辑（全程直通，纯缩放渲染兼容）；[] = 无内容保留（全删 →
+        // noRenderableSamples）；非空 = 片段流成品轨。
+        let validatedClips = clips.map { request in
+            EditDocument.validate(EditDocument(clips: request, zoomSegments: [])).clips
+        }
         let push = ExportCore.deduplicatedProgress(progress)
         let asset = AVURLAsset(url: sourceURL)
 
@@ -384,6 +435,9 @@ enum OfflineZoomRenderer {
         }
         let durationSeconds = CMTimeGetSeconds(try await asset.load(.duration))
         guard durationSeconds.isFinite, durationSeconds > 0 else { throw ExportError.emptySource }
+        let editDocument = validatedClips.map { request in
+            EditDocument(clips: request, zoomSegments: [])
+        } ?? EditDocument.initial(duration: durationSeconds)
         let naturalSize = try await videoTrack.load(.naturalSize)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
@@ -425,11 +479,11 @@ enum OfflineZoomRenderer {
             audioOutput = output
         }
 
-        // writer（不 claim；冲突惯例命名保证目标不存在）。剪辑命名分流（含剪除段
+        // writer（不 claim；冲突惯例命名保证目标不存在）。剪辑命名分流（含剪辑痕迹
         // → `_剪辑`；纯缩放段 → 既有 `_缩放`）。
-        let destinationURL = cutRanges.isEmpty
-            ? zoomedDestinationURL(for: sourceURL)
-            : editedDestinationURL(for: sourceURL)
+        let destinationURL = editDocument.hasEdits(sourceDuration: durationSeconds)
+            ? editedDestinationURL(for: sourceURL)
+            : zoomedDestinationURL(for: sourceURL)
         let writer = try AVAssetWriter(url: destinationURL, fileType: .mp4)
         let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: options.codec.avCodecKey,
@@ -463,21 +517,19 @@ enum OfflineZoomRenderer {
         /// 已写入视频帧数（R1 F3 零可解码视频帧防线）
         var appendedVideoFrames = 0
 
-        // MARK: 折叠缝（剪辑 v1）：源时间轴 → 输出时间轴（EditTimeline 折叠真源）
-        /// 源时间是否落在剪除段内（剪除段已 validate：有序无重叠——线性扫描即正确）。
-        func inCut(_ t: Double) -> Bool {
-            cutRanges.contains { $0.start <= t && t < $0.end }
+        // MARK: 片段流映射缝（剪辑 v2）：源时间 → 输出时间（EditDocument 映射真源）
+        /// 源时间的输出 PTS（裁掉区间调用方先跳；60000 网格误差 ≤8µs；速度已折算）。
+        let outDuration = editDocument.outputDuration
+        func outputPTS(_ t: Double) -> CMTime? {
+            editDocument.outputTime(forSourceTime: t).map {
+                CMTime(seconds: $0, preferredTimescale: 60000)
+            }
         }
-        /// 源时间 → 输出 PTS（剪除段内调用方先跳；此处折叠平移，60000 网格误差 ≤8µs）。
-        func outputPTS(_ t: Double) -> CMTime {
-            CMTime(seconds: EditTimeline.outputSeconds(forSourceSeconds: t, cuts: cutRanges) ?? t,
-                   preferredTimescale: 60000)
-        }
-        /// 装配期拉取首个**存活**样本（剪除段内的样本逐个跳过；轨耗尽 → nil）。
+        /// 装配期拉取首个**存活**样本（裁掉区间样本逐个跳过；轨耗尽 → nil）。
         func firstKeptSample(from output: AVAssetReaderOutput) -> CMSampleBuffer? {
             while let sample = output.copyNextSampleBuffer() {
                 let t = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
-                guard t.isFinite, !inCut(t) else { continue }
+                guard t.isFinite, editDocument.outputTime(forSourceTime: t) != nil else { continue }
                 return sample
             }
             return nil
@@ -545,10 +597,10 @@ enum OfflineZoomRenderer {
             // 与 appends 同一折叠缝，「早于锚点兜底跳过」语义不变）；双轨均无存活样本
             //（全片被剪/损坏源）→ R1 F3 防线抛类型化错误，不触达未启动会话的
             // finishWriting
-            let videoFirst = pendingVideoSample.map {
+            let videoFirst = pendingVideoSample.flatMap {
                 outputPTS(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp($0)))
             }
-            let audioFirst = pendingAudioSample.map {
+            let audioFirst = pendingAudioSample.flatMap {
                 outputPTS(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp($0)))
             }
             switch (videoFirst, audioFirst) {
@@ -567,9 +619,9 @@ enum OfflineZoomRenderer {
             // 双轨首样本按折叠后 PTS 序入轨（均 ≥ 锚点）
             switch (pendingVideoSample, pendingAudioSample) {
             case let (v?, a?):
-                if CMTimeCompare(
-                    outputPTS(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(v))),
-                    outputPTS(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(a)))) <= 0 {
+                let vOut = outputPTS(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(v))) ?? .positiveInfinity
+                let aOut = outputPTS(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(a))) ?? .positiveInfinity
+                if CMTimeCompare(vOut, aOut) <= 0 {
                     try await appendVideo(v)
                     try await appendAudio(a)
                 } else {
@@ -636,18 +688,20 @@ enum OfflineZoomRenderer {
         // MARK: 逐帧处理（闭包内嵌，共享 reader/writer/时间线状态）
 
         func appendVideo(_ sample: CMSampleBuffer) async throws {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-            let t = CMTimeGetSeconds(pts)
-            // 剪除段内的帧直接跳过（剪辑 v1 折叠——该帧不进输出）
-            guard !inCut(t) else { return }
+            let t = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            // 裁掉区间的帧直接跳过（片段流映射 nil = 不进成品）
+            guard let outSeconds = editDocument.outputTime(forSourceTime: t) else {
+                pushFrameProgress(nil)
+                return
+            }
             // 早于会话锚点的病态样本兜底跳过（R1 F1——B 帧源解码序首个样本 PTS 未必
             // 最小；不给「早于会话起点的追加」留门。正常源零行为变化）
-            let outPTS = outputPTS(t)
+            let outPTS = CMTime(seconds: outSeconds, preferredTimescale: 60000)
             guard CMTimeCompare(outPTS, sessionAnchor) >= 0 else { return }
             guard let sourceBuffer = CMSampleBufferGetImageBuffer(sample) else { return } // 无像素载荷：跳过
 
             // fps 档（nil/≤0 = 沿用源全帧）：按**源时间轴**等隔丢帧——同一 tick 只保留
-            // 首帧，输出 PTS 折叠平移；首帧恒保留。
+            // 首帧，输出 PTS 经片段流映射平移/折算速度；首帧恒保留。
             if let fps = options.fps, fps > 0 {
                 let tick = Int((t * Double(fps)).rounded(.down))
                 if tick == lastKeptTick {
@@ -657,8 +711,8 @@ enum OfflineZoomRenderer {
                 lastKeptTick = tick
             }
 
-            // 缩放变换（与实时同一真源）：该时刻所在 segment 的进度 → contentTransform
-            //（CI 画布空间 y 向上，bounds = 源可视尺寸——PiPCompositor 同口径）。
+            // 缩放变换（与实时同一真源，源时间轴查找——片段流映射不改源坐标）：该时刻
+            // 所在 segment 的进度 → contentTransform（CI 画布 y 向上，bounds = 源可视尺寸）。
             let zoomTransform = timeline.first(where: { $0.start <= t && t < $0.end }).flatMap { segment in
                 ZoomTransforms.contentTransform(
                     center: segment.center,
@@ -684,20 +738,28 @@ enum OfflineZoomRenderer {
                 throw RenderError.appendFailedVideo(underlying: writer.error)
             }
             appendedVideoFrames += 1
-            pushFrameProgress(t)
+            pushFrameProgress(outSeconds)
         }
 
         func appendAudio(_ sample: CMSampleBuffer) async throws {
-            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-            let t = CMTimeGetSeconds(pts)
-            // 剪除段内的样本直接跳过（剪辑 v1 折叠——音轨跟随视频同缝剪除）
-            guard !inCut(t) else { return }
-            let outPTS = outputPTS(t)
+            let t = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            // 裁掉区间的样本直接跳过（音轨跟随片段流同缝剪除）
+            guard let outSeconds = editDocument.outputTime(forSourceTime: t) else { return }
+            let outPTS = CMTime(seconds: outSeconds, preferredTimescale: 60000)
             guard CMTimeCompare(outPTS, sessionAnchor) >= 0 else { return } // 同 appendVideo 兜底
             guard let input = audioInput else { throw RenderError.cannotAddAudioInput }
             try await waitForReady(input, mediaType: "音频")
-            // PTS 折叠平移（保留原 duration/decodeTime，仅换 presentationTimeStamp）；
-            // 重写失败转类型化错误（正常源不可达）。
+            // 速度 ≠ 1 → 线性重采样（最近邻抽帧/复制——变调 v1，声调保持归 4c）；
+            // 速度 = 1 → PTS 平移原样透传。重写失败转类型化错误（正常源不可达）。
+            let speed = editDocument.speed(atSourceTime: t) ?? 1
+            if abs(speed - 1) > 1e-6,
+               let resampled = OfflineZoomRenderer.resampledAudioSample(
+                sample, speed: speed, outputPTS: outPTS) {
+                guard input.append(resampled) else {
+                    throw RenderError.appendFailedAudio(underlying: writer.error)
+                }
+                return
+            }
             guard let remapped = OfflineZoomRenderer.sampleBuffer(sample, withPresentationTime: outPTS) else {
                 throw RenderError.appendFailedAudio(underlying: writer.error)
             }
@@ -706,8 +768,11 @@ enum OfflineZoomRenderer {
             }
         }
 
-        func pushFrameProgress(_ t: Double) {
-            push(max(0, min(0.95, 0.95 * t / durationSeconds)))
+        /// 进度按**成品时间**推进（速度/裁切折算后；nil = 裁掉区间帧不计）。
+        func pushFrameProgress(_ outputSecond: Double?) {
+            guard let second = outputSecond else { return }
+            push(max(0, min(0.95, 0.95 * second / max(outDuration, 0.001))))
         }
+
     }
 }

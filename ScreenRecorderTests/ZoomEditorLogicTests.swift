@@ -65,36 +65,48 @@ final class ZoomEditorLogicTests: XCTestCase {
             "草稿文件名 = <成片全名>.zoomdraft.json（与成片同目录）")
 
         let document = EditDocument(
-            cuts: [CutSegment(start: 8, end: 9)],
+            clips: [EditClip(sourceStart: 8, sourceEnd: 9)],
             zoomSegments: [
                 ZoomSegment(start: 0.5, end: 2.0, level: 1.6, center: CGPoint(x: 0.25, y: 0.75)),
                 ZoomSegment(start: 3.0, end: 4.5, level: 1.9, center: CGPoint(x: 1.0, y: 0.0)),
             ])
         try vm.saveDraft(document, for: item)
         XCTAssertTrue(FileManager.default.fileExists(atPath: Self.draftURL(for: item).path), "草稿落盘")
-        XCTAssertEqual(vm.loadDraft(for: item), document, "Codable 往返保真（剪除段 + 缩放段）")
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 42.0), document, "Codable 往返保真（片段 + 缩放段）")
+
+        // v1 剪除段草稿迁移：{cuts, zoomSegments} → 波纹折叠为 clips（时长供给迁移）
+        let legacyV1 = try JSONEncoder().encode(LegacyDraftFixture(
+            cuts: [CutSegment(start: 2, end: 4)],
+            zoomSegments: [ZoomSegment(start: 1, end: 1.5, level: 1.6, center: CGPoint(x: 0.5, y: 0.5))]))
+        try legacyV1.write(to: Self.draftURL(for: item))
+        XCTAssertEqual(
+            vm.loadDraft(for: item, sourceDuration: 10.0),
+            EditDocument(
+                clips: [EditClip(sourceStart: 0, sourceEnd: 2), EditClip(sourceStart: 4, sourceEnd: 10)],
+                zoomSegments: [ZoomSegment(start: 1, end: 1.5, level: 1.6, center: CGPoint(x: 0.5, y: 0.5))]),
+            "v1 剪除段 → 片段流迁移")
 
         // 存储闸：野值存入 → 落盘前 validate（level 就近钳档、center 钳 0…1、剪除段排序）
         try vm.saveDraft(EditDocument(
-            cuts: [CutSegment(start: 5, end: 6), CutSegment(start: 2, end: 1)],
+            clips: [EditClip(sourceStart: 5, sourceEnd: 6), EditClip(sourceStart: 2, sourceEnd: 1)],
             zoomSegments: [ZoomSegment(start: 5, end: 6, level: 9.9, center: CGPoint(x: 3, y: -1))]),
             for: item)
         XCTAssertEqual(
-            vm.loadDraft(for: item),
+            vm.loadDraft(for: item, sourceDuration: 42.0),
             EditDocument(
-                cuts: [CutSegment(start: 5, end: 6)],
+                clips: [EditClip(sourceStart: 5, sourceEnd: 6)],
                 zoomSegments: [ZoomSegment(start: 5, end: 6, level: 1.9, center: CGPoint(x: 1.0, y: 0.0))]),
-            "存前过 validate：野值不落盘（x=3 钳 1.0、y=-1 钳 0.0；倒序剪除段丢弃）")
+            "存前过 validate：野值不落盘（x=3 钳 1.0、y=-1 钳 0.0；倒序 clip 丢弃）")
 
         // 读取闸：手改草稿野值（外部编辑形态）→ 读出规整（再用前的闸）
         let wild = try JSONEncoder().encode(EditDocument(
-            cuts: [],
+            clips: [],
             zoomSegments: [ZoomSegment(start: 1, end: 2, level: 0.1, center: CGPoint(x: -5, y: 5))]))
         try wild.write(to: Self.draftURL(for: item))
         XCTAssertEqual(
-            vm.loadDraft(for: item),
+            vm.loadDraft(for: item, sourceDuration: 42.0),
             EditDocument(
-                cuts: [],
+                clips: [],
                 zoomSegments: [ZoomSegment(start: 1, end: 2, level: 1.35, center: CGPoint(x: 0, y: 1))]),
             "读出过 validate：手改野值归一")
 
@@ -103,19 +115,19 @@ final class ZoomEditorLogicTests: XCTestCase {
             [ZoomSegment(start: 1, end: 2, level: 1.6, center: CGPoint(x: 0.5, y: 0.5))])
         try legacy.write(to: Self.draftURL(for: item))
         XCTAssertEqual(
-            vm.loadDraft(for: item),
+            vm.loadDraft(for: item, sourceDuration: 42.0),
             EditDocument(
-                cuts: [],
+                clips: [],
                 zoomSegments: [ZoomSegment(start: 1, end: 2, level: 1.6, center: CGPoint(x: 0.5, y: 0.5))]),
             "旧格式回退：缩放段保留")
 
         // 坏草稿（非 JSON）→ 空文档不抛（按无草稿开新编辑）
         try Data("not json".utf8).write(to: Self.draftURL(for: item))
-        XCTAssertEqual(vm.loadDraft(for: item), EditDocument.empty, "坏草稿归空文档")
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 42.0), EditDocument.empty, "坏草稿归空文档")
 
         // 无草稿 → 空文档
         try FileManager.default.removeItem(at: Self.draftURL(for: item))
-        XCTAssertEqual(vm.loadDraft(for: item), EditDocument.empty, "缺草稿归空文档")
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 42.0), EditDocument.empty, "缺草稿归空文档")
     }
 
     /// 成片删除时草稿随删（brief 钉定）：挂进 RecordingListViewModel 现有 delete 路径。
@@ -124,7 +136,7 @@ final class ZoomEditorLogicTests: XCTestCase {
         let item = try writeMovie(named: "录屏_2026-10-30_10-00-00.mp4")
         try vm.saveDraft(
             EditDocument(
-                cuts: [],
+                clips: [],
                 zoomSegments: [ZoomSegment(start: 0, end: 1, level: 1.6, center: CGPoint(x: 0.5, y: 0.5))]),
             for: item)
         await vm.refresh()
@@ -136,7 +148,7 @@ final class ZoomEditorLogicTests: XCTestCase {
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: Self.draftURL(for: item).path),
             "草稿随成片删除")
-        XCTAssertEqual(vm.loadDraft(for: item), EditDocument.empty, "删除后再读为空文档")
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 42.0), EditDocument.empty, "删除后再读为空文档")
     }
 
     // MARK: - 预估大小公式（源码率 × 有效时长 × 编码系数）
@@ -190,7 +202,7 @@ final class ZoomEditorLogicTests: XCTestCase {
             model.segments,
             [ZoomSegment(start: 1.0, end: 3.0, level: 1.6, center: CGPoint(x: 0.5, y: 0.5))])
         XCTAssertEqual(model.selectedIndex, 0, "新增段即选中")
-        XCTAssertEqual(vm.loadDraft(for: item).zoomSegments, model.segments, "落库即存草稿")
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 42.0).zoomSegments, model.segments, "落库即存草稿")
 
         // 调档：野档位 2.5 → 就近钳 1.9
         model.setLevel(at: 0, level: 2.5)
@@ -228,7 +240,7 @@ final class ZoomEditorLogicTests: XCTestCase {
         XCTAssertNil(model.selectedIndex, "删除后清选中")
 
         // 终态草稿与内存一致
-        XCTAssertEqual(vm.loadDraft(for: item).zoomSegments, model.segments)
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 42.0).zoomSegments, model.segments)
     }
 
     // MARK: - 缩放渲染编排（单飞门 + 进度 hop + 编排边界 validate + 自动入列）
@@ -402,7 +414,7 @@ private final class GatedZoomRenderer: ZoomRendering, @unchecked Sendable {
     }
 
     func render(
-        sourceURL: URL, segments: [ZoomSegment], cuts: [CutSegment], options: ExportVideoOptions,
+        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], options: ExportVideoOptions,
         progress: @escaping (Double) -> Void
     ) async throws -> URL {
         record(segments)
@@ -542,7 +554,7 @@ private final class HopCaptureZoomRenderer: ZoomRendering, @unchecked Sendable {
     }
 
     func render(
-        sourceURL: URL, segments: [ZoomSegment], cuts: [CutSegment], options: ExportVideoOptions,
+        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], options: ExportVideoOptions,
         progress: @escaping (Double) -> Void
     ) async throws -> URL {
         captureForward(progress)
@@ -589,4 +601,11 @@ private final class SpyExportNotifier: ExportNotifying {
         failureMessagesStorage.append(message)
         lock.unlock()
     }
+}
+
+
+/// v1 草稿形态（迁移钉测专用——与生产 LegacyV1Document 同构）。
+private struct LegacyDraftFixture: Codable {
+    var cuts: [CutSegment]
+    var zoomSegments: [ZoomSegment]
 }

@@ -210,7 +210,8 @@ final class OfflineZoomRendererTests: XCTestCase {
         let outputURL = try await OfflineZoomRenderer.render(
             sourceURL: sourceURL,
             segments: [],
-            cuts: [CutSegment(start: 0.25, end: 0.75)],
+            clips: [EditClip(sourceStart: 0, sourceEnd: 0.25),
+                    EditClip(sourceStart: 0.75, sourceEnd: 2.0)],
             options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
             progress: { _ in },
             context: CIContext(options: [.useSoftwareRenderer: true]))
@@ -261,7 +262,7 @@ final class OfflineZoomRendererTests: XCTestCase {
             _ = try await OfflineZoomRenderer.render(
                 sourceURL: sourceURL,
                 segments: [],
-                cuts: [CutSegment(start: 0, end: 2)],
+                clips: [], // 空片段 = 无内容保留 → noRenderableSamples
                 options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
                 progress: { _ in },
                 context: CIContext(options: [.useSoftwareRenderer: true]))
@@ -276,6 +277,28 @@ final class OfflineZoomRendererTests: XCTestCase {
             FileManager.default.fileExists(
                 atPath: OfflineZoomRenderer.editedDestinationURL(for: sourceURL).path),
             "失败路径不留半截成片")
+    }
+
+    /// 变速渲染钉测（剪辑 v2·批次 4a）：2s 夹具全段 2× 速 → 成片 ≈1.0s、命名 `_剪辑.mp4`、
+    /// 视频轨时长折算（音频线性重采样随速度同折——真机听感验收归批次验收清单）。
+    func testRenderWithSpeedHalvesDurationAndRenames() async throws {
+        let sourceURL = directory.appendingPathComponent("变速夹具源.mp4")
+        try await makeFixtureVideo(at: sourceURL)
+        let outputURL = try await OfflineZoomRenderer.render(
+            sourceURL: sourceURL,
+            segments: [],
+            clips: [EditClip(sourceStart: 0, sourceEnd: 2.0, speed: 2)],
+            options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+            progress: { _ in },
+            context: CIContext(options: [.useSoftwareRenderer: true]))
+        XCTAssertEqual(outputURL.lastPathComponent, "变速夹具源_剪辑.mp4", "变速 → `_剪辑` 命名")
+        let output = AVURLAsset(url: outputURL)
+        let outputDuration = try await output.load(.duration).seconds
+        XCTAssertEqual(outputDuration, 1.0, accuracy: 0.05, "2× 速 → 时长减半")
+        let outputVideoTracks = try await output.loadTracks(withMediaType: .video)
+        let outputVideo = try XCTUnwrap(outputVideoTracks.first)
+        let videoDuration = try await outputVideo.load(.timeRange).duration.seconds
+        XCTAssertEqual(videoDuration, 1.0, accuracy: 0.05, "视频轨时长按速度折算")
     }
 
     // MARK: - R1 修复钉测（会话锚点 / 损坏源防线）

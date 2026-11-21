@@ -106,30 +106,31 @@ enum ZoomEditorLogic {
 final class ZoomEditorModel: ObservableObject {
     /// 编辑的成片（预估大小取其 sizeBytes；播放/草稿/导出均挂其 URL）。
     let item: RecordingFileMetadata
-    /// 源片播放器（AVPlayer 预览真源——时间线播放头由其 periodic 观察器驱动）。
+    /// 源片播放器（AVPlayer 预览真源——播放头在**成品时间轴**，periodic 观察器每拍
+    /// 校正：成品时间 → 源时间映射，播放器实际位置偏离映射源时间 > 0.15s 即校正——
+    /// clip 接缝处的源跳变由此实现，时间线无空洞、播放天然连续）。
     let player: AVPlayer
     private let listViewModel: RecordingListViewModel
     private var timeObserver: Any?
-    /// 剪除段边界观察器（2026-11-21 用户要求「播放跳过已删片段」）：播放头穿过任一
-    /// 剪除段起点即精确跳到段尾（0.25s periodic 观察器留作兜底——边界观察是主通道，
-    /// 无残帧）。剪除段每次变化重挂（rearm）。
-    private var cutBoundaryObserver: Any?
 
     /// 分段表（已过 validate：有序、档位/中心合法、无重叠）——唯一写入口是 `applyEdit`。
     @Published private(set) var segments: [ZoomSegment] = []
-    /// 剪除段表（剪辑 v1，已过 validate：有序无重叠）——唯一写入口是 `applyCutEdit`。
-    @Published private(set) var cuts: [CutSegment] = []
+    /// 片段流（剪辑 v2 剪映同构：时间线即成品轨，波纹删除/接缝/变速作用于此）——
+    /// 唯一写入口是 `applyClipEdit` 统一闸。
+    @Published private(set) var clips: [EditClip] = []
+    /// 选中的 clip 下标（⌘+点击选中 → 速度面板；validate 重排后按值回找）。
+    @Published var selectedClipIndex: Int?
     /// 选中段下标（行点击/时间线点击选中；validate 重排后按编辑后段值回找）。
     @Published var selectedIndex: Int?
-    /// 播放头（成片时间轴秒；periodic 观察器 0.25s 步进；播放中自动跳过剪除段）。
+    /// 播放头（**成品时间轴**秒；periodic 观察器 0.25s 步进；播放中按映射校正源位置）。
     @Published private(set) var playhead: TimeInterval = 0
     @Published private(set) var isPlaying = false
     /// 源时长（`.task` 异步补齐；0 = 未就绪——时间线比例尺/预估大小就绪前显示占位）。
     @Published private(set) var sourceDuration: TimeInterval = 0
     /// 拖端点期间的实时预览（未落库；`onEnded` 才经统一闸 commit——拖拽中不逐 tick 写盘）。
     @Published var dragPreview: DragPreview?
-    /// 剪除段拖拽预览（新建/调端点共用；nil = 无剪除段拖拽在途）。
-    @Published var cutDragPreview: CutDragPreview?
+    /// 波纹删除拖选预览（成品时间区间；画布绘制红罩，松手提交 cutOutputRange）。
+    @Published var ripplePreview: (TimeInterval, TimeInterval)?
 
     // MARK: 时间线缩放/平移（2026-11-21 剪映专业版对齐·批次 1；视图态寄模型——画布经
     // objectWillChange 订阅重绘，SwiftUI 控件直绑）
@@ -205,13 +206,6 @@ final class ZoomEditorModel: ObservableObject {
         let end: TimeInterval
     }
 
-    /// 剪除段拖拽预览：`index` nil = 空白处新建拖选在途。
-    struct CutDragPreview {
-        let index: Int?
-        let start: TimeInterval
-        let end: TimeInterval
-    }
-
     // 导出参数档位（Picker 直绑档位集合，UI 不另造档——GIF/压缩小窗同纪律）
     @Published var fpsChoice: FPSChoice = .source
     @Published var heightChoice: HeightChoice = .source
@@ -249,18 +243,29 @@ final class ZoomEditorModel: ObservableObject {
         self.item = item
         self.listViewModel = listViewModel
         self.player = AVPlayer(url: item.url)
-        let document = listViewModel.loadDraft(for: item) // 开窗即续上次草稿（无草稿 = 空文档新编辑）
+        let document = listViewModel.loadDraft(for: item, sourceDuration: 0) // 时长就绪后补初始 clip
         segments = document.zoomSegments
-        cuts = document.cuts
+        clips = document.clips
         mountTimeObserver()
-        rearmCutBoundaryObservers()
     }
 
     /// 源时长补齐（视图 `.task` 调用）：时间线比例尺 + 预估大小 + 新增段贴界的数据面。
+    /// 片段流（v2）：空文档（含 v1 草稿迁移场景——迁移需要时长）在时长就绪后重读草稿
+    /// 或置单 clip 全程。
     func loadMediaInfo() async {
         let seconds = try? await AVURLAsset(url: item.url).load(.duration).seconds
         guard let seconds, seconds.isFinite, seconds > 0 else { return }
         sourceDuration = seconds
+        if clips.isEmpty {
+            let document = listViewModel.loadDraft(for: item, sourceDuration: seconds)
+            if document.clips.isEmpty {
+                clips = EditDocument.initial(duration: seconds).clips
+            } else {
+                clips = document.clips
+                segments = document.zoomSegments
+            }
+            saveDocument()
+        }
     }
 
     /// 关窗清理（窗口 opener 的 willClose 通知调用）：停播 + 摘除 periodic/边界观察器
@@ -270,37 +275,6 @@ final class ZoomEditorModel: ObservableObject {
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
-        }
-        removeCutBoundaryObservers()
-    }
-
-    // MARK: 剪除段边界观察（播放跳剪主通道）
-
-    /// 重挂边界观察器：每个剪除段起点一个边界，播放头穿过即跳到段尾（播放中）。
-    /// 剪除段每次增删/调端点后调用（幂等：先摘后挂）。
-    private func rearmCutBoundaryObservers() {
-        removeCutBoundaryObservers()
-        guard !cuts.isEmpty else { return }
-        let boundaries = cuts.map { NSValue(time: CMTime(seconds: $0.start, preferredTimescale: 600)) }
-        cutBoundaryObserver = player.addBoundaryTimeObserver(
-            forTimes: boundaries, queue: .main
-        ) { [weak self] in
-            Task { @MainActor in
-                guard let self, self.player.timeControlStatus == .playing else { return }
-                let current = self.player.currentTime().seconds
-                let skipped = EditTimeline.skipCuts(from: current, cuts: self.cuts)
-                if skipped > current {
-                    self.player.seek(to: CMTime(seconds: skipped, preferredTimescale: 600))
-                    self.playhead = skipped
-                }
-            }
-        }
-    }
-
-    private func removeCutBoundaryObservers() {
-        if let cutBoundaryObserver {
-            player.removeTimeObserver(cutBoundaryObserver)
-            self.cutBoundaryObserver = nil
         }
     }
 
@@ -317,26 +291,27 @@ final class ZoomEditorModel: ObservableObject {
         }
     }
 
-    func seek(to time: TimeInterval) {
-        var clamped = sourceDuration > 0 ? min(max(0, time), sourceDuration) : max(0, time)
-        // 点击落在剪除段内 → 跳到段尾（预览「所见即导出所得」——剪除区不可停留）。
-        clamped = EditTimeline.skipCuts(from: clamped, cuts: cuts)
-        player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
-        playhead = clamped // seek 完成前的即时反馈（观察器随后校准）
-    }
-
-    /// 原始跳转（不避让剪除段，2026-11-21 用户要求「拖动时间线视频跟随」）：拖动扫查
-    /// 时预览逐点跟随光标——光标在剪除段内也照实显示源画面（扫查语义 ≠ 播放语义）。
-    func scrub(to time: TimeInterval) {
-        let clamped = sourceDuration > 0 ? min(max(0, time), sourceDuration) : max(0, time)
-        player.seek(to: CMTime(seconds: clamped, preferredTimescale: 600))
+    func seek(to outputTime: TimeInterval) {
+        let clamped = outputDuration > 0 ? min(max(0, outputTime), outputDuration) : max(0, outputTime)
+        // 成品时间 → 源时间 seek（预览「所见即导出所得」——时间线即成品轨）。
+        if let source = clipsDocument.sourceTime(forOutputTime: clamped) {
+            player.seek(to: CMTime(seconds: source, preferredTimescale: 600))
+        }
         playhead = clamped
     }
 
-    /// 播放头落位：落在剪除段内则跳到段尾（seek 的避让语义）。起播前与剪除段提交后调用。
+    /// 原始跳转（片段流下与 seek 同义——时间线无空洞；保留名号供画布拖拽扫查）。
+    func scrub(to outputTime: TimeInterval) {
+        seek(to: outputTime)
+    }
+
+    /// 播放头落位（片段流下恒等钳制；保留名号供拖拽提交）。
     func settlePlayhead() {
         seek(to: playhead)
     }
+
+    /// 当前 clips 的文档面（映射/编辑操作真源；画布接缝换算只读访问）。
+    var clipsDocument: EditDocument { EditDocument(clips: clips, zoomSegments: segments) }
 
     // MARK: 分段编辑（唯一写入口：全部经 ZoomEditorLogic.applyEdit 统一闸）
 
@@ -382,118 +357,51 @@ final class ZoomEditorModel: ObservableObject {
         selectedIndex = nil
     }
 
-    // MARK: 剪除段编辑（剪辑 v1；唯一写入口：applyCutEdit 统一闸）
+    // MARK: 片段流编辑（剪辑 v2 剪映同构；唯一写入口：applyClipEdit 统一闸）
 
-    /// 提交空白处拖选的新建剪除段：先过 `EditTimeline.trimCutProposal` 修剪闸（钳时长/
-    /// 避让既有剪除段/最短时长），过闸即落库；不足最短时长 → 静默丢弃（本次拖选无效）。
-    func commitCutCreation(anchor: TimeInterval, start: TimeInterval, end: TimeInterval) {
-        guard let trimmed = EditTimeline.trimCutProposal(
-            anchor: anchor, proposedStart: start, proposedEnd: end,
-            existingCuts: cuts, sourceDuration: sourceDuration) else { return }
-        applyCutEdit { $0.append(CutSegment(start: trimmed.start, end: trimmed.end)) }
+    /// 波纹删除（成品时间轴 [lower, upper)）：跨接处 clip 拆/缩/消，其余接合。
+    func cutOutputRange(lower: TimeInterval, upper: TimeInterval) {
+        applyClipEdit { $0 = $0.removingOutputRange(lower: lower, upper: upper) }
     }
 
-    /// 拖剪除段端点提交：先钳邻居剪除段边界与源时长（保留先者语义下跨界拖拽不得被丢）
-    /// 再走统一闸落库。
-    func commitCutDrag(index: Int, start: TimeInterval, end: TimeInterval) {
-        guard cuts.indices.contains(index) else { return }
-        let durationBound = sourceDuration > 0 ? sourceDuration : .infinity
-        let clamped = ZoomEditorLogic.clampedDrag(
-            proposedStart: start, proposedEnd: end,
-            previousEnd: index > 0 ? cuts[index - 1].end : nil,
-            nextStart: min(index + 1 < cuts.count ? cuts[index + 1].start : .infinity, durationBound))
-        updateCut(at: index) { $0.start = min(clamped.start, durationBound); $0.end = min(clamped.end, durationBound) }
+    /// 接缝移动（seamIndex ∈ 0...clips.count；toSourceTime 为目标源时间）。
+    func moveSeam(at seamIndex: Int, toSourceTime source: TimeInterval) {
+        applyClipEdit { $0 = $0.movingSeam(at: seamIndex, toSourceTime: source) ?? $0 }
     }
 
-    /// 删除剪除段（时间线右键/双击出口）。
-    func removeCut(at index: Int) {
-        guard cuts.indices.contains(index) else { return }
-        applyCutEdit { $0.remove(at: index) }
+    /// 选中 clip 调速（野速度由 validate 钳合法区间）。
+    func setClipSpeed(at index: Int, speed: Double) {
+        updateClip(at: index) { $0.speed = speed }
     }
 
-    /// 时间线上第 `index` 剪除段的显示区间（拖拽预览优先）。
-    func displayedCutRange(at index: Int) -> (start: TimeInterval, end: TimeInterval) {
-        guard cuts.indices.contains(index) else { return (0, 0) }
-        if let preview = cutDragPreview, preview.index == index {
-            return (preview.start, preview.end)
-        }
-        return (cuts[index].start, cuts[index].end)
-    }
+    /// 成片总时长（摘要行/比例尺面——时间线即成品轨）。
+    var outputDuration: TimeInterval { clipsDocument.outputDuration }
 
-    /// 有效剪除总量（秒，估算面——已钳进源时长）。
+    /// 源裁切总量（源时长 − clips 覆盖源长；摘要行展示）。
     var totalCutSeconds: TimeInterval {
-        EditTimeline.totalCutSeconds(cuts: cuts, duration: sourceDuration)
+        max(sourceDuration - clips.reduce(0) { $0 + ($1.sourceEnd - $1.sourceStart) }, 0)
     }
 
-    /// 剪除后的导出时长（秒；源时长未就绪 → 0）。
-    var exportDuration: TimeInterval {
-        max(sourceDuration - totalCutSeconds, 0)
+    /// 导出时长（= 成片时长）。
+    var exportDuration: TimeInterval { outputDuration }
+
+    /// 是否含剪辑痕迹（导出名分流）。
+    var hasEdits: Bool { clipsDocument.hasEdits(sourceDuration: sourceDuration) }
+
+    /// 缩放段映射到成品时间轴（画布铺排用）。
+    var mappedZoomSegments: [ZoomSegment] { clipsDocument.mappedZoomSegments() }
+
+    /// 播放头所在/成品时间所在 clip 的下标（选中面板兜底）。
+    func clipIndex(atOutputTime t: TimeInterval) -> Int? {
+        var cursor: TimeInterval = 0
+        for (index, clip) in clips.enumerated() {
+            let span = clip.displayDuration
+            if t < cursor + span { return index }
+            cursor += span
+        }
+        return nil
     }
 
-    // MARK: 撤销/重做（2026-11-21 剪映对齐：⌘Z / ⇧⌘Z；快照栈——EditDocument 值语义）
-
-    private var undoStack: [EditDocument] = []
-    private var redoStack: [EditDocument] = []
-    /// 栈深上限（防长会话无界增长；超限弃最旧）。
-    private static let undoLimit = 100
-    @Published private(set) var canUndo = false
-    @Published private(set) var canRedo = false
-
-    /// 变更前快照（applyEdit/applyCutEdit 入口调用；清 redo 分支）。
-    private func pushUndo() {
-        undoStack.append(currentDocument())
-        if undoStack.count > Self.undoLimit { undoStack.removeFirst() }
-        redoStack.removeAll()
-        syncUndoFlags()
-    }
-
-    private func currentDocument() -> EditDocument {
-        EditDocument(cuts: cuts, zoomSegments: segments)
-    }
-
-    private func applyDocument(_ document: EditDocument) {
-        segments = document.zoomSegments
-        cuts = document.cuts
-        saveDocument()
-        rearmCutBoundaryObservers()
-        selectedIndex = nil
-    }
-
-    func undo() {
-        guard let previous = undoStack.popLast() else { return }
-        redoStack.append(currentDocument())
-        applyDocument(previous)
-        syncUndoFlags()
-    }
-
-    func redo() {
-        guard let next = redoStack.popLast() else { return }
-        undoStack.append(currentDocument())
-        applyDocument(next)
-        syncUndoFlags()
-    }
-
-    private func syncUndoFlags() {
-        canUndo = !undoStack.isEmpty
-        canRedo = !redoStack.isEmpty
-    }
-
-    // MARK: 键盘工作流（剪映对齐：空格播放/←→ 逐帧/Home End 跳转；监视器在 opener）
-
-    /// 逐帧步进（缺省帧率 1/30s；shift 步进由调用方换算秒）。
-    func stepFrames(_ count: Int) {
-        scrub(to: playhead + TimeInterval(count) / 30.0)
-    }
-
-    func stepSeconds(_ seconds: TimeInterval) {
-        scrub(to: playhead + seconds)
-    }
-
-    /// 播放头时间码（剪映同款 HH:MM:SS:FF @30）。
-    var playheadTimecode: String { ZoomTimelineGeometry.timecode(playhead) }
-
-    /// 源时长时间码。
-    var sourceDurationTimecode: String { ZoomTimelineGeometry.timecode(sourceDuration) }
 
     /// 时间线上第 `index` 段的显示区间（拖拽预览优先——预览未落库，仅供绘制）。
     func displayedRange(at index: Int) -> (start: TimeInterval, end: TimeInterval) {
@@ -520,7 +428,7 @@ final class ZoomEditorModel: ObservableObject {
     /// 在 `renderZoom`）；窗口保持开启，进度条展示渲染进度。剪除段随编排传入（渲染侧
     /// 折叠时间线 + 命名分流 `_剪辑.mp4`）。
     func export() {
-        Task { await listViewModel.renderZoom(item, segments: segments, cuts: cuts, options: exportOptions) }
+        Task { await listViewModel.renderZoom(item, segments: segments, clips: clips, options: exportOptions) }
     }
 
     /// 统一闸执行点：修改 → validate → 落库 → 草稿即时存盘（try? 尽力而为——草稿是
@@ -533,18 +441,83 @@ final class ZoomEditorModel: ObservableObject {
 
     /// 剪除段统一闸：修改 → `CutSegment.validate` → 落库 → 草稿即时存盘（同 applyEdit 纪律）
     /// → 边界观察器重挂（播放跳剪主通道跟随最新剪除段）。
-    private func applyCutEdit(_ edit: (inout [CutSegment]) -> Void) {
-        pushUndo()
-        var next = cuts
-        edit(&next)
-        cuts = CutSegment.validate(next)
+    // MARK: 撤销/重做（快照栈——EditDocument 值语义；⌘Z / ⇧⌘Z + 工具行按钮）
+
+    private var undoStack: [EditDocument] = []
+    private var redoStack: [EditDocument] = []
+    /// 栈深上限（防长会话无界增长；超限弃最旧）。
+    private static let undoLimit = 100
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+
+    /// 变更前快照（applyEdit/applyClipEdit 入口调用；清 redo 分支）。
+    private func pushUndo() {
+        undoStack.append(currentDocument())
+        if undoStack.count > Self.undoLimit { undoStack.removeFirst() }
+        redoStack.removeAll()
+        syncUndoFlags()
+    }
+
+    private func currentDocument() -> EditDocument {
+        EditDocument(clips: clips, zoomSegments: segments)
+    }
+
+    private func applyDocument(_ document: EditDocument) {
+        segments = document.zoomSegments
+        clips = document.clips
         saveDocument()
-        rearmCutBoundaryObservers()
+        selectedClipIndex = nil
+        selectedIndex = nil
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(currentDocument())
+        applyDocument(previous)
+        syncUndoFlags()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(currentDocument())
+        applyDocument(next)
+        syncUndoFlags()
+    }
+
+    private func syncUndoFlags() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    // MARK: 键盘工作流（空格/←→/Home/End 路由在 opener；步进动作在此）
+
+    /// 逐帧步进（缺省帧率 1/30s）。
+    func stepFrames(_ count: Int) {
+        scrub(to: playhead + TimeInterval(count) / 30.0)
+    }
+
+    func stepSeconds(_ seconds: TimeInterval) {
+        scrub(to: playhead + seconds)
+    }
+
+    /// 播放头时间码（剪映同款 HH:MM:SS:FF @30）。
+    var playheadTimecode: String { ZoomTimelineGeometry.timecode(playhead) }
+    /// 成片时长时间码。
+    var durationTimecode: String { ZoomTimelineGeometry.timecode(outputDuration) }
+
+    private func applyClipEdit(_ edit: (inout EditDocument) -> Void) {
+        pushUndo()
+        var document = clipsDocument
+        edit(&document)
+        let validated = EditDocument.validate(document)
+        clips = validated.clips
+        segments = validated.zoomSegments
+        saveDocument()
     }
 
     /// 草稿落盘（两段表合一文档；尽力而为）。
     private func saveDocument() {
-        try? listViewModel.saveDraft(EditDocument(cuts: cuts, zoomSegments: segments), for: item)
+        try? listViewModel.saveDraft(EditDocument(clips: clips, zoomSegments: segments), for: item)
     }
 
     /// 定点修改：对旧段拷贝先算出**编辑后期望值**，validate 后按期望值回找选中下标
@@ -561,9 +534,15 @@ final class ZoomEditorModel: ObservableObject {
     }
 
     /// 剪除段定点修改（剪除段无选中概念，仅统一闸 + 防越界）。
-    private func updateCut(at index: Int, mutate: (inout CutSegment) -> Void) {
-        guard cuts.indices.contains(index) else { return }
-        applyCutEdit { mutate(&$0[index]) }
+    /// 片段定点修改（validate 后按值回找选中下标）。
+    private func updateClip(at index: Int, mutate: (inout EditClip) -> Void) {
+        guard clips.indices.contains(index) else { return }
+        var expected = clips[index]
+        mutate(&expected)
+        applyClipEdit { mutate(&$0.clips[index]) }
+        if let newIndex = clips.firstIndex(of: expected) {
+            selectedClipIndex = newIndex
+        }
     }
 
     /// 播放头驱动：主队列 periodic 观察器（0.25s 步进）。回调为 AVFoundation @Sendable
@@ -576,13 +555,15 @@ final class ZoomEditorModel: ObservableObject {
         ) { [weak self] time in
             Task { @MainActor in
                 guard let self else { return }
+                // 成品轴播放头：播放中把播放器实际位置校正到「成品时间映射的源时间」
+                //（clip 接缝处源跳变由此实现——映射连续、时间线无空洞）。
                 var seconds = time.seconds
-                // 播放中进入剪除段 → 跳到段尾（预览「跳过剔除段连续播放」，链式跳）。
-                if self.player.timeControlStatus == .playing {
-                    let skipped = EditTimeline.skipCuts(from: seconds, cuts: self.cuts)
-                    if skipped > seconds {
-                        self.player.seek(to: CMTime(seconds: skipped, preferredTimescale: 600))
-                        seconds = skipped
+                if self.player.timeControlStatus == .playing,
+                   seconds <= self.outputDuration,
+                   let mappedSource = self.clipsDocument.sourceTime(forOutputTime: seconds) {
+                    let actual = self.player.currentTime().seconds
+                    if actual.isFinite, abs(actual - mappedSource) > 0.15 {
+                        self.player.seek(to: CMTime(seconds: mappedSource, preferredTimescale: 600))
                     }
                 }
                 self.playhead = seconds
@@ -625,12 +606,10 @@ struct ZoomEditorView: View {
             OmiCard {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
-                        if !model.cuts.isEmpty {
-                            // 剪除摘要（剪辑 v1）：段数 + 总量 + 导出时长（估算面）。
-                            Text("已剪除 \(model.cuts.count) 段 · 共 \(String(format: "%.1f", model.totalCutSeconds))s · 导出时长 ≈ \(String(format: "%.1f", model.exportDuration))s")
-                                .font(.footnote.weight(.medium))
-                                .foregroundStyle(OmiStyle.subtleText)
-                        }
+                        // 剪辑摘要（剪辑 v2）：片段数 + 源裁切量 + 成片时长。
+                        Text("共 \(model.clips.count) 段 · 源裁切 \(String(format: "%.1f", model.totalCutSeconds))s · 成片 ≈ \(String(format: "%.1f", model.exportDuration))s")
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(OmiStyle.subtleText)
                         Spacer()
                         // 缩放控制（剪映对齐·批次 1）：−/+ 步进 ×2、滑杆 1…200、适应复位。
                         Button {
@@ -663,13 +642,14 @@ struct ZoomEditorView: View {
                     }
                     ZoomTimelineStrip(model: model)
                         .frame(height: 64) // 时间线条高（旧 64pt；圆角由画布 layer 自裁）
-                    Text("空白处按住拖选 = 剪除该段（红色块）；拖到段边/播放头附近出现黄色竖线 = 磁吸咬合；点空白 = 跳播；红块双击删除；⌘+滚轮缩放；空格播放，←→ 逐帧，⌘Z 撤销。")
+                    Text("空白处按住拖选 = 波纹删除（时间线即时接合，⌘Z 撤销）；拖白色接缝线 = 修剪两侧；⌘+点击选段调速；拖到段边出现黄线 = 磁吸咬合；空格播放，←→ 逐帧。")
                         .font(.caption2)
                         .foregroundStyle(OmiStyle.faintText)
                 }
             }
             OmiCard { segmentSection }
             selectedSegmentSection
+            selectedClipSection
             OmiCard { exportSection }
         }
         .padding(16)
@@ -691,7 +671,7 @@ struct ZoomEditorView: View {
                       systemImage: model.isPlaying ? "pause.fill" : "play.fill")
             }
             // 时间码（剪映同款 HH:MM:SS:FF @30）。
-            Text("\(model.playheadTimecode) / \(model.sourceDurationTimecode)")
+            Text("\(model.playheadTimecode) / \(model.durationTimecode)")
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(OmiStyle.subtleText)
             Spacer()
@@ -763,12 +743,44 @@ struct ZoomEditorView: View {
         }
     }
 
+    // MARK: 选中 clip 速度面板（剪映对齐·⌘+点击选中）
+
+    @ViewBuilder
+    private var selectedClipSection: some View {
+        if let index = model.selectedClipIndex, model.clips.indices.contains(index) {
+            OmiCard {
+                HStack(spacing: 16) {
+                    Text("片段 \(index + 1)")
+                        .font(.subheadline.weight(.semibold))
+                    Picker("速度", selection: Binding(
+                        get: { model.clips[index].speed },
+                        set: { model.setClipSpeed(at: index, speed: $0) })) {
+                        Text("0.5×").tag(0.5)
+                        Text("1×").tag(1.0)
+                        Text("1.25×").tag(1.25)
+                        Text("1.5×").tag(1.5)
+                        Text("2×").tag(2.0)
+                        Text("3×").tag(3.0)
+                    }
+                    .frame(width: 120)
+                    Text("时长 \(String(format: "%.1f", model.clips[index].displayDuration))s")
+                        .font(.footnote)
+                        .foregroundStyle(OmiStyle.subtleText)
+                    Spacer()
+                    Button("取消选中") { model.selectedClipIndex = nil }
+                        .buttonStyle(.plain)
+                        .font(.footnote)
+                }
+            }
+        }
+    }
+
     // MARK: 导出参数 + 预估 + 进度
 
     private var exportSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("导出").font(.headline)
-            Text("输出：\(viewModel.suggestedEditedDestinationName(for: model.item, hasCuts: !model.cuts.isEmpty))（与源同目录）")
+            Text("输出：\(viewModel.suggestedEditedDestinationName(for: model.item, hasEdits: model.hasEdits))（与源同目录）")
                 .font(.footnote)
                 .foregroundStyle(OmiStyle.subtleText)
             HStack(spacing: 16) {
