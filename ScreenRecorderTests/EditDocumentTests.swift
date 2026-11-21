@@ -174,14 +174,10 @@ final class EditDocumentTests: XCTestCase {
     }
 }
 
-/// 模型链路钉测（「拖不出红块」排查，2026-11-21）：ZoomEditorModel 的剪除段提交路径
-/// ——真实 mp4 夹具补齐 sourceDuration（loadMediaInfo）→ commitCutCreation 全链
-///（trim 闸 → validate → 落库 → 草稿）。
+/// 真实 mp4 夹具工厂（编辑器模型级钉测共用）：1s@30fps 320×180 纯色视频。
 @MainActor
-final class CutCreationModelTests: XCTestCase {
-    /// 程序生成 1s@30fps 纯色 mp4（供 AVURLAsset 真实时长探针；adaptor 直写像素缓冲，
-    /// OfflineZoomRendererTests 夹具同法简化版）。
-    private func makeFixtureMovie(at url: URL) async throws {
+enum EditorMovieFixture {
+    static func makeMovie(at url: URL) async throws {
         let writer = try AVAssetWriter(url: url, fileType: .mp4)
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
@@ -189,7 +185,6 @@ final class CutCreationModelTests: XCTestCase {
             AVVideoHeightKey: 180,
         ])
         input.expectsMediaDataInRealTime = true
-        XCTAssertTrue(writer.canAdd(input))
         writer.add(input)
         let adaptor = AVAssetWriterInputPixelBufferAdaptor(
             assetWriterInput: input,
@@ -217,14 +212,20 @@ final class CutCreationModelTests: XCTestCase {
         }
         XCTAssertEqual(writer.status, .completed)
     }
+}
 
+/// 模型链路钉测（剪辑 v1）：ZoomEditorModel 的剪除段提交路径——真实 mp4 夹具补齐
+/// sourceDuration（loadMediaInfo）→ commitCutCreation 全链（trim 闸 → validate → 落库
+/// → 草稿）+ scrub/seek/settle 差分。
+@MainActor
+final class CutCreationModelTests: XCTestCase {
     func testCommitCutCreationOnRealMovie() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("CutCreationModelTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let url = directory.appendingPathComponent("剪辑模型夹具.mp4")
-        try await makeFixtureMovie(at: url)
+        try await EditorMovieFixture.makeMovie(at: url)
 
         let item = RecordingFileMetadata(
             id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
@@ -256,5 +257,99 @@ final class CutCreationModelTests: XCTestCase {
         model.scrub(to: 0.35)
         model.settlePlayhead() // 播放头落在剪除段内 → 跳段尾
         XCTAssertEqual(model.playhead, 0.6, accuracy: 1e-9, "settle 落位避让剪除段")
+    }
+}
+
+/// 精剪工作台钉测（2026-11-21 剪映专业版对齐·批次 1）：缩放映射、吸附、时间码、
+/// 撤销/重做快照栈。
+@MainActor
+final class PrecisionWorkbenchTests: XCTestCase {
+    // MARK: 缩放/平移映射
+
+    func testPxPerSecAndClampedOffset() {
+        // zoom 1 = 全程适配（与旧 scale 恒等）
+        XCTAssertEqual(ZoomTimelineGeometry.pxPerSec(width: 664, sourceDuration: 48.4, zoom: 1),
+                       ZoomTimelineGeometry.scale(width: 664, sourceDuration: 48.4), accuracy: 1e-9)
+        XCTAssertEqual(ZoomTimelineGeometry.pxPerSec(width: 664, sourceDuration: 48.4, zoom: 2),
+                       664 / 24.2, accuracy: 1e-9, "zoom 2 = 可视时长减半")
+        XCTAssertEqual(ZoomTimelineGeometry.clampedOffset(5, sourceDuration: 48.4, zoom: 1), 0,
+                       "zoom 1 平移恒 0")
+        XCTAssertEqual(ZoomTimelineGeometry.clampedOffset(100, sourceDuration: 48.4, zoom: 2), 24.2,
+                       "钳到 源时长 − 可视时长")
+        XCTAssertEqual(ZoomTimelineGeometry.clampedOffset(-3, sourceDuration: 48.4, zoom: 2), 0)
+    }
+
+    func testTimeXRoundtripWithOffset() {
+        let pxPerSec = ZoomTimelineGeometry.pxPerSec(width: 664, sourceDuration: 48.4, zoom: 4)
+        let offset: TimeInterval = 10
+        let x = ZoomTimelineGeometry.timeToX(15, pxPerSec: pxPerSec, offset: offset)
+        XCTAssertEqual(ZoomTimelineGeometry.xToTime(x, pxPerSec: pxPerSec, offset: offset), 15,
+                       accuracy: 1e-9, "time↔x 往返保值")
+    }
+
+    func testTimecodeFormat() {
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(0), "00:00:00:00")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(13.939), "00:00:13:28", "13.939×30=418.17→418 帧 = 13s28f")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(3661.5), "01:01:01:15", "小时段")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(-1), "—", "负值退化")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(.nan), "—")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(1, fps: 0), "—")
+    }
+
+    // MARK: 吸附
+
+    func testSnappedToNearestCandidateWithinTolerance() {
+        let candidates: [TimeInterval] = [0, 3.0, 3.19, 12.18, 48.4]
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.21, candidates: candidates, toleranceSeconds: 0.1),
+                       3.19, "容差内吸最近磁点")
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.5, candidates: candidates, toleranceSeconds: 0.1),
+                       3.5, "容差外原值")
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.05, candidates: candidates, toleranceSeconds: 0.1),
+                       3.0, "两点等距取先入者（确定性）")
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.5, candidates: candidates, toleranceSeconds: 0),
+                       3.5, "零容差 = 不吸附")
+    }
+
+    // MARK: 撤销/重做（快照栈，模型级）
+
+    func testUndoRedoStackOnRealMovie() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PrecisionWorkbench-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("撤销夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 42.0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+        XCTAssertFalse(model.canUndo)
+
+        model.commitCutCreation(anchor: 0.1, start: 0.1, end: 0.6) // 建段
+        XCTAssertEqual(model.cuts.count, 1)
+        XCTAssertTrue(model.canUndo)
+        XCTAssertFalse(model.canRedo)
+
+        model.undo()
+        XCTAssertEqual(model.cuts.count, 0, "撤销回空")
+        XCTAssertFalse(model.canUndo)
+        XCTAssertTrue(model.canRedo)
+
+        model.redo()
+        XCTAssertEqual(model.cuts, [CutSegment(start: 0.1, end: 0.6)], "重做恢复")
+        XCTAssertTrue(model.canUndo)
+        XCTAssertFalse(model.canRedo)
+
+        // 撤销后再新编辑 → redo 分支清空
+        model.undo()
+        model.commitCutCreation(anchor: 0.1, start: 0.2, end: 0.8)
+        XCTAssertEqual(model.cuts, [CutSegment(start: 0.2, end: 0.8)])
+        XCTAssertFalse(model.canRedo, "分叉后 redo 栈清空")
+
+        // 草稿随 undo/redo 同步落盘
+        XCTAssertEqual(vm.loadDraft(for: item).cuts, model.cuts, "草稿与栈顶一致")
     }
 }

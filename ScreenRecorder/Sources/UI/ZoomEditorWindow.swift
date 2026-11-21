@@ -131,6 +131,16 @@ final class ZoomEditorModel: ObservableObject {
     /// 剪除段拖拽预览（新建/调端点共用；nil = 无剪除段拖拽在途）。
     @Published var cutDragPreview: CutDragPreview?
 
+    // MARK: 时间线缩放/平移（2026-11-21 剪映专业版对齐·批次 1；视图态寄模型——画布经
+    // objectWillChange 订阅重绘，SwiftUI 控件直绑）
+
+    /// 缩放倍率（1 = 全程适配；上限 200 —— 48s 片 @200 → 1 帧 ≈ 46pt，帧级精剪）。
+    @Published var timelineZoom: Double = 1 {
+        didSet { timelineOffset = ZoomTimelineGeometry.clampedOffset(timelineOffset, sourceDuration: sourceDuration, zoom: timelineZoom) }
+    }
+    /// 左缘时间（秒，钳制随 zoom）。
+    @Published var timelineOffset: TimeInterval = 0
+
     struct DragPreview {
         let index: Int
         let start: TimeInterval
@@ -362,6 +372,71 @@ final class ZoomEditorModel: ObservableObject {
         max(sourceDuration - totalCutSeconds, 0)
     }
 
+    // MARK: 撤销/重做（2026-11-21 剪映对齐：⌘Z / ⇧⌘Z；快照栈——EditDocument 值语义）
+
+    private var undoStack: [EditDocument] = []
+    private var redoStack: [EditDocument] = []
+    /// 栈深上限（防长会话无界增长；超限弃最旧）。
+    private static let undoLimit = 100
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+
+    /// 变更前快照（applyEdit/applyCutEdit 入口调用；清 redo 分支）。
+    private func pushUndo() {
+        undoStack.append(currentDocument())
+        if undoStack.count > Self.undoLimit { undoStack.removeFirst() }
+        redoStack.removeAll()
+        syncUndoFlags()
+    }
+
+    private func currentDocument() -> EditDocument {
+        EditDocument(cuts: cuts, zoomSegments: segments)
+    }
+
+    private func applyDocument(_ document: EditDocument) {
+        segments = document.zoomSegments
+        cuts = document.cuts
+        saveDocument()
+        rearmCutBoundaryObservers()
+        selectedIndex = nil
+    }
+
+    func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(currentDocument())
+        applyDocument(previous)
+        syncUndoFlags()
+    }
+
+    func redo() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(currentDocument())
+        applyDocument(next)
+        syncUndoFlags()
+    }
+
+    private func syncUndoFlags() {
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    // MARK: 键盘工作流（剪映对齐：空格播放/←→ 逐帧/Home End 跳转；监视器在 opener）
+
+    /// 逐帧步进（缺省帧率 1/30s；shift 步进由调用方换算秒）。
+    func stepFrames(_ count: Int) {
+        scrub(to: playhead + TimeInterval(count) / 30.0)
+    }
+
+    func stepSeconds(_ seconds: TimeInterval) {
+        scrub(to: playhead + seconds)
+    }
+
+    /// 播放头时间码（剪映同款 HH:MM:SS:FF @30）。
+    var playheadTimecode: String { ZoomTimelineGeometry.timecode(playhead) }
+
+    /// 源时长时间码。
+    var sourceDurationTimecode: String { ZoomTimelineGeometry.timecode(sourceDuration) }
+
     /// 时间线上第 `index` 段的显示区间（拖拽预览优先——预览未落库，仅供绘制）。
     func displayedRange(at index: Int) -> (start: TimeInterval, end: TimeInterval) {
         guard segments.indices.contains(index) else { return (0, 0) }
@@ -393,6 +468,7 @@ final class ZoomEditorModel: ObservableObject {
     /// 统一闸执行点：修改 → validate → 落库 → 草稿即时存盘（try? 尽力而为——草稿是
     /// 便利持久化，写失败不阻断编辑，失败形态归真机验收观察）。
     private func applyEdit(_ edit: (inout [ZoomSegment]) -> Void) {
+        pushUndo()
         segments = ZoomEditorLogic.applyEdit(segments, edit: edit)
         saveDocument()
     }
@@ -400,6 +476,7 @@ final class ZoomEditorModel: ObservableObject {
     /// 剪除段统一闸：修改 → `CutSegment.validate` → 落库 → 草稿即时存盘（同 applyEdit 纪律）
     /// → 边界观察器重挂（播放跳剪主通道跟随最新剪除段）。
     private func applyCutEdit(_ edit: (inout [CutSegment]) -> Void) {
+        pushUndo()
         var next = cuts
         edit(&next)
         cuts = CutSegment.validate(next)
@@ -489,15 +566,46 @@ struct ZoomEditorView: View {
             OmiCard { playControlRow }
             OmiCard {
                 VStack(alignment: .leading, spacing: 4) {
-                    if !model.cuts.isEmpty {
-                        // 剪除摘要（剪辑 v1）：段数 + 总量 + 导出时长（估算面）。
-                        Text("已剪除 \(model.cuts.count) 段 · 共 \(String(format: "%.1f", model.totalCutSeconds))s · 导出时长 ≈ \(String(format: "%.1f", model.exportDuration))s")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(OmiStyle.subtleText)
+                    HStack(spacing: 8) {
+                        if !model.cuts.isEmpty {
+                            // 剪除摘要（剪辑 v1）：段数 + 总量 + 导出时长（估算面）。
+                            Text("已剪除 \(model.cuts.count) 段 · 共 \(String(format: "%.1f", model.totalCutSeconds))s · 导出时长 ≈ \(String(format: "%.1f", model.exportDuration))s")
+                                .font(.footnote.weight(.medium))
+                                .foregroundStyle(OmiStyle.subtleText)
+                        }
+                        Spacer()
+                        // 缩放控制（剪映对齐·批次 1）：−/+ 步进 ×2、滑杆 1…200、适应复位。
+                        Button {
+                            model.timelineZoom = max(1, model.timelineZoom / 2)
+                        } label: {
+                            Image(systemName: "minus.magnifyingglass")
+                        }
+                        .disabled(model.timelineZoom <= 1)
+                        .help("缩小时间线")
+                        Slider(
+                            value: Binding(
+                                get: { model.timelineZoom },
+                                set: { model.timelineZoom = $0 }),
+                            in: 1...200)
+                            .frame(width: 110)
+                            .help("时间线缩放（⌘+滚轮 / 捏合同效）")
+                        Button {
+                            model.timelineZoom = min(200, model.timelineZoom * 2)
+                        } label: {
+                            Image(systemName: "plus.magnifyingglass")
+                        }
+                        .disabled(model.timelineZoom >= 200)
+                        .help("放大时间线")
+                        Button("适应") {
+                            model.timelineZoom = 1
+                            model.timelineOffset = 0
+                        }
+                        .disabled(model.timelineZoom <= 1 && model.timelineOffset <= 0)
+                        .help("缩回全程适配")
                     }
                     ZoomTimelineStrip(model: model)
                         .frame(height: 64) // 时间线条高（旧 64pt；圆角由画布 layer 自裁）
-                    Text("空白处按住拖选 = 剪除该段（红色块，掐头去尾/删中段）；点空白 = 跳播；红块双击删除，两端可拖微调。")
+                    Text("空白处按住拖选 = 剪除该段（红色块，掐头去尾/删中段）；点空白 = 跳播；红块双击删除，两端可拖微调；⌘+滚轮缩放；空格播放，←→ 逐帧，⌘Z 撤销。")
                         .font(.caption2)
                         .foregroundStyle(OmiStyle.faintText)
                 }
@@ -522,10 +630,26 @@ struct ZoomEditorView: View {
                 Label(model.isPlaying ? "暂停" : "播放",
                       systemImage: model.isPlaying ? "pause.fill" : "play.fill")
             }
-            Text("\(model.playhead, specifier: "%.1f")s / \(model.sourceDuration, specifier: "%.1f")s")
+            // 时间码（剪映同款 HH:MM:SS:FF @30）。
+            Text("\(model.playheadTimecode) / \(model.sourceDurationTimecode)")
                 .font(.system(.footnote, design: .monospaced))
                 .foregroundStyle(OmiStyle.subtleText)
             Spacer()
+            // 撤销/重做（剪映对齐·⌘Z / ⇧⌘Z）。
+            Button {
+                model.undo()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .disabled(!model.canUndo)
+            .help("撤销（⌘Z）")
+            Button {
+                model.redo()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            .disabled(!model.canRedo)
+            .help("重做（⇧⌘Z）")
             Button("在播放头添加分段") {
                 model.addSegment(at: model.playhead)
             }
@@ -705,6 +829,53 @@ enum ZoomEditorWindowOpener {
     private static var controllers: [URL: NSWindowController] = [:]
     private static var closeObservers: [URL: NSObjectProtocol] = [:]
 
+    // MARK: 键盘路由（剪映对齐·批次 1；SwiftUI 控件激活存活但键盘层不可依赖——本窗口
+    // 族病理；本地 keyDown 监听按「key 窗 = 编辑器窗」路由到对应模型，文本编辑中放行）
+    /// 监听器与路由表跨 actor 缝：`addLocalMonitorForEvents(matching: .keyDown)` 恒主
+    /// 线程投递（文档契约），nonisolated(unsafe) 静态仅作线程契约载体；动作一律 Task hop
+    /// 回主 actor 执行。键按下时同步返回 nil 吞键（异步 hop 不影响吞键决策）。
+    nonisolated(unsafe) private static var keyMonitor: Any?
+    nonisolated(unsafe) private static var keyTargets: [ObjectIdentifier: ZoomEditorModel] = [:]
+
+    private static func installKeyMonitorIfNeeded() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard let window = event.window, window === NSApp.keyWindow,
+                  let model = keyTargets[ObjectIdentifier(window)] else { return event }
+            if window.firstResponder is NSTextView { return event } // 文本编辑中不劫持
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            switch event.keyCode {
+            case 49 where mods.isEmpty: // 空格 = 播放/暂停
+                Task { @MainActor in model.togglePlay() }
+                return nil
+            case 123 where mods == .shift: // ⇧← = 后退 1s
+                Task { @MainActor in model.stepSeconds(-1) }
+                return nil
+            case 123 where mods.isEmpty: // ← = 后退 1 帧
+                Task { @MainActor in model.stepFrames(-1) }
+                return nil
+            case 124 where mods == .shift: // ⇧→ = 前进 1s
+                Task { @MainActor in model.stepSeconds(1) }
+                return nil
+            case 124 where mods.isEmpty: // → = 前进 1 帧
+                Task { @MainActor in model.stepFrames(1) }
+                return nil
+            case 115 where mods.isEmpty: // Home = 跳到片头
+                Task { @MainActor in model.seek(to: 0) }
+                return nil
+            case 119 where mods.isEmpty: // End = 跳到片尾
+                Task { @MainActor in model.seek(to: model.sourceDuration) }
+                return nil
+            case 6 where mods.contains(.command): // ⌘Z / ⇧⌘Z = 撤销/重做
+                let isRedo = mods.contains(.shift)
+                Task { @MainActor in isRedo ? model.redo() : model.undo() }
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
     static func open(for item: RecordingFileMetadata, viewModel: RecordingListViewModel) {
         if let existing = controllers[item.url] {
             NSApp.activate(ignoringOtherApps: true)
@@ -725,6 +896,9 @@ enum ZoomEditorWindowOpener {
         window.center()
         let controller = NSWindowController(window: window)
         controllers[item.url] = controller
+        // 键盘路由登记 + 全局监听恰一次安装（多编辑器窗并存按 key 窗分发）。
+        keyTargets[ObjectIdentifier(window)] = model
+        installKeyMonitorIfNeeded()
         // 关闭登记摘除（NSWindowDelegate 的 Swift 隔离桥接在此工具链不可用——通知惯例，
         // RecordingListWindowController didBecomeKey 同款）：所有隔离状态访问都在
         // `Task { @MainActor }` 内。
@@ -736,6 +910,7 @@ enum ZoomEditorWindowOpener {
             Task { @MainActor in
                 model?.prepareForClose()
                 controllers[item.url] = nil
+                keyTargets[ObjectIdentifier(window)] = nil
                 if let observer = closeObservers[item.url] {
                     NotificationCenter.default.removeObserver(observer)
                     closeObservers[item.url] = nil

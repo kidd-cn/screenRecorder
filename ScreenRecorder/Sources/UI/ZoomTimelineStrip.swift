@@ -21,6 +21,63 @@ enum ZoomTimelineGeometry {
         width / max(sourceDuration, 0.001)
     }
 
+    // MARK: 时间线缩放/平移（2026-11-21 剪映专业版对齐·批次 1）
+
+    /// 有效像素率 = 条宽 ÷ 可视时长（可视时长 = 源时长 ÷ 缩放倍率）。zoom ≥ 1（1 = 全程
+    /// 适配，与旧版恒等）。
+    static func pxPerSec(width: CGFloat, sourceDuration: TimeInterval, zoom: Double) -> CGFloat {
+        guard sourceDuration.isFinite, sourceDuration > 0 else { return width / 0.001 }
+        let span = max(sourceDuration / max(zoom, 1), 0.001)
+        return width / span
+    }
+
+    /// 平移钳制：左缘时间 ∈ [0, 源时长 − 可视时长]（zoom = 1 时恒 0）。
+    static func clampedOffset(_ offset: TimeInterval, sourceDuration: TimeInterval, zoom: Double) -> TimeInterval {
+        guard sourceDuration.isFinite, sourceDuration > 0 else { return 0 }
+        let span = sourceDuration / max(zoom, 1)
+        return min(max(0, offset), max(0, sourceDuration - span))
+    }
+
+    /// 时间 → 视图 x（pxPerSec 已含缩放；offset = 左缘时间）。
+    static func timeToX(_ t: TimeInterval, pxPerSec: CGFloat, offset: TimeInterval) -> CGFloat {
+        CGFloat(t - offset) * pxPerSec
+    }
+
+    /// 视图 x → 时间（钳制归调用方——钳制范围依赖当前 zoom）。
+    static func xToTime(_ x: CGFloat, pxPerSec: CGFloat, offset: TimeInterval) -> TimeInterval {
+        offset + x / max(pxPerSec, 0.001)
+    }
+
+    /// 吸附（剪映对齐）：提案时间落在任一磁点 ± 容差内 → 吸到最近磁点，否则原值。
+    /// 磁点由调用方收集（0/时长/各剪除段端点/播放头；被拖段自身端点须排除）。
+    static func snapped(_ proposed: TimeInterval,
+                        candidates: [TimeInterval],
+                        toleranceSeconds: TimeInterval) -> TimeInterval {
+        guard toleranceSeconds > 0 else { return proposed }
+        var best = proposed
+        var bestDistance = toleranceSeconds
+        for candidate in candidates {
+            let distance = abs(candidate - proposed)
+            if distance < bestDistance {
+                best = candidate
+                bestDistance = distance
+            }
+        }
+        return best
+    }
+
+    /// 时间码（剪映同款 HH:MM:SS:FF，帧率缺省 30）：totalFrames = round(seconds × fps)
+    /// ——0.999s @30 → 00:00:00:30（帧位 30 属上溢？不：30 帧 @30fps = 1.0s 边界，
+    /// round 后恰进位到秒位，故 ff 恒 < fps）。fps ≤ 0 → "—"。
+    static func timecode(_ seconds: TimeInterval, fps: Double = 30) -> String {
+        guard seconds.isFinite, seconds >= 0, fps > 0 else { return "—" }
+        let totalFrames = Int((seconds * fps).rounded())
+        let framesPerSecond = Int(fps.rounded())
+        let ff = totalFrames % max(framesPerSecond, 1)
+        let totalSeconds = totalFrames / max(framesPerSecond, 1)
+        return String(format: "%02d:%02d:%02d:%02d", totalSeconds / 3600, (totalSeconds % 3600) / 60, totalSeconds % 60, ff)
+    }
+
     struct Block: Equatable {
         let index: Int
         let rect: CGRect
@@ -38,13 +95,14 @@ enum ZoomTimelineGeometry {
         case cutBlock(index: Int)
     }
 
-    /// 段块矩形（画布坐标）：x = max(start × scale, 0)，宽 = max((end − start) × scale,
+    /// 段块矩形（画布坐标）：x = timeToX(start)（含平移），宽 = max((end − start) × scale,
     /// 2)，纵向 [verticalInset, height − verticalInset]。
     static func blocks(ranges: [(index: Int, start: TimeInterval, end: TimeInterval)],
-                       scale: CGFloat, height: CGFloat) -> [Block] {
+                       scale: CGFloat, height: CGFloat,
+                       offset: TimeInterval = 0) -> [Block] {
         let blockHeight = max(height - 2 * verticalInset, 1)
         return ranges.map { range in
-            let x = max(range.start * scale, 0)
+            let x = max(timeToX(range.start, pxPerSec: scale, offset: offset), 0)
             let width = max((range.end - range.start) * scale, minimumBlockWidth)
             return Block(
                 index: range.index,
@@ -55,9 +113,10 @@ enum ZoomTimelineGeometry {
     /// 剪除段块矩形（剪辑 v1）：全高 [0, height]——与缩放段块（内缩 4pt）同 x 口径，
     /// 纵向铺满以视觉区分「剪除 = 整条时间轴上抹掉」。
     static func cutBlocks(ranges: [(index: Int, start: TimeInterval, end: TimeInterval)],
-                          scale: CGFloat, height: CGFloat) -> [Block] {
+                          scale: CGFloat, height: CGFloat,
+                          offset: TimeInterval = 0) -> [Block] {
         ranges.map { range in
-            let x = max(range.start * scale, 0)
+            let x = max(timeToX(range.start, pxPerSec: scale, offset: offset), 0)
             let width = max((range.end - range.start) * scale, minimumBlockWidth)
             return Block(
                 index: range.index,
@@ -96,9 +155,12 @@ enum ZoomTimelineGeometry {
         return .background
     }
 
-    /// 播放头横坐标（钳在 [0, width − playheadWidth]；宽度不足时落 0）。
-    static func playheadX(playhead: TimeInterval, scale: CGFloat, width: CGFloat) -> CGFloat {
-        min(max(playhead * scale, 0), max(width - playheadWidth, 0))
+    /// 播放头横坐标（含平移；钳在 [−playheadWidth, width − playheadWidth]——zoom 后
+    /// 播放头可在视图左缘之外）。
+    static func playheadX(playhead: TimeInterval, scale: CGFloat, width: CGFloat,
+                          offset: TimeInterval = 0) -> CGFloat {
+        min(max(timeToX(playhead, pxPerSec: scale, offset: offset), -playheadWidth),
+            max(width - playheadWidth, 0))
     }
 }
 
@@ -170,6 +232,48 @@ final class ZoomTimelineCanvas: NSView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
+    // MARK: 滚轮/捏合（剪映对齐·时间线缩放平移）：⌘+滚轮 或 捏合 = 光标处缩放；
+    // 普通滚轮（横向或纵向）= 平移。
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let model, model.sourceDuration > 0, bounds.width > 0 else {
+            return super.scrollWheel(with: event)
+        }
+        let scale = pxPerSec(model: model)
+        let point = convert(event.locationInWindow, from: nil)
+        let cursorTime = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: model.timelineOffset)
+        if event.modifierFlags.contains(.command) {
+            // 缩放（光标锚定：缩放前后光标下时间不变）：自然方向 = 向上滚放大。
+            let factor = exp(-Double(event.scrollingDeltaY) * 0.01)
+            model.timelineZoom = min(max(model.timelineZoom * factor, 1), 200)
+            let newScale = pxPerSec(model: model)
+            model.timelineOffset = ZoomTimelineGeometry.clampedOffset(
+                cursorTime - point.x / max(newScale, 0.001),
+                sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+        } else {
+            // 平移：横向分量优先（触控板横扫），否则纵向分量（鼠标滚轮）。
+            let delta = event.scrollingDeltaX != 0 ? event.scrollingDeltaX : event.scrollingDeltaY
+            guard delta != 0 else { return }
+            model.timelineOffset = ZoomTimelineGeometry.clampedOffset(
+                model.timelineOffset + TimeInterval(delta / max(scale, 0.001)),
+                sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+        }
+    }
+
+    /// 触控板捏合缩放（光标锚定）。
+    override func magnify(with event: NSEvent) {
+        guard let model, model.sourceDuration > 0, bounds.width > 0 else { return }
+        let scale = pxPerSec(model: model)
+        let point = convert(event.locationInWindow, from: nil)
+        let cursorTime = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: model.timelineOffset)
+        let factor = 1 + Double(event.magnification)
+        model.timelineZoom = min(max(model.timelineZoom * factor, 1), 200)
+        let newScale = pxPerSec(model: model)
+        model.timelineOffset = ZoomTimelineGeometry.clampedOffset(
+            cursorTime - point.x / max(newScale, 0.001),
+            sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+    }
+
     /// 尺寸变化即重绘（比例尺依赖条宽；macOS NSView 无 needsDisplayOnBoundsChange）。
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
@@ -177,6 +281,12 @@ final class ZoomTimelineCanvas: NSView {
     }
 
     // MARK: 布局
+
+    /// 有效像素率与平移（模型持有缩放态；画布经订阅重绘）。
+    private func pxPerSec(model: ZoomEditorModel) -> CGFloat {
+        ZoomTimelineGeometry.pxPerSec(
+            width: bounds.width, sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+    }
 
     private func currentRanges() -> [(index: Int, start: TimeInterval, end: TimeInterval)] {
         guard let model else { return [] }
@@ -200,11 +310,15 @@ final class ZoomTimelineCanvas: NSView {
     }
 
     private func currentBlocks(scale: CGFloat) -> [ZoomTimelineGeometry.Block] {
-        ZoomTimelineGeometry.blocks(ranges: currentRanges(), scale: scale, height: bounds.height)
+        ZoomTimelineGeometry.blocks(
+            ranges: currentRanges(), scale: scale, height: bounds.height,
+            offset: model?.timelineOffset ?? 0)
     }
 
     private func currentCutBlocks(scale: CGFloat) -> [ZoomTimelineGeometry.Block] {
-        ZoomTimelineGeometry.cutBlocks(ranges: currentCutRanges(), scale: scale, height: bounds.height)
+        ZoomTimelineGeometry.cutBlocks(
+            ranges: currentCutRanges(), scale: scale, height: bounds.height,
+            offset: model?.timelineOffset ?? 0)
     }
 
     // MARK: 绘制（旧版视觉逐项对齐：背景 .quaternary 近似 / 段块选中 0.55、未选 0.3 /
@@ -213,7 +327,8 @@ final class ZoomTimelineCanvas: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let model else { return }
-        let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
+        let scale = pxPerSec(model: model)
+        let offset = model.timelineOffset
 
         NSColor.quaternaryLabelColor.setFill()
         NSBezierPath(rect: bounds).fill()
@@ -272,7 +387,7 @@ final class ZoomTimelineCanvas: NSView {
 
         // 播放头竖线。
         let playheadX = ZoomTimelineGeometry.playheadX(
-            playhead: model.playhead, scale: scale, width: bounds.width)
+            playhead: model.playhead, scale: scale, width: bounds.width, offset: offset)
         NSColor.systemGreen.setFill()
         NSBezierPath(rect: CGRect(
             x: playheadX, y: 0,
@@ -284,7 +399,8 @@ final class ZoomTimelineCanvas: NSView {
     override func mouseDown(with event: NSEvent) {
         guard let model else { return }
         let point = convert(event.locationInWindow, from: nil)
-        let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
+        let scale = pxPerSec(model: model)
+        let offset = model.timelineOffset
         switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: currentBlocks(scale: scale),
                                         cutBlocks: currentCutBlocks(scale: scale)) {
         case .leadingHandle(let index):
@@ -306,7 +422,8 @@ final class ZoomTimelineCanvas: NSView {
             // 空白按下：先按「新建剪除段拖选」武装（拖出 ≥4px 才成预览）；松手未拖
             // = 点击背景跳播（旧语义）。
             dragSession = DragSession(
-                kind: .cutCreate(anchor: point.x / scale), startX: point.x)
+                kind: .cutCreate(anchor: ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)),
+                startX: point.x)
         }
     }
 
@@ -328,32 +445,54 @@ final class ZoomTimelineCanvas: NSView {
             startX: startX)
     }
 
+    /// 磁点容差（吸附剪映对齐）：把手宽度换算秒（0.75 折减——吸在段边内沿）。
+    private func snapTolerance(pxPerSec: CGFloat) -> TimeInterval {
+        TimeInterval(ZoomTimelineGeometry.handleWidth / max(pxPerSec, 0.001)) * 0.75
+    }
+
     override func mouseDragged(with event: NSEvent) {
         guard let session = dragSession, let model else { return }
         let point = convert(event.locationInWindow, from: nil)
-        let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
+        let scale = pxPerSec(model: model)
+        let offset = model.timelineOffset
         let delta = (point.x - session.startX) / scale
+        let tolerance = snapTolerance(pxPerSec: scale)
+        func snap(_ proposed: TimeInterval, cutIndex: Int? = nil, zoomIndex: Int? = nil) -> TimeInterval {
+            var candidates: [TimeInterval] = [0, model.sourceDuration, model.playhead]
+            for (index, cut) in model.cuts.enumerated() where index != cutIndex {
+                candidates.append(contentsOf: [cut.start, cut.end])
+            }
+            for (index, segment) in model.segments.enumerated() where index != zoomIndex {
+                candidates.append(contentsOf: [segment.start, segment.end])
+            }
+            return ZoomTimelineGeometry.snapped(proposed, candidates: candidates, toleranceSeconds: tolerance)
+        }
         switch session.kind {
         case .zoomHandle(let index, let isLeading, let originalStart, let originalEnd):
             let start = isLeading ? originalStart + delta : originalStart
             let end = isLeading ? originalEnd : originalEnd + delta
-            model.dragPreview = ZoomEditorModel.DragPreview(index: index, start: start, end: end)
-            model.scrub(to: isLeading ? start : end) // 拖动扫查：预览跟随被拖端点
+            let snappedStart = isLeading ? snap(start, zoomIndex: index) : start
+            let snappedEnd = isLeading ? end : snap(end, zoomIndex: index)
+            model.dragPreview = ZoomEditorModel.DragPreview(index: index, start: snappedStart, end: snappedEnd)
+            model.scrub(to: isLeading ? snappedStart : snappedEnd) // 拖动扫查：预览跟随被拖端点
         case .cutHandle(let index, let isLeading, let originalStart, let originalEnd):
             let start = isLeading ? originalStart + delta : originalStart
             let end = isLeading ? originalEnd : originalEnd + delta
-            model.cutDragPreview = ZoomEditorModel.CutDragPreview(index: index, start: start, end: end)
-            model.scrub(to: isLeading ? start : end) // 拖动扫查：预览跟随被拖端点
+            let snappedStart = isLeading ? snap(start, cutIndex: index) : start
+            let snappedEnd = isLeading ? end : snap(end, cutIndex: index)
+            model.cutDragPreview = ZoomEditorModel.CutDragPreview(index: index, start: snappedStart, end: snappedEnd)
+            model.scrub(to: isLeading ? snappedStart : snappedEnd) // 拖动扫查：预览跟随被拖端点
         case .cutCreate(let anchor):
             // 拖出 ≥4px 才成预览（亚拖动 = 点击，松手跳播）；拖动扫查：预览跟随光标
             //（scrub 原始跳转——光标在既有剪除段内也照实显示，扫查 ≠ 播放语义）。
             guard abs(point.x - session.startX) >= 4 else { return }
-            let currentTime = point.x / scale
+            let currentTime = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset)
+            let snappedTime = snap(currentTime)
             model.cutDragPreview = ZoomEditorModel.CutDragPreview(
                 index: nil,
-                start: min(anchor, currentTime),
-                end: max(anchor, currentTime))
-            model.scrub(to: currentTime)
+                start: min(anchor, snappedTime),
+                end: max(anchor, snappedTime))
+            model.scrub(to: snappedTime)
         }
     }
 
@@ -364,7 +503,7 @@ final class ZoomTimelineCanvas: NSView {
             if model?.dragPreview != nil { model?.dragPreview = nil }
         }
         guard let session = dragSession, let model else { return }
-        let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
+        let scale = pxPerSec(model: model)
         switch session.kind {
         case .zoomHandle(let index, _, _, _):
             if let preview = model.dragPreview {
@@ -381,7 +520,8 @@ final class ZoomTimelineCanvas: NSView {
                 model.commitCutCreation(anchor: anchor, start: preview.start, end: preview.end)
                 model.settlePlayhead()
             } else {
-                model.seek(to: session.startX / scale) // 点击背景跳播（旧语义）
+                model.seek(to: ZoomTimelineGeometry.xToTime(
+                    session.startX, pxPerSec: scale, offset: model.timelineOffset)) // 点击背景跳播（旧语义）
             }
         }
     }
@@ -391,7 +531,7 @@ final class ZoomTimelineCanvas: NSView {
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let model else { return nil }
         let point = convert(event.locationInWindow, from: nil)
-        let scale = ZoomTimelineGeometry.scale(width: bounds.width, sourceDuration: model.sourceDuration)
+        let scale = pxPerSec(model: model)
         switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: currentBlocks(scale: scale),
                                         cutBlocks: currentCutBlocks(scale: scale)) {
         case .leadingHandle(let hitIndex), .trailingHandle(let hitIndex), .segment(let hitIndex):

@@ -84,7 +84,49 @@ final class ZoomTimelineGeometryTests: XCTestCase {
 
     func testPlayheadXClampsToStripBounds() {
         XCTAssertEqual(ZoomTimelineGeometry.playheadX(playhead: 2, scale: 10, width: 100), 20)
-        XCTAssertEqual(ZoomTimelineGeometry.playheadX(playhead: -5, scale: 10, width: 100), 0)
+        // zoom 平移语义（批次 1）：左界外钳到 −playheadWidth（线宽距离，线全隐）。
+        XCTAssertEqual(ZoomTimelineGeometry.playheadX(playhead: -5, scale: 10, width: 100), -1.5)
         XCTAssertEqual(ZoomTimelineGeometry.playheadX(playhead: 100, scale: 10, width: 100), 98.5)
+    }
+
+    /// 缩放/平移映射钉测（2026-11-21 剪映对齐·批次 1）：time↔x 往返 + offset 钳制。
+    func testZoomMappingAndOffsetClamp() {
+        let pxPerSec = ZoomTimelineGeometry.pxPerSec(width: 664, sourceDuration: 48.4, zoom: 4)
+        XCTAssertEqual(pxPerSec, 664 / 12.1, accuracy: 1e-9)
+        XCTAssertEqual(ZoomTimelineGeometry.timeToX(15, pxPerSec: pxPerSec, offset: 10),
+                       5 * pxPerSec, accuracy: 1e-9)
+        XCTAssertEqual(
+            ZoomTimelineGeometry.xToTime(ZoomTimelineGeometry.timeToX(15, pxPerSec: pxPerSec, offset: 10),
+                                         pxPerSec: pxPerSec, offset: 10),
+            15, accuracy: 1e-9, "time↔x 往返保值")
+        XCTAssertEqual(ZoomTimelineGeometry.clampedOffset(100, sourceDuration: 48.4, zoom: 4),
+                       48.4 - 12.1, accuracy: 1e-9, "右界 = 源时长 − 可视时长")
+        XCTAssertEqual(ZoomTimelineGeometry.clampedOffset(-1, sourceDuration: 48.4, zoom: 4), 0)
+        XCTAssertEqual(ZoomTimelineGeometry.clampedOffset(0, sourceDuration: 48.4, zoom: 1), 0,
+                       "zoom 1 平移恒 0")
+    }
+
+    /// 吸附钉测（剪映对齐）：容差内吸最近磁点、容差外原值、零容差不吸附。
+    func testSnappedToNearestCandidateWithinTolerance() {
+        let candidates: [TimeInterval] = [0, 3.0, 3.19, 12.18, 48.4]
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.21, candidates: candidates, toleranceSeconds: 0.1),
+                       3.19, "容差内吸最近磁点")
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.5, candidates: candidates, toleranceSeconds: 0.1),
+                       3.5, "容差外原值")
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.05, candidates: candidates, toleranceSeconds: 0.1),
+                       3.0, "等距取先入者（确定性）")
+        XCTAssertEqual(ZoomTimelineGeometry.snapped(3.5, candidates: candidates, toleranceSeconds: 0),
+                       3.5, "零容差 = 不吸附")
+    }
+
+    /// 时间码钉测（剪映同款 HH:MM:SS:FF @30）。
+    func testTimecodeFormat() {
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(0), "00:00:00:00")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(13.939), "00:00:13:28",
+                       "13.939×30 = 418.17 → 418 帧 = 13s28f")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(3661.5), "01:01:01:15", "小时段")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(-1), "—")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(.nan), "—")
+        XCTAssertEqual(ZoomTimelineGeometry.timecode(1, fps: 0), "—")
     }
 }
