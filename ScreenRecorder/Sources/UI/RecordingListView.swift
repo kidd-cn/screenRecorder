@@ -43,7 +43,7 @@ struct RecordingListView: View {
             }
             bottomBar
         }
-        .background(Color(nsColor: .windowBackgroundColor)) // 窗口整页深色（窗口外观钉 darkAqua）
+        .background(Color(nsColor: .windowBackgroundColor)) // 语义色：随系统深浅色
         .sheet(item: $renameTarget) { item in
             renameSheet(item: item)
         }

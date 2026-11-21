@@ -91,6 +91,33 @@ final class DisplayLocalRectTests: XCTestCase {
     }
 }
 
+/// 启动条拖动判定钉测（2026-11-21 用户要求「启动条可拖动」）：阈值内 = 点击（瓦片
+/// 开录），越过阈值 = 按鼠标位移移动整条窗口。
+final class LaunchBarDragTrackerTests: XCTestCase {
+    func testClickWithinThresholdDoesNotMove() {
+        var tracker = LaunchBarDragTracker()
+        tracker.begin(mouse: CGPoint(x: 100, y: 100), windowOrigin: CGPoint(x: 10, y: 20))
+        XCTAssertNil(tracker.origin(forMouse: CGPoint(x: 102, y: 101)), "3pt 内不移动")
+        XCTAssertFalse(tracker.end(), "未越过阈值 → 视为点击")
+    }
+
+    func testDragBeyondThresholdMovesByMouseDelta() {
+        var tracker = LaunchBarDragTracker()
+        tracker.begin(mouse: CGPoint(x: 100, y: 100), windowOrigin: CGPoint(x: 10, y: 20))
+        XCTAssertEqual(tracker.origin(forMouse: CGPoint(x: 140, y: 60)),
+                       CGPoint(x: 50, y: -20), "窗口原点 = 起点 + 鼠标位移")
+        XCTAssertTrue(tracker.end(), "越过阈值 → 拖动，松手不触发点击")
+        XCTAssertNil(tracker.origin(forMouse: CGPoint(x: 150, y: 60)), "end 后状态复位")
+    }
+
+    func testMissingWindowOriginNeverMoves() {
+        var tracker = LaunchBarDragTracker()
+        tracker.begin(mouse: CGPoint(x: 100, y: 100), windowOrigin: nil)
+        XCTAssertNil(tracker.origin(forMouse: CGPoint(x: 200, y: 200)))
+        XCTAssertFalse(tracker.end())
+    }
+}
+
 /// App 图标网格几何钉测（2026-11-20 Omi 38.png 复刻）：5 列等分 + 超窄回退。
 final class AppGridGeometryTests: XCTestCase {
     func testTileSizeDividesViewWidthIntoFiveColumns() {

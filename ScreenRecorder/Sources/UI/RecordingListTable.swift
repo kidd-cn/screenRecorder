@@ -36,7 +36,7 @@ struct RecordingListTable: NSViewRepresentable {
         table.usesAlternatingRowBackgroundColors = false
         table.backgroundColor = .clear
         table.gridStyleMask = [.solidHorizontalGridLineMask]
-        table.gridColor = NSColor.white.withAlphaComponent(0.08)
+        table.gridColor = .separatorColor // 语义色：随系统深浅色
         table.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
         table.allowsEmptySelection = true
         table.usesAutomaticRowHeights = false
@@ -198,14 +198,14 @@ final class RowMenuTableView: NSTableView {
     }
 }
 
-/// 表头（Omi 47.png）：深色底 + 列间竖分隔线。分隔线在 `draw(_:)` 里按可见列边界补画
-/// （NSTableHeaderView 默认不画分隔线）。
+/// 表头（Omi 47.png）：系统表头底（随外观）+ 列间竖分隔线。分隔线在 `draw(_:)` 里按
+/// 可见列边界补画（NSTableHeaderView 默认不画分隔线），取语义色随系统深浅色。
 @MainActor
 final class OmiTableHeaderView: NSTableHeaderView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         guard let tableView else { return }
-        NSColor.white.withAlphaComponent(0.10).setFill()
+        NSColor.separatorColor.setFill()
         var x: CGFloat = 0
         for column in tableView.tableColumns {
             x += column.width
@@ -464,7 +464,8 @@ final class RecordingActionCell: NSView {
     @objc private func editTapped() { onAction?(.edit) }
 }
 
-/// 白描边圆形符号按钮（Omi 操作列观感）：26pt 圆 + 1.5pt 白描边 + 白色符号。
+/// 圆形符号按钮（Omi 操作列观感）：30pt 圆 + 1.5pt 描边 + 符号；描边/符号语义色
+/// （深色=白、浅色=黑），随系统深浅色自适应。
 @MainActor
 final class CircularGlyphButton: NSButton {
     static let diameter: CGFloat = 30
@@ -474,16 +475,28 @@ final class CircularGlyphButton: NSButton {
         isBordered = false
         bezelStyle = .regularSquare
         // 2026-11-20 用户三轮反馈定稿：30×30 正圆（帧布局由宿主控制器给出，不再被栈
-        // 拉伸成椭圆）、图标 12pt 常规字重（更小、更精致）、1.5pt 白描边。
+        // 拉伸成椭圆）、图标 12pt 常规字重（更小、更精致）、1.5pt 描边。
         image = NSImage(systemSymbolName: symbol, accessibilityDescription: accessibility)?
             .withSymbolConfiguration(.init(pointSize: 12, weight: .regular))
         imagePosition = .imageOnly
         imageScaling = .scaleProportionallyDown
-        contentTintColor = .white
+        contentTintColor = .labelColor
         wantsLayer = true
         layer?.cornerRadius = Self.diameter / 2
         layer?.borderWidth = 1.5
-        layer?.borderColor = NSColor.white.withAlphaComponent(0.9).cgColor
+        refreshBorderColor()
+    }
+
+    /// 系统深浅色切换（含运行中切换）：CGColor 不随外观自动重解析，重设一次。
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshBorderColor()
+    }
+
+    private func refreshBorderColor() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = NSColor.labelColor.withAlphaComponent(0.9).cgColor
+        }
     }
 
     /// 正圆恒等：任何尺寸变化后同步圆角（防椭圆）。

@@ -909,7 +909,7 @@ final class WindowGridItem: NSCollectionViewItem {
         ])
 
         label.font = .systemFont(ofSize: 13)
-        label.textColor = .white
+        label.textColor = .labelColor // 语义色：随系统深浅色（选择器窗不再钉深色）
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -964,12 +964,13 @@ final class WindowGridItem: NSCollectionViewItem {
     }
 }
 
-/// 「下一步」按钮样式（Omi 55.png 同款灰底圆角 + 白字；按下微降透明度）。
+/// 「下一步」按钮样式（Omi 55.png 同款灰底圆角按钮；按下微降透明度）。前景/底色均取
+/// 语义色——深色=白字灰底、浅色=黑字浅灰底（选择器窗随系统外观，2026-11-21）。
 struct NextStepButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 14, weight: .medium))
-            .foregroundStyle(Color.white.opacity(configuration.isPressed ? 0.75 : 1))
+            .foregroundStyle(Color.primary.opacity(configuration.isPressed ? 0.75 : 1))
             .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.18)))
     }
 }
@@ -1163,7 +1164,7 @@ final class AppGridItem: NSCollectionViewItem {
         iconContainer.addSubview(iconView)
 
         label.font = .systemFont(ofSize: 13)
-        label.textColor = .white
+        label.textColor = .labelColor // 语义色：随系统深浅色（选择器窗不再钉深色）
         label.alignment = .center
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false

@@ -68,7 +68,8 @@ enum LaunchBarLayout {
 /// 启动条（Omi 49.png）：顶部居中悬浮横条，7 个录制模式瓦片（标题+图标，悬停高亮）
 /// + 右上角关闭钮。AppKit 原生交互（手建窗 SwiftUI 手势层死——ZoomEditor 定论），
 /// 点击瓦片即回调装配层开录（回调后收条；窗口/声画选择器自会盖上来）。
-/// 非激活面板：不抢焦点，任意应用前台都能点。
+/// 非激活面板：不抢焦点，任意应用前台都能点；按住条体/瓦片可拖动整条（越过 3pt
+/// 阈值才算拖动，松手不再触发瓦片点击）。
 @MainActor
 final class LaunchBarWindowController {
     private let panel = LaunchBarPanel()
@@ -139,11 +140,13 @@ final class LaunchBarPanel: NSPanel {
         level = .floating
         isOpaque = false
         backgroundColor = .clear
-        // 恒深色 HUD（Omi 49.png 观感；hudWindow 跟随系统外观——浅色模式白底会吞掉
-        // 白色标题/图标，2026-11-16 用户反馈，钉死 darkAqua）。
-        appearance = NSAppearance(named: .darkAqua)
+        // 外观随系统（2026-11-21 用户要求）：此前钉死 darkAqua 防止浅色模式白底吞掉
+        // 白色标题/图标；标题/图标/悬停底/分隔线已全部改用语义色（OmiStyle 同源），
+        // 毛玻璃 material（hudWindow）本身也随外观解析，故不再需要钉色。
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
+        // 拖动由条体/瓦片自管（button 式阈值判定，见 LaunchBarDragTracker）——
+        // isMovableByWindowBackground 会被瓦片的 mouseDown 吞掉，且无法区分点击/拖动。
         isMovableByWindowBackground = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         sharingType = .none // 采集排除（浮条/选择器同纪律）——启动条永不入成片
@@ -151,14 +154,65 @@ final class LaunchBarPanel: NSPanel {
     }
 }
 
+// MARK: - 拖动判定（条体/瓦片共用，纯值类型供无头钉测）
+
+/// 启动条拖动：按下记鼠标与窗口原点，越过 3pt 阈值后按位移返回窗口新原点——阈值内
+/// 视为点击（瓦片开录），越过阈值后 mouseUp 不再触发点击（与 NSButton 的点击/拖动
+/// 语义对齐）。坐标系一律屏幕坐标（`NSEvent.mouseLocation` / `window.frame.origin`）。
+struct LaunchBarDragTracker {
+    static let threshold: CGFloat = 3
+    private(set) var startMouse: CGPoint?
+    private(set) var startOrigin: CGPoint?
+    private(set) var moved = false
+
+    /// 按下：记录起点（窗口原点缺失 → 本轮只判点击，不移动）。
+    mutating func begin(mouse: CGPoint, windowOrigin: CGPoint?) {
+        startMouse = mouse
+        startOrigin = windowOrigin
+        moved = false
+    }
+
+    /// 拖到 `mouse` 时窗口应处的原点；未越过阈值/无窗口原点 → nil。
+    mutating func origin(forMouse mouse: CGPoint) -> CGPoint? {
+        guard let startMouse, let startOrigin else { return nil }
+        let dx = mouse.x - startMouse.x
+        let dy = mouse.y - startMouse.y
+        if !moved, hypot(dx, dy) >= Self.threshold { moved = true }
+        guard moved else { return nil }
+        return CGPoint(x: startOrigin.x + dx, y: startOrigin.y + dy)
+    }
+
+    /// 结束本轮，返回是否拖动过（true = 不应当作点击）；状态复位供下次按下。
+    mutating func end() -> Bool {
+        defer {
+            startMouse = nil
+            startOrigin = nil
+            moved = false
+        }
+        return moved
+    }
+}
+
+/// 毛玻璃底：不参与命中测试——空白处事件落到 LaunchBarView（整条可拖动），
+/// 瓦片/关闭钮仍各自命中。
+private final class LaunchBarBackgroundView: NSVisualEffectView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 // MARK: - LaunchBarView（条体：毛玻璃底 + 7 瓦片 + 分隔 + 关闭钮）
 
-/// 条体视图：hudWindow 毛玻璃（Omi 深色半透明观感）+ 等宽瓦片行（悬停高亮圆角底）+
-/// 细分隔线 + 右上角 ×。全 AppKit 原生（mouseDown 直回调，无 SwiftUI 手势依赖）。
+/// 条体视图：hudWindow 毛玻璃（随系统外观：深色=深色半透明、浅色=浅色半透明）+ 等宽
+/// 瓦片行（悬停高亮圆角底）+ 细分隔线 + 右上角 ×。全 AppKit 原生（mouseDown 直回调，
+/// 无 SwiftUI 手势依赖）。文字/图标/描边一律语义色，随系统深浅色自适应。条体空白处
+/// 按住可拖动整条（瓦片各自同样支持，见 LaunchBarTile）。
 final class LaunchBarView: NSView {
     private let modeTapped: (LaunchBarMode) -> Void
     private let onClose: () -> Void
     private var tiles: [LaunchBarTile] = []
+    /// 瓦片间分隔线（层色是 CGColor，切外观时需重解析——`viewDidChangeEffectiveAppearance`）。
+    private var dividers: [NSView] = []
+    /// 条体空白处的拖动状态。
+    private var dragTracker = LaunchBarDragTracker()
 
     init(modeTapped: @escaping (LaunchBarMode) -> Void, onClose: @escaping () -> Void) {
         self.modeTapped = modeTapped
@@ -169,8 +223,8 @@ final class LaunchBarView: NSView {
         layer?.cornerRadius = 12
         layer?.masksToBounds = true
 
-        // 毛玻璃底（hudWindow = Omi 深色半透明观感；圆角由容器层裁切）。
-        let effect = NSVisualEffectView(frame: bounds)
+        // 毛玻璃底（hudWindow 随系统外观明暗；圆角由容器层裁切；命中测试放行给条体）。
+        let effect = LaunchBarBackgroundView(frame: bounds)
         effect.material = .hudWindow
         effect.blendingMode = .behindWindow
         effect.state = .active
@@ -197,9 +251,9 @@ final class LaunchBarView: NSView {
                     width: 1,
                     height: LaunchBarLayout.barHeight - 24))
                 divider.wantsLayer = true
-                divider.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
                 divider.autoresizingMask = [.height]
                 addSubview(divider)
+                dividers.append(divider)
             }
         }
 
@@ -217,24 +271,58 @@ final class LaunchBarView: NSView {
             width: closeSize, height: closeSize)
         close.autoresizingMask = [.minXMargin, .minYMargin]
         addSubview(close)
+
+        refreshDividerColors()
     }
 
     required init?(coder: NSCoder) { fatalError("LaunchBarView 仅代码装配") }
+
+    /// 系统深浅色切换（含运行中切换）：CGColor 不随外观自动重解析，重设一次。
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshDividerColors()
+    }
+
+    /// 分隔线取语义色（深色=白 12%、浅色=黑 12%）。
+    private func refreshDividerColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let color = NSColor.labelColor.withAlphaComponent(0.12).cgColor
+            for divider in dividers {
+                divider.layer?.backgroundColor = color
+            }
+        }
+    }
 
     @objc private func closeClicked() {
         onClose()
     }
 
-    override func mouseDown(with event: NSEvent) {} // 条体空白处吞点击（不透传下层）
+    // 条体空白处：按住拖动整条（点击空白仍无动作，不透传下层）。
+
+    override func mouseDown(with event: NSEvent) {
+        dragTracker.begin(mouse: NSEvent.mouseLocation, windowOrigin: window?.frame.origin)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window,
+              let origin = dragTracker.origin(forMouse: NSEvent.mouseLocation) else { return }
+        window.setFrameOrigin(origin)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        _ = dragTracker.end()
+    }
 }
 
 // MARK: - LaunchBarTile（瓦片：标题 + 图标 + 悬停高亮）
 
-/// 单瓦片：白标题（13pt 中字重）+ 下方图标（SF 符号 / `.app` 自绘圆角方块）；
-/// TrackingArea 悬停高亮（Omi 选中态圆角底 white 0.10），mouseDown 即点击。
+/// 单瓦片：标题（13pt 中字重，语义色）+ 下方图标（SF 符号 / `.app` 自绘圆角方块）；
+/// TrackingArea 悬停高亮（Omi 选中态圆角底 label 0.10）。按住拖动 = 移动整条，未越
+/// 3pt 阈值松手 = 点击开录。
 final class LaunchBarTile: NSView {
     var onTap: ((LaunchBarMode) -> Void)?
     private let mode: LaunchBarMode
+    private var dragTracker = LaunchBarDragTracker()
     private var hovered = false {
         didSet { needsDisplay = true }
     }
@@ -255,20 +343,33 @@ final class LaunchBarTile: NSView {
     override func mouseExited(with event: NSEvent) { hovered = false }
 
     override func mouseDown(with event: NSEvent) {
-        onTap?(mode)
+        dragTracker.begin(mouse: NSEvent.mouseLocation, windowOrigin: window?.frame.origin)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window,
+              let origin = dragTracker.origin(forMouse: NSEvent.mouseLocation) else { return }
+        window.setFrameOrigin(origin)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        // 拖动后松手不触发开录（与按钮点击/拖动语义一致）。
+        if !dragTracker.end() {
+            onTap?(mode)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // 悬停高亮（Omi 选中态：圆角 8 灰底内衬）。
+        // 悬停高亮（Omi 选中态：圆角 8 灰底内衬；深色=白 10%、浅色=黑 10%）。
         if hovered {
-            NSColor.white.withAlphaComponent(0.10).setFill()
+            NSColor.labelColor.withAlphaComponent(0.10).setFill()
             NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 4), xRadius: 8, yRadius: 8).fill()
         }
         // 标题（上）。
         let title = NSLocalizedString(mode.titleKey, comment: "Launch bar mode")
         let titleAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 13, weight: .medium),
-            .foregroundColor: NSColor.white,
+            .foregroundColor: NSColor.labelColor,
         ]
         let titleSize = (title as NSString).size(withAttributes: titleAttributes)
         (title as NSString).draw(
@@ -282,7 +383,7 @@ final class LaunchBarTile: NSView {
             .withSymbolConfiguration(.init(pointSize: 22, weight: .regular)) {
             let tinted = NSImage(size: symbol.size, flipped: false) { rect in
                 symbol.draw(in: rect)
-                NSColor.white.set()
+                NSColor.labelColor.set()
                 rect.fill(using: .sourceAtop)
                 return true
             }
@@ -292,15 +393,15 @@ final class LaunchBarTile: NSView {
                 width: tinted.size.width, height: tinted.size.height)
             tinted.draw(in: drawRect)
         } else if mode == .app {
-            // 自绘「APP」圆角方块（Omi 同款：白描边圆角 + 白字）。
+            // 自绘「APP」圆角方块（Omi 同款：描边圆角 + 文字，语义色随系统明暗）。
             let box = NSRect(x: iconRect.midX - 16, y: iconRect.minY, width: 32, height: 26)
             let path = NSBezierPath(roundedRect: box, xRadius: 6, yRadius: 6)
-            NSColor.white.withAlphaComponent(0.9).setStroke()
+            NSColor.labelColor.withAlphaComponent(0.9).setStroke()
             path.lineWidth = 1.5
             path.stroke()
             let attributes: [NSAttributedString.Key: Any] = [
                 .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-                .foregroundColor: NSColor.white,
+                .foregroundColor: NSColor.labelColor,
             ]
             let text = "APP" as NSString
             let textSize = text.size(withAttributes: attributes)

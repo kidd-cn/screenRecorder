@@ -57,14 +57,19 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(recordCompletedShowList, forKey: Self.recordCompletedShowListKey) }
     }
 
-    /// 隐藏 Dock 栏 App 图标（2026-11-15，Omi 同款能力）：true = accessory（纯菜单栏，
-    /// 本应用既有形态）；false = regular（显示 Dock 图标）。经 NSApp.setActivationPolicy
-    /// 运行时切换，LSUIElement 下亦可生效。默认 true。
+    /// 隐藏 Dock 栏 App 图标（2026-11-15，Omi 同款能力）：true = accessory（纯菜单栏）；
+    /// false = regular（显示 Dock 图标）。经 NSApp.setActivationPolicy 运行时切换，Info.plist
+    /// LSUIElement 恒 false（2026-11-21 用户要求：Dock 图标默认显示）。默认 false。
     @Published var dockIconHidden: Bool {
         didSet {
             defaults.set(dockIconHidden, forKey: Self.dockIconHiddenKey)
-            NSApp.setActivationPolicy(dockIconHidden ? .accessory : .regular)
+            applyDockIconPolicy()
         }
+    }
+
+    /// 套用 Dock 图标偏好（启动时 init 内赋值不触发 didSet，由装配层显式调用一次）。
+    func applyDockIconPolicy() {
+        NSApp.setActivationPolicy(dockIconHidden ? .accessory : .regular)
     }
 
     /// 默认 ~/Movies/Hummingbird（目录创建由 RecordingFileStore.ensureDirectory 负责）。
@@ -362,8 +367,9 @@ final class SettingsStore: ObservableObject {
             rawValue: userDefaults.string(forKey: Self.captureQualityKey) ?? "") ?? .source
         self.recordCompletedShowList =
             userDefaults.object(forKey: Self.recordCompletedShowListKey) as? Bool ?? true
+        // 默认显示 Dock 图标（2026-11-21 用户要求）；曾勾选「隐藏」的用户落库 true 仍受尊重。
         self.dockIconHidden =
-            userDefaults.object(forKey: Self.dockIconHiddenKey) as? Bool ?? true
+            userDefaults.object(forKey: Self.dockIconHiddenKey) as? Bool ?? false
         self.countdownSeconds = Self.normalizedCountdown(userDefaults.object(forKey: Self.countdownSecondsKey) as? Int)
         self.pipEnabled = userDefaults.object(forKey: Self.pipEnabledKey) as? Bool ?? false
         // P5：摄像头画中画背景（默认 off 原画面）；解码失败（枚举演化）回退默认。

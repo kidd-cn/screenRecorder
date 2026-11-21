@@ -178,6 +178,9 @@ final class AppAssembly: ObservableObject {
 
     init() {
         let settings = SettingsStore()
+        // Dock 图标偏好启动即套用（SettingsStore init 内赋值不触发 didSet；Info.plist
+        // LSUIElement 恒 false，落库「隐藏」的用户在此切回 .accessory）。
+        settings.applyDockIconPolicy()
         // Q4 移出列表记账：账本缝接 UserDefaults（读 stringArray 归 Set，写 set(Array)），
         // 同一实例传入 fileStore 与列表 VM（见 removedListStore 属性注释）。
         let removedListStore = RemovedListStore(
@@ -1020,8 +1023,8 @@ final class AppAssembly: ObservableObject {
                 defer: false
             )
             window.title = NSLocalizedString("文件列表", comment: "Recording list window title")
-            // 2026-11-20 Omi 47.png 文件列表页：整窗深色（行/表头/缩略图观感基准同 Omi）。
-            window.appearance = NSAppearance(named: .darkAqua)
+            // 2026-11-20 Omi 47.png 文件列表页；2026-11-21 起外观随系统深浅色（不再钉
+            // darkAqua——表格分隔线/表头线/行内圆钮描边均已改语义色）。
             window.isReleasedWhenClosed = false
             window.contentView = NSHostingView(rootView: RecordingListView(viewModel: viewModel))
             window.center()
@@ -1269,8 +1272,8 @@ final class AppAssembly: ObservableObject {
     /// 选择器呈现的共同出口（P3a 从 openWindowPicker 抽取）：窗口归装配容器（装配红线），
     /// 懒建单实例复用，每次打开重建内容视图（复用窗口不重触发 `.task`，同 T18 文件列表的
     /// 教训；`scope` 决定初始范围，重建同时换窗口标题）。2026-11-16 Omi 55.png 复刻：
-    /// 窗口放大到 900×640（4 列大缩略图网格装得下），整窗钉死深色外观（Omi 恒深色页，
-    /// 网格白标签/下一步按钮的观感基准）。
+    /// 窗口放大到 900×640（4 列大缩略图网格装得下）。外观不钉死——随系统深浅色（2026-11-21
+    /// 用户反馈：窗口区域页颜色不随系统变化；网格标签/下一步按钮已改用语义色自适应）。
     private func presentPicker(scope: WindowPickerView.Scope, bannerText: String?) {
         if windowPickerWindowController == nil {
             let window = NSWindow(
@@ -1280,7 +1283,6 @@ final class AppAssembly: ObservableObject {
                 defer: false
             )
             window.isReleasedWhenClosed = false
-            window.appearance = NSAppearance(named: .darkAqua)
             window.center()
             windowPickerWindowController = NSWindowController(window: window)
         }
@@ -1669,8 +1671,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let terminationPollInterval: TimeInterval = 0.05
 
     /// Dock 图标点击 / Finder 重开（2026-11-15 用户反馈「dock app图标点击没有界面」）：
-    /// 打开启动条（Omi 主界面——7 录制模式横条）。LSUIElement 常态无 Dock 图标；
-    /// 用户关掉「隐藏 Dock 图标」后 Dock 点击即落到本入口。
+    /// 打开启动条（Omi 主界面——7 录制模式横条）。Dock 图标默认显示（2026-11-21 起
+    /// LSUIElement=false）；勾选「隐藏 Dock 图标」时切 accessory，本入口自然不触达。
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         Self.registeredAssembly?.openLaunchBar()
         return true

@@ -41,7 +41,9 @@ targets:
     info:
       path: ScreenRecorder/Info.plist
       properties:
-        LSUIElement: true
+        # 2026-11-21 用户要求：Dock 栏 App 图标默认显示（非纯菜单栏 agent）。
+        # 用户仍可在偏好设置勾选「隐藏」——运行时切 .accessory 生效。
+        LSUIElement: false
         # 显示名（2026-11-14 命名裁定）：「蜂鸟录屏」——蜂鸟悬停振翅、身体定格，
         # 是自然界最著名的「定格」意象（↔ 截图），高频振翅 ↔ 高帧率录制。
         # 只改显示名，不动 PRODUCT_BUNDLE_IDENTIFIER（TCC 权限与 UserDefaults 锚定它）。
