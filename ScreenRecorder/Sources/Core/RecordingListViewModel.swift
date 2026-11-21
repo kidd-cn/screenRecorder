@@ -414,6 +414,10 @@ final class RecordingListViewModel: ObservableObject {
                     }
                 }
             }
+            // 导出成功即清编辑草稿（2026-11-21 用户裁定「原文件要么删除，要么保留原样」
+            // ——保留分支不得残留 .zoomdraft.json 编辑信息；删除分支已随原文件清过，此处
+            // 幂等无害）。清后重开编辑器 = 全新编辑。尽力而为 try?（草稿是便利持久化）。
+            try? FileManager.default.removeItem(at: Self.draftURL(for: item.url))
             notifier?.notifyExportCompleted(fileURL: outputURL, originalDeleted: originalDeleted)
         } catch {
             notifier?.notifyExportFailed(

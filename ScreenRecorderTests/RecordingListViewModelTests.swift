@@ -310,6 +310,39 @@ final class RecordingListViewModelTests: XCTestCase {
             spy.completedOriginalDeleted, [true], "删除缝删成 → 通知载荷 originalDeleted=true")
     }
 
+    /// 导出成功即清编辑草稿（2026-11-21 用户裁定「原文件要么删除，要么保留原样」）：
+    /// **保留分支**（删除开关关）也必须清掉 `.zoomdraft.json`——原文件不得残留编辑信息；
+    /// 删除分支随原文件清过，此处幂等。失败路径不清（catch 分支不触达）。
+    func testRenderZoomClearsDraftOnSuccessEvenWhenOriginalKept() async throws {
+        let originalName = "录屏_2026-11-21_19-30-00.mp4"
+        let originalURL = directory.appendingPathComponent(originalName)
+        try Data("raw".utf8).write(to: originalURL)
+        let outputURL = directory.appendingPathComponent("录屏_2026-11-21_19-30-00_缩放.mp4")
+        let draftURL = RecordingListViewModel.draftURL(for: originalURL)
+        // 预置草稿（用户编辑过的形态）
+        try JSONEncoder().encode(
+            EditDocument(cuts: [CutSegment(start: 1, end: 2)], zoomSegments: [])).write(to: draftURL)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: draftURL.path), "前置：草稿在盘")
+
+        let spy = SpyExportNotifier()
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory),
+            durationProvider: { _ in 42.0 },
+            notifier: spy,
+            zoomRenderer: NonEmptyFileZoomRenderer(outputURL: outputURL),
+            postExportPrefs: { (false, false) }) // 保留分支：不 reveal 不删除
+
+        let item = makeItem(named: originalName)
+        await vm.renderZoom(
+            item, segments: [], cuts: [], options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264))
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: draftURL.path),
+                       "导出成功后草稿已清（保留分支也清）")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: originalURL.path),
+                      "原文件保留原样")
+        XCTAssertEqual(spy.completedOriginalDeleted, [false], "未删原文件")
+    }
+
     /// 删除缝删败（返回 false——生产闭包校验不过/删除抛错的真实形态）→ 通知载荷
     /// originalDeleted=false（不谎报已删），reveal 照常先行，完成通知照发。
     func testRenderZoomNotifiesOriginalDeletedFalseWhenDeleteFails() async throws {
