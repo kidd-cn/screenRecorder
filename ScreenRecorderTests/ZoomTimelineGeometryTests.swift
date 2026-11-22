@@ -184,6 +184,17 @@ final class ZoomTimelineGeometryTests: XCTestCase {
                                                              bucketSeconds: 0.02, count: 0))
     }
 
+    /// 车道判定钉测（2026-11-22 双击音频道不加关键帧回归）：非翻转坐标 y=0 在底部，
+    /// 音频车道 = 底侧 38.5%。
+    func testAudioLaneDetection() {
+        let height: CGFloat = 84
+        XCTAssertTrue(ZoomTimelineGeometry.isAudioLane(y: 0, height: height), "底边 = 音频车道")
+        XCTAssertTrue(ZoomTimelineGeometry.isAudioLane(y: 32, height: height), "38.5% 以内 = 音频车道")
+        XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 33, height: height), "38.5% 以上 = 视频车道")
+        XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 80, height: height), "顶边 = 视频车道")
+        XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 10, height: 0), "零高退化")
+    }
+
     /// 时间码钉测（剪映同款 HH:MM:SS:FF @30）。
     func testTimecodeFormat() {
         XCTAssertEqual(ZoomTimelineGeometry.timecode(0), "00:00:00:00")

@@ -193,6 +193,15 @@ enum ZoomTimelineGeometry {
         return .background
     }
 
+    /// 车道判定（批次 4c-2，纯函数）：画布为非翻转坐标（y = 0 在**底部**）——
+    /// 音频车道 = 底侧 38.5%（与分隔线绘制 y = height × 0.385 同源）。曾因比较写反
+    /// （>=）致双击音频道进不了加关键帧分支——2026-11-22 用户反馈实证。
+    static let audioLaneRatio: CGFloat = 0.385
+    static func isAudioLane(y: CGFloat, height: CGFloat) -> Bool {
+        guard height > 0 else { return false }
+        return y <= height * audioLaneRatio
+    }
+
     /// 波形桶区间（纯函数，含越界钳制）：源时间区间 → bucket 下标闭区间；两端钳进
     /// [0, count-1]（音轨可短于视频——钳一端后交换会越界，2026-11-21 draw 崩溃根因）。
     /// count ≤ 0 → nil。
@@ -569,7 +578,7 @@ final class ZoomTimelineCanvas: NSView {
         let scale = pxPerSec(model: model)
         let offset = model.timelineOffset
         // 音频车道（下车道）优先：关键帧菱形命中 → 拖动/⌥删；双击空白 → 添加。
-        if point.y >= bounds.height * 0.385 {
+        if ZoomTimelineGeometry.isAudioLane(y: point.y, height: bounds.height) {
             if let index = nearestKeyframeIndex(at: point, model: model, scale: scale, offset: offset) {
                 if event.modifierFlags.contains(.option) {
                     model.removeKeyframe(at: index)
