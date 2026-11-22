@@ -1164,10 +1164,11 @@ enum OfflineZoomRenderer {
                         let half = window.boundary
                         // 前半：main=A → target=B（time=progress）；后半：main=B → target=A
                         //（time=1−progress）——中点两侧皆 50/50 连续。
-                        let blendTime = outSeconds < half ? progress : 1 - progress
+                        let linear = outSeconds < half ? progress : 1 - progress
+                        let eased = linear * linear * (3 - 2 * linear) // smoothstep：两端驻留更久
                         composed = baseImage.applyingFilter("CIDissolveTransition", parameters: [
                             "inputTargetImage": other.clampedToExtent(),
-                            "inputTime": blendTime,
+                            "inputTime": eased,
                         ])
                     }
                 }

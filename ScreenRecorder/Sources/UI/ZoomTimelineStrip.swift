@@ -864,7 +864,7 @@ enum ZoomEditorMenus {
         }
         if let existing = model.transitions[seamIndex] {
             // 已有转场：时长档位 + 删除
-            for duration in [0.2, 0.5, 1.0, 2.0] {
+            for duration in [0.5, 1.0, 1.5, 2.0] {
                 let selected = abs(existing.duration - duration) < 1e-9
                 addItem(
                     String(format: NSLocalizedString("%.1fs%@", comment: "Transition duration"),
@@ -878,10 +878,10 @@ enum ZoomEditorMenus {
                 Task { @MainActor in model?.removeTransition(at: seamIndex) }
             }
         } else {
-            addItem(NSLocalizedString("添加黑场转场（0.5s）", comment: "Add black transition")) { [weak model] in
+            addItem(NSLocalizedString("添加黑场转场（1s）", comment: "Add black transition")) { [weak model] in
                 Task { @MainActor in model?.addTransition(at: seamIndex, kind: .black) }
             }
-            addItem(NSLocalizedString("添加溶解转场（0.5s）", comment: "Add crossfade transition")) { [weak model] in
+            addItem(NSLocalizedString("添加溶解转场（1s）", comment: "Add crossfade transition")) { [weak model] in
                 Task { @MainActor in model?.addTransition(at: seamIndex, kind: .crossfade) }
             }
         }

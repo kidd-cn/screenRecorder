@@ -44,7 +44,7 @@ struct EditTransition: Codable, Equatable {
     var kind: Kind
     var duration: TimeInterval
 
-    init(kind: Kind, duration: TimeInterval = 0.5) {
+    init(kind: Kind, duration: TimeInterval = 1.0) {
         self.kind = kind
         self.duration = min(max(duration, Self.durationRange.lowerBound),
                             Self.durationRange.upperBound)
@@ -356,11 +356,16 @@ struct EditDocument: Codable, Equatable {
         return nil
     }
 
-    /// 黑场转场增益（纯函数）：窗口内 |t − boundary| / (d/2)（中点 = 0 全黑，两端 = 1）；
-    /// 非黑场窗口/窗口外 → 1。溶解转场音频不处理（v1 视觉转场、声音硬切）。
+    /// 黑场转场增益（纯函数）：窗口内 |progress − 0.5| × 2 后过 **0.2 平台 + smoothstep**
+    /// ——中点附近 20% 窗口持续全黑（线性三角的「全黑」仅一帧，观感一闪而过——
+    /// 2026-11-22 用户反馈），两端平滑回到 1。溶解转场音频不处理（返回 1）。
     func blackTransitionGain(atOutputTime t: TimeInterval) -> Double {
         guard let state = transitionState(atOutputTime: t), state.kind == .black else { return 1 }
-        return min(max(abs(state.progress - 0.5) * 2, 0), 1)
+        let linear = min(max(abs(state.progress - 0.5) * 2, 0), 1)
+        let plateau = 0.2
+        guard linear > plateau else { return 0 }
+        let x = min((linear - plateau) / (1 - plateau), 1)
+        return x * x * (3 - 2 * x) // smoothstep
     }
 
     /// 接缝移动（剪映 trim 语义）：seamIndex ∈ 0...clips.count——0 = 片头裁切

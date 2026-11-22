@@ -415,25 +415,31 @@ final class TransitionTests: XCTestCase {
     }
 
     func testBlackGainCurve() {
+        // 窗口 [0.8, 1.2)，d=0.4
         let document = EditDocument(
             clips: [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)],
             zoomSegments: [],
             transitions: [1: EditTransition(kind: .black, duration: 0.4)])
         XCTAssertEqual(document.blackTransitionGain(atOutputTime: 0.8), 1, accuracy: 1e-9)
+        // 平台段：中点 ±20% 窗口持续全黑（线性 0.5 → 平台后 smoothstep ≈0.316）
         XCTAssertEqual(document.blackTransitionGain(atOutputTime: 1.0), 0, accuracy: 1e-9)
-        XCTAssertEqual(document.blackTransitionGain(atOutputTime: 0.9), 0.5, accuracy: 1e-9)
+        let gainAtP25 = document.blackTransitionGain(atOutputTime: 0.9)
+        XCTAssertGreaterThan(gainAtP25, 0.2, "平台外开始回升")
+        XCTAssertLessThan(gainAtP25, 0.5, "smoothstep 比线性低（黑保持更久）")
         XCTAssertEqual(document.blackTransitionGain(atOutputTime: 0.5), 1, "窗口外恒 1")
+        // 平台内（p=0.45 → linear 0.1 ≤ 0.2 → 全黑）
+        XCTAssertEqual(document.blackTransitionGain(atOutputTime: 0.98), 0, accuracy: 1e-9)
     }
 
     func testRippleDeleteDropsCrossedTransitionAndKeepsShiftedSeam() {
-        // 三 clip：缝在 1.0 与 2.0；转场挂缝 2（边界 2.0）
+        // 三 clip：缝在 1.0 与 2.0；转场挂缝 2（边界 2.0，d=0.4 → 窗口 [1.8, 2.2)）
         let document = EditDocument(
             clips: [EditClip(sourceStart: 0, sourceEnd: 1),
                     EditClip(sourceStart: 1, sourceEnd: 2),
                     EditClip(sourceStart: 2, sourceEnd: 3)],
             zoomSegments: [],
-            transitions: [2: EditTransition(kind: .black)])
-        // 删除 [1.4, 1.6)：不触及转场窗口 [1.75, 2.25)；新边界 1.8 → 新缝不变（仍在第 2 缝）
+            transitions: [2: EditTransition(kind: .black, duration: 0.4)])
+        // 删除 [1.4, 1.6)：不触及转场窗口 [1.8, 2.2)（1.6 < 1.8）；新边界 1.8 → 缝保持
         let kept = document.removingOutputRange(lower: 1.4, upper: 1.6)
         XCTAssertEqual(kept.transitions.count, 1, "未相交 → 保留")
         XCTAssertEqual(kept.transitions.values.first?.kind, .black)
