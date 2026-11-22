@@ -126,6 +126,14 @@ final class ZoomEditorModel: ObservableObject {
     @Published private(set) var keyframes: [EditKeyframe] = []
     /// 接缝转场（键 = 接缝下标；批次 4c-2）。
     @Published private(set) var transitions: [Int: EditTransition] = [:]
+    /// 画面裁剪（nil = 不裁；剪映「裁剪」复刻）。
+    @Published private(set) var crop: EditCrop?
+    /// 裁剪面板开关（播放行「裁剪」按钮切换）。
+    @Published var isCropPanelOpen = false
+    /// 裁剪会话起始快照（面板打开时捕获；关闭时若有变化一次性入撤销栈）。
+    private var cropUndoSnapshot: EditDocument?
+    /// 视频自然尺寸（裁剪预览遮罩的对齐基准；loadMediaInfo 补齐）。
+    @Published private(set) var videoSize: CGSize = .zero
     /// 选中的 clip 下标（⌘+点击选中 → 速度面板；validate 重排后按值回找）。
     @Published var selectedClipIndex: Int?
     /// 选中段下标（行点击/时间线点击选中；validate 重排后按编辑后段值回找）。
@@ -271,9 +279,14 @@ final class ZoomEditorModel: ObservableObject {
     /// 片段流（v2）：空文档（含 v1 草稿迁移场景——迁移需要时长）在时长就绪后重读草稿
     /// 或置单 clip 全程。
     func loadMediaInfo() async {
-        let seconds = try? await AVURLAsset(url: item.url).load(.duration).seconds
+        let asset = AVURLAsset(url: item.url)
+        let seconds = try? await asset.load(.duration).seconds
         guard let seconds, seconds.isFinite, seconds > 0 else { return }
         sourceDuration = seconds
+        if let track = try? await asset.loadTracks(withMediaType: .video).first,
+           let size = try? await track.load(.naturalSize) {
+            videoSize = size
+        }
         if clips.isEmpty {
             let document = listViewModel.loadDraft(for: item, sourceDuration: seconds)
             if document.clips.isEmpty {
@@ -286,6 +299,7 @@ final class ZoomEditorModel: ObservableObject {
             backgroundMusic = document.backgroundMusic
             keyframes = document.keyframes
             transitions = document.transitions
+            crop = document.crop
             clampTimelineOffset()
             saveDocument()
         }
@@ -540,6 +554,37 @@ final class ZoomEditorModel: ObservableObject {
         applyClipEdit { $0.transitions[seam]?.duration = duration }
     }
 
+    // MARK: 画面裁剪（剪映 01.png 剪刀「裁剪」复刻：四边内缩，裁掉填黑、内容原位）
+
+    /// 开/关裁剪面板（打开时捕获撤销快照；关闭时若有变化一次性入栈）。
+    func toggleCropPanel() {
+        if isCropPanelOpen {
+            if let snapshot = cropUndoSnapshot, snapshot.crop != crop {
+                undoStack.append(snapshot)
+                if undoStack.count > Self.undoLimit { undoStack.removeFirst() }
+                redoStack.removeAll()
+                syncUndoFlags()
+            }
+            cropUndoSnapshot = nil
+            isCropPanelOpen = false
+        } else {
+            cropUndoSnapshot = currentDocument()
+            isCropPanelOpen = true
+        }
+    }
+
+    /// 应用裁剪（面板滑杆实时调用；不入撤销栈——关闭面板时一次性入）。
+    func applyCrop(_ newCrop: EditCrop) {
+        let validated = newCrop.validated
+        crop = validated.isIdentity ? nil : validated
+        saveDocument()
+    }
+
+    func resetCrop() {
+        crop = nil
+        saveDocument()
+    }
+
     /// 配乐 URL 解析（书签 → 可访问 URL；渲染/混音期间保持访问，由调用方 stop）。
     func resolveMusicAccess() -> (url: URL, stop: () -> Void)? {
         guard let music = backgroundMusic else { return nil }
@@ -638,7 +683,7 @@ final class ZoomEditorModel: ObservableObject {
             let rendered = await listViewModel.renderZoom(
                 itemRef, segments: document.zoomSegments, clips: document.clips,
                 keyframes: document.keyframes, transitions: document.transitions,
-                options: exportOptions)
+                crop: document.crop, options: exportOptions)
             // 配乐混音（批次 4b）：渲染成功且有配乐 → AVMutableComposition 双音轨混音，
             // 原地替换成片（tmp 导出后替换）。
             guard let music = document.backgroundMusic, music.volume > 0.01, let rendered else { return }
@@ -697,7 +742,7 @@ final class ZoomEditorModel: ObservableObject {
     private func currentDocument() -> EditDocument {
         EditDocument(clips: clips, zoomSegments: segments,
                      sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                     keyframes: keyframes, transitions: transitions)
+                     keyframes: keyframes, transitions: transitions, crop: crop)
     }
 
     private func applyDocument(_ document: EditDocument) {
@@ -707,6 +752,7 @@ final class ZoomEditorModel: ObservableObject {
         backgroundMusic = document.backgroundMusic
         keyframes = document.keyframes
         transitions = document.transitions
+        crop = document.crop
         clampTimelineOffset()
         selectedClipIndex = nil
         selectedIndex = nil
@@ -760,6 +806,7 @@ final class ZoomEditorModel: ObservableObject {
         backgroundMusic = validated.backgroundMusic
         keyframes = validated.keyframes
         transitions = validated.transitions
+        crop = validated.crop
         clampTimelineOffset() // 时长可能变短（波纹删除）——平移不得越界
         clampSelections() // 过期选中下标置 nil（防 SwiftUI Binding 越界）
         saveDocument()
@@ -862,10 +909,17 @@ struct ZoomEditorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: OmiStyle.sectionSpacing) {
-            PlayerPreview(player: model.player)
-                .frame(minHeight: 220, maxHeight: 300)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: OmiStyle.cardRadius))
+            ZStack {
+                PlayerPreview(player: model.player)
+                    .frame(minHeight: 220, maxHeight: 300)
+                    .frame(maxWidth: .infinity)
+                if model.isCropPanelOpen, let crop = model.crop, !crop.isIdentity,
+                   model.videoSize.width > 0 {
+                    CropMaskOverlay(crop: crop, videoSize: model.videoSize)
+                        .allowsHitTesting(false)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: OmiStyle.cardRadius))
             OmiCard { playControlRow }
             OmiCard {
                 VStack(alignment: .leading, spacing: 4) {
@@ -911,6 +965,9 @@ struct ZoomEditorView: View {
                         .foregroundStyle(OmiStyle.faintText)
                 }
             }
+            if model.isCropPanelOpen {
+                cropPanel
+            }
             OmiCard { segmentSection }
             selectedSegmentSection
             selectedClipSection
@@ -955,6 +1012,14 @@ struct ZoomEditorView: View {
             }
             .disabled(!model.canRedo)
             .help("重做（⇧⌘Z）")
+            // 裁剪（剪映 01.png 剪刀按钮复刻）：四边内缩，裁掉填黑
+            Button {
+                model.toggleCropPanel()
+            } label: {
+                Label("裁剪", systemImage: "scissors")
+            }
+            .disabled(model.videoSize.width <= 0)
+            .help("裁剪画面：四边内缩，裁掉区域填黑（内容保持原位）")
             // 封面（剪映 01.png 左侧按钮复刻）：抓播放头当前帧存 PNG
             Button {
                 model.saveCoverFrame()
@@ -1054,6 +1119,47 @@ struct ZoomEditorView: View {
                         .font(.footnote)
                 }
             }
+        }
+    }
+
+    // MARK: 裁剪面板（剪映 01.png 剪刀复刻）
+
+    private var cropPanel: some View {
+        OmiCard {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text("裁剪").font(.headline)
+                    Text("裁掉区域填黑，内容保持原位")
+                        .font(.caption)
+                        .foregroundStyle(OmiStyle.faintText)
+                    Spacer()
+                    Button("重置") { model.resetCrop() }
+                        .disabled(model.crop == nil)
+                    Button("完成") { model.toggleCropPanel() }
+                }
+                cropSlider("左", \.left)
+                cropSlider("右", \.right)
+                cropSlider("上", \.top)
+                cropSlider("下", \.bottom)
+            }
+        }
+    }
+
+    private func cropSlider(_ title: String,
+                            _ keyPath: WritableKeyPath<EditCrop, Double>) -> some View {
+        let current = model.crop ?? EditCrop()
+        return HStack(spacing: 8) {
+            Text(title).frame(width: 20, alignment: .leading)
+            Slider(value: Binding(
+                get: { current[keyPath: keyPath] },
+                set: { value in
+                    var newCrop = model.crop ?? EditCrop()
+                    newCrop[keyPath: keyPath] = value
+                    model.applyCrop(newCrop)
+                }), in: 0...EditCrop.maxInset)
+            Text("\(Int((current[keyPath: keyPath] * 100).rounded()))%")
+                .font(.system(.footnote, design: .monospaced))
+                .frame(width: 42, alignment: .trailing)
         }
     }
 
@@ -1324,5 +1430,47 @@ enum ZoomEditorWindowOpener {
         NSApp.activate(ignoringOtherApps: true)
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
+    }
+}
+
+
+/// 裁剪预览遮罩（剪映复刻）：按视频 aspect-fit 对齐播放器画面，四边蒙黑。
+private struct CropMaskOverlay: View {
+    let crop: EditCrop
+    let videoSize: CGSize
+
+    var body: some View {
+        GeometryReader { geo in
+            let scale = min(geo.size.width / max(videoSize.width, 1),
+                            geo.size.height / max(videoSize.height, 1))
+            let fitted = CGSize(width: videoSize.width * scale, height: videoSize.height * scale)
+            let origin = CGPoint(x: (geo.size.width - fitted.width) / 2,
+                                 y: (geo.size.height - fitted.height) / 2)
+            let mask = Color.black.opacity(0.72)
+            ZStack(alignment: .topLeading) {
+                mask
+                    .frame(width: fitted.width * crop.left, height: fitted.height)
+                    .offset(x: origin.x, y: origin.y)
+                mask
+                    .frame(width: fitted.width * crop.right, height: fitted.height)
+                    .offset(x: origin.x + fitted.width - fitted.width * crop.right, y: origin.y)
+                mask
+                    .frame(width: fitted.width * (1 - crop.left - crop.right),
+                           height: fitted.height * crop.top)
+                    .offset(x: origin.x + fitted.width * crop.left, y: origin.y)
+                mask
+                    .frame(width: fitted.width * (1 - crop.left - crop.right),
+                           height: fitted.height * crop.bottom)
+                    .offset(x: origin.x + fitted.width * crop.left,
+                            y: origin.y + fitted.height - fitted.height * crop.bottom)
+                // 裁剪框白边
+                Rectangle()
+                    .stroke(Color.white.opacity(0.9), lineWidth: 1)
+                    .frame(width: fitted.width * (1 - crop.left - crop.right),
+                           height: fitted.height * (1 - crop.top - crop.bottom))
+                    .offset(x: origin.x + fitted.width * crop.left,
+                            y: origin.y + fitted.height * crop.top)
+            }
+        }
     }
 }

@@ -732,6 +732,7 @@ enum OfflineZoomRenderer {
     /// `_剪辑.mp4`，否则 `_缩放.mp4`。`context` 供 headless 测试注入软件渲染上下文。
     static func render(sourceURL: URL, segments: [ZoomSegment], clips: [EditClip]? = nil,
                        keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:],
+                       crop: EditCrop? = nil,
                        options: ExportVideoOptions,
                        progress: @escaping (Double) -> Void,
                        context: CIContext = CIContext(options: [.useSoftwareRenderer: false])) async throws -> URL {
@@ -740,7 +741,7 @@ enum OfflineZoomRenderer {
         // noRenderableSamples）；非空 = 片段流成品轨。
         let validatedDocument = clips.map { request in
             EditDocument.validate(EditDocument(clips: request, zoomSegments: [], keyframes: keyframes,
-                                               transitions: transitions))
+                                               transitions: transitions, crop: crop))
         }
         let validatedClips = validatedDocument?.clips
         let validatedTransitions = validatedDocument?.transitions ?? [:]
@@ -755,7 +756,7 @@ enum OfflineZoomRenderer {
         let editDocument = EditDocument(
             clips: validatedClips ?? EditDocument.initial(duration: durationSeconds).clips,
             zoomSegments: [], keyframes: keyframes,
-            transitions: validatedTransitions)
+            transitions: validatedTransitions, crop: crop)
 
         let naturalSize = try await videoTrack.load(.naturalSize)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
@@ -1129,12 +1130,28 @@ enum OfflineZoomRenderer {
                 .concatenating(zoomTransform ?? .identity)
                 .concatenating(canvasScale)
 
+            // 画面裁剪（剪映「裁剪」复刻）：画布不变、裁掉区域填黑、内容保持原位。
+            let crop = editDocument.crop
+            let hasCrop = crop.map { !$0.isIdentity } ?? false
             var outputBuffer: CVPixelBuffer
-            if total == .identity {
-                outputBuffer = sourceBuffer // 无缩放且画布同尺寸：零渲染直通（同 PiPCompositor 全缺省直返）
+            if total == .identity && !hasCrop {
+                outputBuffer = sourceBuffer // 无缩放/裁剪且画布同尺寸：零渲染直通
             } else {
+                var image = CIImage(cvPixelBuffer: sourceBuffer).transformed(by: total)
+                if let crop, hasCrop {
+                    let extent = image.extent
+                    // CI y 向上：bottom 内缩从下缘算、top 从上缘算
+                    let rect = CGRect(
+                        x: extent.minX + extent.width * CGFloat(crop.left),
+                        y: extent.minY + extent.height * CGFloat(crop.bottom),
+                        width: extent.width * CGFloat(1 - crop.left - crop.right),
+                        height: extent.height * CGFloat(1 - crop.top - crop.bottom))
+                    let cropped = image.cropped(to: rect)
+                    let black = CIImage(color: .black).cropped(to: extent)
+                    image = cropped.composited(over: black)
+                }
                 let rendered = try makeOutputBuffer()
-                context.render(CIImage(cvPixelBuffer: sourceBuffer).transformed(by: total), to: rendered)
+                context.render(image, to: rendered)
                 outputBuffer = rendered
             }
 

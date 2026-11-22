@@ -262,7 +262,7 @@ final class RecordingListViewModelTests: XCTestCase {
 
         func render(
             sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
-            transitions: [Int: EditTransition],
+            transitions: [Int: EditTransition], crop: EditCrop?,
             options: ExportVideoOptions, progress: @escaping (Double) -> Void
         ) async throws -> URL {
             try Data("zoomed".utf8).write(to: outputURL)
