@@ -347,9 +347,11 @@ final class ZoomEditorModel: ObservableObject {
 
     /// 当前 clips 的文档面（映射/编辑操作真源；画布接缝换算只读访问）。
     var clipsDocument: EditDocument {
+        // ⚠️ 新增文档字段必须在此携带——applyClipEdit/applyEdit 从本面读改写回，
+        // 漏带 = 该字段的所有编辑互相抹除（transitions 曾犯，keyframes 同前科）
         EditDocument(clips: clips, zoomSegments: segments,
                      sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                     keyframes: keyframes)
+                     keyframes: keyframes, transitions: transitions)
     }
 
     // MARK: 分段编辑（唯一写入口：全部经 ZoomEditorLogic.applyEdit 统一闸）
@@ -483,10 +485,11 @@ final class ZoomEditorModel: ObservableObject {
         applyClipEdit { $0.transitions[seam] = EditTransition(kind: kind) }
     }
 
-    /// 播放头最近的接缝下标（seam ∈ 1...clips.count，即右 clip 下标；无 clip → nil）。
+    /// 播放头最近的**内部**接缝下标（seam ∈ 1..<clips.count；片尾缝无转场键不参与；
+    /// 无内部接缝 → nil）。
     func nearestSeam(toOutputTime t: TimeInterval) -> Int? {
-        guard !clips.isEmpty else { return nil }
-        let boundaries = clipsDocument.seamBoundaries(of: clips)
+        guard clips.count >= 2 else { return nil }
+        let boundaries = Array(clipsDocument.seamBoundaries(of: clips).dropLast())
         var best: (seam: Int, distance: TimeInterval)?
         for (index, boundary) in boundaries.enumerated() {
             let distance = abs(boundary - t)

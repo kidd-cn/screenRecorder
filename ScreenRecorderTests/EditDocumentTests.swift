@@ -574,3 +574,68 @@ final class TransitionCycleTests: XCTestCase {
         XCTAssertNil(model.transitions[1])
     }
 }
+
+/// 多转场共存钉测（2026-11-22「无法同时在多个删除点上做转场」回归）：
+/// clipsDocument 曾漏带 transitions——applyClipEdit 从空转场文档读改写回，加 B 抹 A。
+@MainActor
+final class MultiTransitionTests: XCTestCase {
+    func testMultipleTransitionsCoexistThroughModel() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MultiTransition-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("多转场夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        // 三个 clip（缝 1、缝 2）
+        model.cutOutputRange(lower: 0.1, upper: 0.5)
+        model.cutOutputRange(lower: 0.3, upper: 0.4)
+        XCTAssertEqual(model.clips.count, 3)
+
+        // 两个删除点分别加转场 → 必须共存
+        model.addTransition(at: 1, kind: .black)
+        XCTAssertEqual(model.transitions[1]?.kind, .black)
+        model.addTransition(at: 2, kind: .crossfade)
+        XCTAssertEqual(model.transitions[2]?.kind, .crossfade)
+        XCTAssertEqual(model.transitions[1]?.kind, .black, "加 B 后 A 必须仍在")
+
+        // 草稿同步（两转场都在）
+        let draft = vm.loadDraft(for: item, sourceDuration: 1.0)
+        XCTAssertEqual(draft.transitions[1]?.kind, .black)
+        XCTAssertEqual(draft.transitions[2]?.kind, .crossfade)
+
+        // 改 A 时长不影响 B
+        model.setTransitionDuration(at: 1, duration: 1.5)
+        let transitionA = try XCTUnwrap(model.transitions[1])
+        XCTAssertEqual(transitionA.duration, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(model.transitions[2]?.kind, .crossfade)
+    }
+
+    func testNearestSeamExcludesTailBoundary() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("NearestSeam-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("近缝夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+        model.cutOutputRange(lower: 0.1, upper: 0.5) // 两 clip，内部缝边界 0.1
+
+        model.seek(to: 0.9) // 播放头在片尾附近
+        XCTAssertEqual(model.nearestSeam(toOutputTime: 0.9), 1,
+                       "片尾缝不参与——最近内部缝兜底")
+        model.seek(to: 0.3)
+        XCTAssertEqual(model.nearestSeam(toOutputTime: 0.3), 1)
+    }
+}
