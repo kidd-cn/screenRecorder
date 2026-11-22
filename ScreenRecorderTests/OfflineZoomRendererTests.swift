@@ -650,31 +650,6 @@ final class OfflineZoomRendererTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(actual.2 - expected.2), colorTolerance, "\(message)：蓝通道", file: file, line: line)
     }
 
-
-    /// 画面裁剪渲染钉测（剪映「裁剪」复刻）：左半裁剪 → 左半填黑、右半内容原位。
-    func testRenderCropFillsLeftHalfBlack() async throws {
-        let sourceURL = directory.appendingPathComponent("裁剪夹具源.mp4")
-        try await makeFixtureVideo(at: sourceURL)
-        let outputURL = try await OfflineZoomRenderer.render(
-            sourceURL: sourceURL,
-            segments: [],
-            clips: [EditClip(sourceStart: 0, sourceEnd: 2)],
-            keyframes: [],
-            transitions: [:],
-            crop: EditCrop(left: 0.5),
-            options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
-            progress: { _ in },
-            context: CIContext(options: [.useSoftwareRenderer: true]))
-        let output = AVURLAsset(url: outputURL)
-        let generator = AVAssetImageGenerator(asset: output)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
-        let frame = try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
-        try assertPixel(frame, x: 40, y: 90, near: (0, 0, 0), "左半裁剪区填黑")
-        try assertPixel(frame, x: 240, y: 90, near: background, "右半内容原位")
-    }
-
     /// 黑场转场集成钉测（批次 4c-2 Task B）：2s 夹具切两 clip、缝 1 处挂黑场 0.4s
     ///（窗口 [0.8,1.2)）——窗口中点输出帧应接近全黑，窗口外保持正常画面。
     func testRenderBlackTransitionDarkensMidpoint() async throws {

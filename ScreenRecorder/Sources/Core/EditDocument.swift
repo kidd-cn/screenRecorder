@@ -32,50 +32,6 @@ struct EditMusicTrack: Codable, Equatable {
     var volume: Double
 }
 
-/// 画面裁剪（剪映 01.png 剪刀「裁剪」功能复刻）：四边内缩比例（0…0.45，成对和 ≤0.9）。
-/// 语义：成片画布尺寸不变，裁掉区域填黑（内容保持原位）——CapCut 同款。
-struct EditCrop: Codable, Equatable {
-    var left: Double
-    var top: Double
-    var right: Double
-    var bottom: Double
-
-    init(left: Double = 0, top: Double = 0, right: Double = 0, bottom: Double = 0) {
-        self.left = left
-        self.top = top
-        self.right = right
-        self.bottom = bottom
-    }
-
-    static let maxInset: Double = 0.45
-
-    var isIdentity: Bool {
-        abs(left) < 1e-4 && abs(top) < 1e-4 && abs(right) < 1e-4 && abs(bottom) < 1e-4
-    }
-
-    /// 钳制：各边 0…0.45；成对和超 0.9 时按比例压回（保证至少 10% 可视）。
-    var validated: EditCrop {
-        var crop = EditCrop(
-            left: min(max(left, 0), Self.maxInset),
-            top: min(max(top, 0), Self.maxInset),
-            right: min(max(right, 0), Self.maxInset),
-            bottom: min(max(bottom, 0), Self.maxInset))
-        let horizontal = crop.left + crop.right
-        if horizontal > 0.9 {
-            let scale = 0.9 / horizontal
-            crop.left *= scale
-            crop.right *= scale
-        }
-        let vertical = crop.top + crop.bottom
-        if vertical > 0.9 {
-            let scale = 0.9 / vertical
-            crop.top *= scale
-            crop.bottom *= scale
-        }
-        return crop
-    }
-}
-
 /// 片段间转场（剪辑 v2 批次 4c-2）：挂在**接缝**上（clips[i-1] 与 clips[i] 之间，
 /// 键 = i ∈ 1..<clips.count）。转场窗口 [boundary − d/2, boundary + d/2) 占用两侧
 /// 各半——成片总时长不变（占用两侧素材的头尾）。v1 两种：黑场 / 交叉溶解。
@@ -166,27 +122,23 @@ struct EditDocument: Codable, Equatable {
     var keyframes: [EditKeyframe]
     /// 接缝转场（键 = 接缝下标 = 该接缝右侧 clip 的下标；批次 4c-2）。
     var transitions: [Int: EditTransition]
-    /// 画面裁剪（nil = 不裁；批次 4c-2 裁剪复刻）。
-    var crop: EditCrop?
 
     static let empty = EditDocument(clips: [], zoomSegments: [])
 
     /// 手写 Codable（旧版草稿缺字段 → 默认值 decodeIfPresent）。
     enum CodingKeys: String, CodingKey {
-        case clips, zoomSegments, sourceVolume, backgroundMusic, keyframes, transitions, crop
+        case clips, zoomSegments, sourceVolume, backgroundMusic, keyframes, transitions
     }
 
     init(clips: [EditClip], zoomSegments: [ZoomSegment],
          sourceVolume: Double = 1, backgroundMusic: EditMusicTrack? = nil,
-         keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:],
-         crop: EditCrop? = nil) {
+         keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:]) {
         self.clips = clips
         self.zoomSegments = zoomSegments
         self.sourceVolume = sourceVolume
         self.backgroundMusic = backgroundMusic
         self.keyframes = EditKeyframe.validate(keyframes)
         self.transitions = transitions
-        self.crop = crop?.validated
     }
 
     init(from decoder: Decoder) throws {
@@ -205,7 +157,6 @@ struct EditDocument: Codable, Equatable {
             if let index = Int(key) { parsed[index] = value }
         }
         transitions = parsed
-        crop = try container.decodeIfPresent(EditCrop.self, forKey: .crop)?.validated
     }
 
     func encode(to encoder: Encoder) throws {
@@ -217,7 +168,6 @@ struct EditDocument: Codable, Equatable {
         try container.encode(keyframes, forKey: .keyframes)
         let stringKeys = Dictionary(uniqueKeysWithValues: transitions.map { (String($0.key), $0.value) })
         try container.encode(stringKeys, forKey: .transitions)
-        try container.encodeIfPresent(crop, forKey: .crop)
     }
 
     /// 最短片段源长（秒；validate 硬约束——交互闸另设更宽裕的手感下限）。
@@ -256,8 +206,7 @@ struct EditDocument: Codable, Equatable {
         }
         return EditDocument(clips: clips, zoomSegments: ZoomSegment.validate(document.zoomSegments),
                             sourceVolume: document.sourceVolume, backgroundMusic: document.backgroundMusic,
-                            keyframes: document.keyframes, transitions: transitions,
-                            crop: document.crop?.validated)
+                            keyframes: document.keyframes, transitions: transitions)
     }
 
     // MARK: 源↔成品双向映射（折叠真源——渲染 PTS、预览 seek、UI 铺排共用）
@@ -448,8 +397,7 @@ struct EditDocument: Codable, Equatable {
         }
         return EditDocument.validate(EditDocument(clips: clips, zoomSegments: zoomSegments,
                                                   sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                                                  keyframes: keyframes, transitions: transitions,
-                                                  crop: crop))
+                                                  keyframes: keyframes, transitions: transitions))
     }
 
     /// 缩放段映射到成品时间轴（UI 铺排用；渲染按源时间查找不走此函数）：
