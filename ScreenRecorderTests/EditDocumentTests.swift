@@ -356,3 +356,106 @@ final class KeyframeModelTests: XCTestCase {
                        model.keyframes, "关键帧随草稿落盘")
     }
 }
+
+/// 转场钉测（剪映对齐·批次 4c-2 Task B/C）：validate、窗口映射、黑场增益、波纹删除
+/// 重定位、接缝移动保持。
+final class TransitionTests: XCTestCase {
+    func testValidateDropsInvalidSeamsAndClampsDuration() {
+        let document = EditDocument.validate(EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)],
+            zoomSegments: [],
+            transitions: [
+                0: EditTransition(kind: .black), // 片头缝无效 → 丢
+                1: EditTransition(kind: .black, duration: 9), // 钳 2s
+                2: EditTransition(kind: .crossfade), // 片尾缝（=clips.count）无效 → 丢
+            ]))
+        XCTAssertEqual(document.transitions.count, 1)
+        XCTAssertEqual(document.transitions[1], EditTransition(kind: .black, duration: 2))
+    }
+
+    func testTransitionStateWindowAndProgress() {
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)],
+            zoomSegments: [],
+            transitions: [1: EditTransition(kind: .crossfade, duration: 0.4)])
+        // 边界 = 1.0；窗口 [0.8, 1.2)
+        XCTAssertNil(document.transitionState(atOutputTime: 0.7), "窗口外")
+        XCTAssertEqual(try XCTUnwrap(document.transitionState(atOutputTime: 0.8)).progress, 0,
+                       accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(document.transitionState(atOutputTime: 1.0)).progress, 0.5,
+                       accuracy: 1e-9, "边界中点 progress=0.5")
+        XCTAssertNil(document.transitionState(atOutputTime: 1.2), "窗口右界开区间")
+        XCTAssertEqual(try XCTUnwrap(document.transitionState(atOutputTime: 1.0)).kind, .crossfade)
+    }
+
+    func testBlackGainCurve() {
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)],
+            zoomSegments: [],
+            transitions: [1: EditTransition(kind: .black, duration: 0.4)])
+        XCTAssertEqual(document.blackTransitionGain(atOutputTime: 0.8), 1, accuracy: 1e-9)
+        XCTAssertEqual(document.blackTransitionGain(atOutputTime: 1.0), 0, accuracy: 1e-9)
+        XCTAssertEqual(document.blackTransitionGain(atOutputTime: 0.9), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(document.blackTransitionGain(atOutputTime: 0.5), 1, "窗口外恒 1")
+    }
+
+    func testRippleDeleteDropsCrossedTransitionAndKeepsShiftedSeam() {
+        // 三 clip：缝在 1.0 与 2.0；转场挂缝 2（边界 2.0）
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1),
+                    EditClip(sourceStart: 1, sourceEnd: 2),
+                    EditClip(sourceStart: 2, sourceEnd: 3)],
+            zoomSegments: [],
+            transitions: [2: EditTransition(kind: .black)])
+        // 删除 [1.4, 1.6)：不触及转场窗口 [1.75, 2.25)；新边界 1.8 → 新缝不变（仍在第 2 缝）
+        let kept = document.removingOutputRange(lower: 1.4, upper: 1.6)
+        XCTAssertEqual(kept.transitions.count, 1, "未相交 → 保留")
+        XCTAssertEqual(kept.transitions.values.first?.kind, .black)
+        // 删除 [2.1, 2.3)：与窗口 [1.75, 2.25) 相交 → 丢弃
+        let dropped = document.removingOutputRange(lower: 2.1, upper: 2.3)
+        XCTAssertTrue(dropped.transitions.isEmpty, "跨越转场窗口 → 删除")
+    }
+
+    func testMovingSeamKeepsTransitionAtSameIndex() {
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)],
+            zoomSegments: [],
+            transitions: [1: EditTransition(kind: .crossfade)])
+        let moved = document.movingSeam(at: 1, toSourceTime: 1.5)
+        XCTAssertEqual(moved?.transitions[1], EditTransition(kind: .crossfade))
+    }
+
+    func testV3DraftDecodesWithoutTransitions() throws {
+        let v3JSON = #"{"clips":[{"sourceStart":0,"sourceEnd":5,"speed":1}],"zoomSegments":[]}"#
+        let decoded = try JSONDecoder().decode(EditDocument.self, from: Data(v3JSON.utf8))
+        XCTAssertTrue(decoded.transitions.isEmpty)
+    }
+
+    func testCodableRoundtripWithTransitions() throws {
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)],
+            zoomSegments: [],
+            transitions: [1: EditTransition(kind: .crossfade, duration: 0.7)])
+        let decoded = try JSONDecoder().decode(EditDocument.self, from: JSONEncoder().encode(document))
+        XCTAssertEqual(decoded.transitions, document.transitions, "Int 键字典往返保值")
+    }
+
+    /// 溶解对侧源时间映射（纯函数）：前半取右 clip 头部、后半取左 clip 尾部。
+    func testCrossfadeOtherSourceTime() throws {
+        let clips = [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)]
+        let windows = OfflineZoomRenderer.transitionWindows(
+            clips: clips, transitions: [1: EditTransition(kind: .crossfade, duration: 0.4)])
+        let window = windows[0]
+        // 窗口 [0.8, 1.2) 边界 1.0：t=0.8 → 右 clip 源 1.0；t=0.9 → 1.05
+        XCTAssertEqual(
+            try XCTUnwrap(OfflineZoomRenderer.crossfadeOtherSourceTime(t: 0.8, window: window, clips: clips)),
+            1.0, accuracy: 1e-9)
+        XCTAssertEqual(
+            try XCTUnwrap(OfflineZoomRenderer.crossfadeOtherSourceTime(t: 0.9, window: window, clips: clips)),
+            1.1, accuracy: 1e-9)
+        // 后半：t=1.1 → 左 clip 源 0.9（取尾部）
+        XCTAssertEqual(
+            try XCTUnwrap(OfflineZoomRenderer.crossfadeOtherSourceTime(t: 1.1, window: window, clips: clips)),
+            0.9, accuracy: 1e-9)
+    }
+}

@@ -32,6 +32,28 @@ struct EditMusicTrack: Codable, Equatable {
     var volume: Double
 }
 
+/// 片段间转场（剪辑 v2 批次 4c-2）：挂在**接缝**上（clips[i-1] 与 clips[i] 之间，
+/// 键 = i ∈ 1..<clips.count）。转场窗口 [boundary − d/2, boundary + d/2) 占用两侧
+/// 各半——成片总时长不变（占用两侧素材的头尾）。v1 两种：黑场 / 交叉溶解。
+struct EditTransition: Codable, Equatable {
+    enum Kind: String, Codable {
+        case black
+        case crossfade
+    }
+
+    var kind: Kind
+    var duration: TimeInterval
+
+    init(kind: Kind, duration: TimeInterval = 0.5) {
+        self.kind = kind
+        self.duration = min(max(duration, Self.durationRange.lowerBound),
+                            Self.durationRange.upperBound)
+    }
+
+    /// 合法时长区间（秒；剪映档位同量级）。
+    static let durationRange: ClosedRange<TimeInterval> = 0.2...2.0
+}
+
 /// 音量关键帧（剪辑 v2 批次 4c-2）：**成品时间轴**上锚定的原声音量点。相邻帧线性
 /// 插值；首帧前取首帧值、末帧后取末帧值；无关键帧 → 自动首尾 0.5s 淡入淡出（4c-1）。
 struct EditKeyframe: Codable, Equatable {
@@ -98,22 +120,25 @@ struct EditDocument: Codable, Equatable {
     var backgroundMusic: EditMusicTrack?
     /// 音量关键帧（成品时间轴；空 = 自动首尾淡入淡出；批次 4c-2）。
     var keyframes: [EditKeyframe]
+    /// 接缝转场（键 = 接缝下标 = 该接缝右侧 clip 的下标；批次 4c-2）。
+    var transitions: [Int: EditTransition]
 
     static let empty = EditDocument(clips: [], zoomSegments: [])
 
     /// 手写 Codable（旧版草稿缺字段 → 默认值 decodeIfPresent）。
     enum CodingKeys: String, CodingKey {
-        case clips, zoomSegments, sourceVolume, backgroundMusic, keyframes
+        case clips, zoomSegments, sourceVolume, backgroundMusic, keyframes, transitions
     }
 
     init(clips: [EditClip], zoomSegments: [ZoomSegment],
          sourceVolume: Double = 1, backgroundMusic: EditMusicTrack? = nil,
-         keyframes: [EditKeyframe] = []) {
+         keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:]) {
         self.clips = clips
         self.zoomSegments = zoomSegments
         self.sourceVolume = sourceVolume
         self.backgroundMusic = backgroundMusic
         self.keyframes = EditKeyframe.validate(keyframes)
+        self.transitions = transitions
     }
 
     init(from decoder: Decoder) throws {
@@ -124,6 +149,25 @@ struct EditDocument: Codable, Equatable {
         backgroundMusic = try container.decodeIfPresent(EditMusicTrack.self, forKey: .backgroundMusic)
         keyframes = EditKeyframe.validate(
             try container.decodeIfPresent([EditKeyframe].self, forKey: .keyframes) ?? [])
+        // Int 键字典走 [String: EditTransition] 落地（JSON 对象形态更稳）
+        let decodedTransitions = try container.decodeIfPresent(
+            [String: EditTransition].self, forKey: .transitions) ?? [:]
+        var parsed: [Int: EditTransition] = [:]
+        for (key, value) in decodedTransitions {
+            if let index = Int(key) { parsed[index] = value }
+        }
+        transitions = parsed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(clips, forKey: .clips)
+        try container.encode(zoomSegments, forKey: .zoomSegments)
+        try container.encode(sourceVolume, forKey: .sourceVolume)
+        try container.encodeIfPresent(backgroundMusic, forKey: .backgroundMusic)
+        try container.encode(keyframes, forKey: .keyframes)
+        let stringKeys = Dictionary(uniqueKeysWithValues: transitions.map { (String($0.key), $0.value) })
+        try container.encode(stringKeys, forKey: .transitions)
     }
 
     /// 最短片段源长（秒；validate 硬约束——交互闸另设更宽裕的手感下限）。
@@ -154,9 +198,15 @@ struct EditDocument: Codable, Equatable {
             if let previous = clips.last, clip.sourceStart < previous.sourceEnd { continue } // 重叠保留先者
             clips.append(clip)
         }
+        // 转场过滤：接缝下标须 ∈ 1..<clips.count（首缝之前/末缝之后无转场）；时长钳制
+        var transitions: [Int: EditTransition] = [:]
+        for (seam, transition) in document.transitions
+        where seam >= 1 && seam < clips.count {
+            transitions[seam] = EditTransition(kind: transition.kind, duration: transition.duration)
+        }
         return EditDocument(clips: clips, zoomSegments: ZoomSegment.validate(document.zoomSegments),
                             sourceVolume: document.sourceVolume, backgroundMusic: document.backgroundMusic,
-                            keyframes: document.keyframes)
+                            keyframes: document.keyframes, transitions: transitions)
     }
 
     // MARK: 源↔成品双向映射（折叠真源——渲染 PTS、预览 seek、UI 铺排共用）
@@ -258,9 +308,59 @@ struct EditDocument: Codable, Equatable {
             guard keyframe.outputTime > hi else { return nil }
             return EditKeyframe(outputTime: keyframe.outputTime - shift, volume: keyframe.volume)
         }
-        return EditDocument.validate(EditDocument(clips: result, zoomSegments: zoomSegments,
-                                                  sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                                                  keyframes: shiftedKeyframes))
+        var document = EditDocument.validate(EditDocument(
+            clips: result, zoomSegments: zoomSegments,
+            sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
+            keyframes: shiftedKeyframes))
+        // 转场随波纹删除重定位：与删除区间相交的窗口丢弃；其余接缝按新边界重算下标
+        var repositioned: [Int: EditTransition] = [:]
+        let oldBoundaries = seamBoundaries(of: clips)
+        let newBoundaries = seamBoundaries(of: document.clips)
+        for (seam, transition) in transitions {
+            guard seam >= 1, seam <= oldBoundaries.count else { continue }
+            let boundary = oldBoundaries[seam - 1]
+            let half = transition.duration / 2
+            if boundary + half > lo && boundary - half < hi { continue } // 相交 → 丢弃
+            let newBoundary = boundary - min(max(boundary - lo, 0), hi - lo)
+            if let newIndex = newBoundaries.firstIndex(where: { abs($0 - newBoundary) < 1e-6 }) {
+                let newSeam = newIndex + 1
+                if newSeam < document.clips.count { repositioned[newSeam] = transition }
+            }
+        }
+        document.transitions = repositioned
+        return document
+    }
+
+    /// 接缝边界（成品时间，第 i 项 = 剪掉后第 i+1 个 clip 的起点，含末边界）。
+    func seamBoundaries(of clips: [EditClip]) -> [TimeInterval] {
+        var cursor: TimeInterval = 0
+        return clips.map { clip in
+            cursor += clip.displayDuration
+            return cursor
+        }
+    }
+
+    /// 成品时间的转场状态（纯函数）：命中窗口 → (kind, progress 0…1)；否则 nil。
+    func transitionState(atOutputTime t: TimeInterval) -> (kind: EditTransition.Kind, progress: Double)? {
+        guard !transitions.isEmpty else { return nil }
+        let boundaries = seamBoundaries(of: clips)
+        for (seam, transition) in transitions {
+            guard seam >= 1, seam <= boundaries.count else { continue }
+            let boundary = boundaries[seam - 1]
+            let half = transition.duration / 2
+            let start = boundary - half
+            let end = boundary + half
+            guard t >= start, t < end else { continue }
+            return (transition.kind, (t - start) / max(transition.duration, 1e-9))
+        }
+        return nil
+    }
+
+    /// 黑场转场增益（纯函数）：窗口内 |t − boundary| / (d/2)（中点 = 0 全黑，两端 = 1）；
+    /// 非黑场窗口/窗口外 → 1。溶解转场音频不处理（v1 视觉转场、声音硬切）。
+    func blackTransitionGain(atOutputTime t: TimeInterval) -> Double {
+        guard let state = transitionState(atOutputTime: t), state.kind == .black else { return 1 }
+        return min(max(abs(state.progress - 0.5) * 2, 0), 1)
     }
 
     /// 接缝移动（剪映 trim 语义）：seamIndex ∈ 0...clips.count——0 = 片头裁切
@@ -291,7 +391,8 @@ struct EditDocument: Codable, Equatable {
             clips[seamIndex].sourceStart = s
         }
         return EditDocument.validate(EditDocument(clips: clips, zoomSegments: zoomSegments,
-                                                  sourceVolume: sourceVolume, backgroundMusic: backgroundMusic))
+                                                  sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
+                                                  keyframes: keyframes, transitions: transitions))
     }
 
     /// 缩放段映射到成品时间轴（UI 铺排用；渲染按源时间查找不走此函数）：

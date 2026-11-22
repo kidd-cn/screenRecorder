@@ -420,6 +420,22 @@ final class ZoomTimelineCanvas: NSView {
                 seamPositions.append(x)
                 NSBezierPath(rect: CGRect(x: x - 0.5, y: 0, width: 1, height: bounds.height)).fill()
             }
+            // 转场标记（批次 4c-2）：橙色菱形挂在带转场的接缝上（视频带上缘）。
+            for (seam, _) in model.transitions {
+                guard seam >= 1, seam - 1 < seamPositions.count else { continue }
+                let x = seamPositions[seam - 1]
+                let center = CGPoint(x: x, y: bounds.height * 0.9)
+                let size: CGFloat = 7
+                let diamond = NSBezierPath()
+                diamond.move(to: CGPoint(x: center.x, y: center.y + size / 2))
+                diamond.line(to: CGPoint(x: center.x + size / 2, y: center.y))
+                diamond.line(to: CGPoint(x: center.x, y: center.y - size / 2))
+                diamond.line(to: CGPoint(x: center.x - size / 2, y: center.y))
+                diamond.close()
+                NSColor.systemOrange.setFill()
+                diamond.fill()
+            }
+
             // 车道分隔线（视频带 62% / 音频带 38%）
             NSColor.separatorColor.setFill()
             NSBezierPath(rect: CGRect(x: 0, y: bounds.height * 0.385, width: bounds.width, height: 1)).fill()
@@ -804,12 +820,16 @@ final class ZoomTimelineCanvas: NSView {
             guard model.segments.indices.contains(hitIndex) else { return nil }
             model.selectedIndex = hitIndex
             return ZoomEditorMenus.deleteSegment(at: hitIndex, model: model)
-        case .seamHandle:
-            return nil // 接缝无右键菜单（修剪=拖动；删除=拖选+撤销）
+        case .seamHandle(let seamIndex):
+            guard model.clips.indices.contains(seamIndex - 1), seamIndex < model.clips.count else {
+                return nil // 片头/片尾缝无转场
+            }
+            return ZoomEditorMenus.transitionMenu(at: seamIndex, model: model)
         case .background:
             return nil
         }
     }
+
 }
 
 /// 编辑器右键菜单（NSMenu 组装薄层）：点击分发代理经 `RetainingMenu` 与菜单同寿命
@@ -825,6 +845,35 @@ enum ZoomEditorMenus {
         item.target = proxy
         menu.addItem(item)
         menu.retainedProxies = [proxy]
+        return menu
+    }
+
+    /// 接缝转场菜单（批次 4c-2）：已有 → 删除；无 → 添加黑场/溶解（默认 0.5s）。
+    @MainActor
+    static func transitionMenu(at seamIndex: Int, model: ZoomEditorModel) -> NSMenu {
+        let menu = RetainingMenu()
+        var proxies: [MenuActionProxy] = []
+        func addItem(_ title: String, _ action: @escaping () -> Void) {
+            let proxy = MenuActionProxy(action: action)
+            let item = NSMenuItem(
+                title: title, action: #selector(MenuActionProxy.picked), keyEquivalent: "")
+            item.target = proxy
+            menu.addItem(item)
+            proxies.append(proxy)
+        }
+        if model.transitions[seamIndex] != nil {
+            addItem(NSLocalizedString("删除转场", comment: "Transition menu delete")) { [weak model] in
+                Task { @MainActor in model?.removeTransition(at: seamIndex) }
+            }
+        } else {
+            addItem(NSLocalizedString("添加黑场转场（0.5s）", comment: "Add black transition")) { [weak model] in
+                Task { @MainActor in model?.addTransition(at: seamIndex, kind: .black) }
+            }
+            addItem(NSLocalizedString("添加溶解转场（0.5s）", comment: "Add crossfade transition")) { [weak model] in
+                Task { @MainActor in model?.addTransition(at: seamIndex, kind: .crossfade) }
+            }
+        }
+        menu.retainedProxies = proxies
         return menu
     }
 

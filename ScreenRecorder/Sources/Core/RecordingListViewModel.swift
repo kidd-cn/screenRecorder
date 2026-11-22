@@ -23,6 +23,7 @@ protocol ExportServing {
 protocol ZoomRendering {
     func render(
         sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
+        transitions: [Int: EditTransition],
         options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL
 }
@@ -31,11 +32,12 @@ protocol ZoomRendering {
 struct OfflineZoomRendererService: ZoomRendering {
     func render(
         sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
+        transitions: [Int: EditTransition],
         options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL {
         try await OfflineZoomRenderer.render(
             sourceURL: sourceURL, segments: segments, clips: clips, keyframes: keyframes,
-            options: options, progress: progress)
+            transitions: transitions, options: options, progress: progress)
     }
 }
 
@@ -386,6 +388,7 @@ final class RecordingListViewModel: ObservableObject {
     @discardableResult
     func renderZoom(_ item: RecordingFileMetadata, segments: [ZoomSegment],
                     clips: [EditClip] = [], keyframes: [EditKeyframe] = [],
+                    transitions: [Int: EditTransition] = [:],
                     options: ExportVideoOptions) async -> URL? {
         guard !zoomRenderInFlight, !exportInFlight else { return nil }
         zoomRenderInFlight = true
@@ -409,6 +412,7 @@ final class RecordingListViewModel: ObservableObject {
                 sourceURL: item.url, segments: ZoomSegment.validate(segments),
                 clips: EditDocument.validate(EditDocument(clips: clips, zoomSegments: [])).clips,
                 keyframes: EditKeyframe.validate(keyframes),
+                transitions: transitions,
                 options: options, progress: forward)
             await refresh() // 自动入列（成功产物立即可见；_压缩.mp4 先例）
             // Q6 编辑导出后动作（仅本编排挂钩）：偏好**导出完成时刻**读缝（两次导出间

@@ -649,4 +649,62 @@ final class OfflineZoomRendererTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(actual.1 - expected.1), colorTolerance, "\(message)：绿通道", file: file, line: line)
         XCTAssertLessThanOrEqual(abs(actual.2 - expected.2), colorTolerance, "\(message)：蓝通道", file: file, line: line)
     }
+
+    /// 黑场转场集成钉测（批次 4c-2 Task B）：2s 夹具切两 clip、缝 1 处挂黑场 0.4s
+    ///（窗口 [0.8,1.2)）——窗口中点输出帧应接近全黑，窗口外保持正常画面。
+    func testRenderBlackTransitionDarkensMidpoint() async throws {
+        let sourceURL = directory.appendingPathComponent("黑场夹具源.mp4")
+        try await makeFixtureVideo(at: sourceURL)
+        let outputURL = try await OfflineZoomRenderer.render(
+            sourceURL: sourceURL,
+            segments: [],
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1),
+                    EditClip(sourceStart: 1, sourceEnd: 2)],
+            keyframes: [],
+            transitions: [1: EditTransition(kind: .black, duration: 0.4)],
+            options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+            progress: { _ in },
+            context: CIContext(options: [.useSoftwareRenderer: true]))
+        XCTAssertEqual(outputURL.lastPathComponent, "黑场夹具源_剪辑.mp4", "转场 = 剪辑痕迹 → _剪辑")
+        let output = AVURLAsset(url: outputURL)
+        let duration = try await output.load(.duration).seconds
+        XCTAssertEqual(duration, 2.0, accuracy: 0.05, "转场不改变总时长")
+        let generator = AVAssetImageGenerator(asset: output)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let midpoint = try await generator.image(at: CMTime(seconds: 1.0, preferredTimescale: 600)).image
+        let middlePixel = try pixelComponents(of: midpoint, x: 160, y: 90)
+        XCTAssertLessThan(middlePixel.0, 0.06, "窗口中点：背景被压到近黑（红通道）")
+        XCTAssertLessThan(middlePixel.1, 0.06, "窗口中点：绿通道")
+        XCTAssertLessThan(middlePixel.2, 0.06, "窗口中点：蓝通道")
+        let outside = try await generator.image(at: CMTime(seconds: 0.2, preferredTimescale: 600)).image
+        try assertPixel(outside, x: 300, y: 90, near: background, "窗口外：正常画面")
+    }
+
+    /// 溶解转场集成钉测（Task C）：渲染成功、时长不变、窗口中点保持可解码画面。
+    func testRenderCrossfadeKeepsDuration() async throws {
+        let sourceURL = directory.appendingPathComponent("溶解夹具源.mp4")
+        try await makeFixtureVideo(at: sourceURL)
+        let outputURL = try await OfflineZoomRenderer.render(
+            sourceURL: sourceURL,
+            segments: [],
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1),
+                    EditClip(sourceStart: 1, sourceEnd: 2)],
+            keyframes: [],
+            transitions: [1: EditTransition(kind: .crossfade, duration: 0.4)],
+            options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+            progress: { _ in },
+            context: CIContext(options: [.useSoftwareRenderer: true]))
+        let output = AVURLAsset(url: outputURL)
+        let duration = try await output.load(.duration).seconds
+        XCTAssertEqual(duration, 2.0, accuracy: 0.05)
+        let generator = AVAssetImageGenerator(asset: output)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let midpoint = try await generator.image(at: CMTime(seconds: 1.0, preferredTimescale: 600)).image
+        XCTAssertEqual(midpoint.width, 320, "中点帧尺寸保持")
+        XCTAssertGreaterThan(midpoint.height, 0)
+    }
 }

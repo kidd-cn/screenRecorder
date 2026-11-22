@@ -211,7 +211,8 @@ enum OfflineZoomRenderer {
         sourceURL: URL, clips: [EditClip], targetRate: Double = 48000,
         sourceVolume: Double,
         fadeIn: TimeInterval, fadeOut: TimeInterval,
-        keyframes: [EditKeyframe] = []
+        keyframes: [EditKeyframe] = [],
+        blackGain: @escaping (TimeInterval) -> Double = { _ in 1 }
     ) async throws -> PitchPreservedAudio {
         guard !clips.isEmpty else { throw RenderError.noRenderableSamples }
         let engine = AVAudioEngine()
@@ -285,6 +286,7 @@ enum OfflineZoomRenderer {
                     gain *= Float(fromEnd / fadeOut)
                 }
             }
+            gain *= Float(blackGain(t)) // 黑场转场压暗（溶解 v1 声音硬切）
             output[frame * 2] *= gain
             output[frame * 2 + 1] *= gain
         }
@@ -460,6 +462,49 @@ enum OfflineZoomRenderer {
         guard exportSession.status == .completed else {
             throw RenderError.writerFailed(status: .failed, underlying: exportSession.error)
         }
+    }
+
+    /// 转场窗口（纯函数，渲染/钉测共用）：成品时间窗口 + 边界 + 类型 + 右 clip 下标。
+    struct TransitionWindow: Equatable {
+        let start: TimeInterval
+        let end: TimeInterval
+        let boundary: TimeInterval
+        let kind: EditTransition.Kind
+        let seam: Int
+    }
+
+    static func transitionWindows(clips: [EditClip],
+                                  transitions: [Int: EditTransition]) -> [TransitionWindow] {
+        var boundaries: [TimeInterval] = []
+        var cursor: TimeInterval = 0
+        for clip in clips {
+            cursor += clip.displayDuration
+            boundaries.append(cursor)
+        }
+        return transitions.compactMap { seam, transition -> TransitionWindow? in
+            guard seam >= 1, seam <= boundaries.count, seam < clips.count else { return nil }
+            let boundary = boundaries[seam - 1]
+            let half = transition.duration / 2
+            return TransitionWindow(
+                start: boundary - half, end: boundary + half,
+                boundary: boundary, kind: transition.kind, seam: seam)
+        }.sorted { $0.start < $1.start }
+    }
+
+    /// 溶解对侧取帧的源时间（纯函数）：窗口前半取右 clip 头部、后半取左 clip 尾部
+    ///（各自把窗口内进度映射回其素材区）。
+    static func crossfadeOtherSourceTime(t: TimeInterval, window: TransitionWindow,
+                                         clips: [EditClip]) -> TimeInterval? {
+        guard window.seam >= 1, window.seam < clips.count else { return nil }
+        let left = clips[window.seam - 1]
+        let right = clips[window.seam]
+        let half = (window.end - window.start) / 2
+        if t < window.boundary {
+            let source = right.sourceStart + (t - (window.boundary - half)) * right.speed
+            return min(max(source, right.sourceStart), right.sourceEnd)
+        }
+        let source = left.sourceEnd - ((window.boundary + half) - t) * left.speed
+        return min(max(source, left.sourceStart), left.sourceEnd)
     }
 
     /// 音频线性重采样（变速·v1 变调）：按 speed 对源 PCM 帧最近邻抽帧/复制，构造新
@@ -686,16 +731,19 @@ enum OfflineZoomRenderer {
     /// 缩放段照常在源时间轴上查找变换（映射不动源坐标语义）。含剪辑痕迹 → 输出命名
     /// `_剪辑.mp4`，否则 `_缩放.mp4`。`context` 供 headless 测试注入软件渲染上下文。
     static func render(sourceURL: URL, segments: [ZoomSegment], clips: [EditClip]? = nil,
-                       keyframes: [EditKeyframe] = [],
+                       keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:],
                        options: ExportVideoOptions,
                        progress: @escaping (Double) -> Void,
                        context: CIContext = CIContext(options: [.useSoftwareRenderer: false])) async throws -> URL {
         let timeline = ZoomSegment.validate(segments)
         // clips nil = 未剪辑（全程直通，纯缩放渲染兼容）；[] = 无内容保留（全删 →
         // noRenderableSamples）；非空 = 片段流成品轨。
-        let validatedClips = clips.map { request in
-            EditDocument.validate(EditDocument(clips: request, zoomSegments: [], keyframes: keyframes)).clips
+        let validatedDocument = clips.map { request in
+            EditDocument.validate(EditDocument(clips: request, zoomSegments: [], keyframes: keyframes,
+                                               transitions: transitions))
         }
+        let validatedClips = validatedDocument?.clips
+        let validatedTransitions = validatedDocument?.transitions ?? [:]
         let push = ExportCore.deduplicatedProgress(progress)
         let asset = AVURLAsset(url: sourceURL)
 
@@ -706,7 +754,8 @@ enum OfflineZoomRenderer {
         guard durationSeconds.isFinite, durationSeconds > 0 else { throw ExportError.emptySource }
         let editDocument = EditDocument(
             clips: validatedClips ?? EditDocument.initial(duration: durationSeconds).clips,
-            zoomSegments: [], keyframes: keyframes)
+            zoomSegments: [], keyframes: keyframes,
+            transitions: validatedTransitions)
 
         let naturalSize = try await videoTrack.load(.naturalSize)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
@@ -836,6 +885,20 @@ enum OfflineZoomRenderer {
             return buffer
         }
 
+        // 转场窗口 + 溶解取帧器（对侧帧经独立 generator 取；容差 1/60 保可靠）
+        let transitionWindows = OfflineZoomRenderer.transitionWindows(
+            clips: editDocument.clips, transitions: editDocument.transitions)
+        let crossfadeGenerator: AVAssetImageGenerator? = transitionWindows.contains { $0.kind == .crossfade }
+            ? {
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: orientedSize.width, height: orientedSize.height)
+                generator.requestedTimeToleranceBefore = CMTime(value: 1, timescale: 60)
+                generator.requestedTimeToleranceAfter = CMTime(value: 1, timescale: 60)
+                return generator
+            }()
+            : nil
+
         var lastKeptTick: Int?
         var videoDone = false
         var audioDone = audioOutput == nil || stretchAudioAppender != nil
@@ -850,7 +913,8 @@ enum OfflineZoomRenderer {
                     sourceURL: sourceURL, clips: editDocument.clips,
                     sourceVolume: editDocument.sourceVolume,
                     fadeIn: fadeSeconds, fadeOut: fadeSeconds,
-                    keyframes: editDocument.keyframes)
+                    keyframes: editDocument.keyframes,
+                    blackGain: { editDocument.blackTransitionGain(atOutputTime: $0) })
                 var asbd = AudioStreamBasicDescription(
                     mSampleRate: stretched.sampleRate, mFormatID: kAudioFormatLinearPCM,
                     mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -1065,13 +1129,53 @@ enum OfflineZoomRenderer {
                 .concatenating(zoomTransform ?? .identity)
                 .concatenating(canvasScale)
 
-            let outputBuffer: CVPixelBuffer
+            var outputBuffer: CVPixelBuffer
             if total == .identity {
                 outputBuffer = sourceBuffer // 无缩放且画布同尺寸：零渲染直通（同 PiPCompositor 全缺省直返）
             } else {
                 let rendered = try makeOutputBuffer()
                 context.render(CIImage(cvPixelBuffer: sourceBuffer).transformed(by: total), to: rendered)
                 outputBuffer = rendered
+            }
+
+            // 转场合成（批次 4c-2）：窗口内二次渲染——黑场乘增益 / 溶解混对侧帧。
+            if let window = transitionWindows.first(where: { outSeconds >= $0.start && outSeconds < $0.end }) {
+                let progress = (outSeconds - window.start) / max(window.end - window.start, 1e-9)
+                let baseImage = CIImage(cvPixelBuffer: outputBuffer)
+                var composed: CIImage?
+                switch window.kind {
+                case .black:
+                    let factor = abs(progress - 0.5) * 2 // 中点 0 全黑、两端 1
+                    composed = baseImage.applyingFilter("CIColorMatrix", parameters: [
+                        "inputRVector": CIVector(x: CGFloat(factor), y: 0, z: 0, w: 0),
+                        "inputGVector": CIVector(x: 0, y: CGFloat(factor), z: 0, w: 0),
+                        "inputBVector": CIVector(x: 0, y: 0, z: CGFloat(factor), w: 0),
+                        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                    ])
+                case .crossfade:
+                    if let generator = crossfadeGenerator,
+                       let otherSource = OfflineZoomRenderer.crossfadeOtherSourceTime(
+                        t: outSeconds, window: window, clips: editDocument.clips),
+                       let otherCG = try? await generator.image(
+                        at: CMTime(seconds: otherSource, preferredTimescale: 600)).image {
+                        var other = CIImage(cgImage: otherCG)
+                        let scale = baseImage.extent.width / max(other.extent.width, 1)
+                        other = other.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                        let half = window.boundary
+                        // 前半：main=A → target=B（time=progress）；后半：main=B → target=A
+                        //（time=1−progress）——中点两侧皆 50/50 连续。
+                        let blendTime = outSeconds < half ? progress : 1 - progress
+                        composed = baseImage.applyingFilter("CIDissolveTransition", parameters: [
+                            "inputTargetImage": other.clampedToExtent(),
+                            "inputTime": blendTime,
+                        ])
+                    }
+                }
+                if let composed {
+                    let rendered = try makeOutputBuffer()
+                    context.render(composed, to: rendered)
+                    outputBuffer = rendered
+                }
             }
 
             try await waitForReady(videoInput, mediaType: "视频")
@@ -1098,6 +1202,7 @@ enum OfflineZoomRenderer {
             sourceVolume *= Float(editDocument.sourceGain(
                 atOutputTime: outSeconds + CMTimeGetSeconds(CMSampleBufferGetDuration(sample)) / 2,
                 fadeSeconds: fadeSeconds))
+            sourceVolume *= Float(editDocument.blackTransitionGain(atOutputTime: outSeconds))
             var outgoing = sample
             if abs(speed - 1) > 1e-6,
                let resampled = OfflineZoomRenderer.resampledAudioSample(
