@@ -319,20 +319,25 @@ final class RecordingListViewModel: ObservableObject {
         guard let data = try? Data(contentsOf: Self.draftURL(for: item.url)) else {
             return EditDocument.empty
         }
+        // 版本路由（键嗅探）：v1 JSON 含 "cuts" 键——v2 解码器对它会「成功」解出空
+        // clips（decodeIfPresent 缺省），必须先嗅探再路由，否则 v1 迁移分支永远不可达。
+        let hasCutsKey = ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any])?
+            .keys.contains("cuts") ?? false
+        if hasCutsKey {
+            struct LegacyV1Document: Codable {
+                var cuts: [CutSegment]
+                var zoomSegments: [ZoomSegment]?
+            }
+            if let legacy = try? JSONDecoder().decode(LegacyV1Document.self, from: data) {
+                var migrated = EditDocument.migrating(
+                    cuts: legacy.cuts.map { ($0.start, $0.end) },
+                    duration: max(sourceDuration, 0))
+                migrated.zoomSegments = ZoomSegment.validate(legacy.zoomSegments ?? [])
+                return EditDocument.validate(migrated)
+            }
+        }
         if let decoded = try? JSONDecoder().decode(EditDocument.self, from: data) {
             return EditDocument.validate(decoded)
-        }
-        // v1 剪除段标记形态（字段名 cuts；结构面与 v2 不兼容——解码即区分）
-        struct LegacyV1Document: Codable {
-            var cuts: [CutSegment]
-            var zoomSegments: [ZoomSegment]?
-        }
-        if let legacy = try? JSONDecoder().decode(LegacyV1Document.self, from: data) {
-            var migrated = EditDocument.migrating(
-                cuts: legacy.cuts.map { ($0.start, $0.end) },
-                duration: max(sourceDuration, 0))
-            migrated.zoomSegments = ZoomSegment.validate(legacy.zoomSegments ?? [])
-            return EditDocument.validate(migrated)
         }
         if let legacy = try? JSONDecoder().decode([ZoomSegment].self, from: data) {
             return EditDocument(clips: [], zoomSegments: ZoomSegment.validate(legacy))
@@ -377,9 +382,10 @@ final class RecordingListViewModel: ObservableObject {
     ///   （`exportInFlight`）时本入口直接忽略（互门——原「并发无害」停放项收口）；
     /// - 出场：defer 内 `zoomRenderRunID += 1` 换代——本代结束后晚到的 hop 被代际
     ///   校验丢弃，不冒充下一代（钉测 testLateProgressHopFromFinishedGenerationIsDropped）。
+    @discardableResult
     func renderZoom(_ item: RecordingFileMetadata, segments: [ZoomSegment],
-                    clips: [EditClip] = [], options: ExportVideoOptions) async {
-        guard !zoomRenderInFlight, !exportInFlight else { return }
+                    clips: [EditClip] = [], options: ExportVideoOptions) async -> URL? {
+        guard !zoomRenderInFlight, !exportInFlight else { return nil }
         zoomRenderInFlight = true
         zoomRenderRunID += 1
         let runID = zoomRenderRunID
@@ -432,9 +438,11 @@ final class RecordingListViewModel: ObservableObject {
             // 幂等无害）。清后重开编辑器 = 全新编辑。尽力而为 try?（草稿是便利持久化）。
             try? FileManager.default.removeItem(at: Self.draftURL(for: item.url))
             notifier?.notifyExportCompleted(fileURL: outputURL, originalDeleted: originalDeleted)
+            return outputURL
         } catch {
             notifier?.notifyExportFailed(
                 message: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+            return nil
         }
     }
 }

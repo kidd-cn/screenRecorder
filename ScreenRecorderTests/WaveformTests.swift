@@ -249,3 +249,76 @@ final class FilmstripTests: XCTestCase {
         XCTAssertNil(audioStrip, "无视频轨 → nil")
     }
 }
+
+
+/// 音轨批次 4b 钉测：scaledAudioSample 音量缩放 + EditDocument v3 兼容解码。
+final class AudioTrackBatchTests: XCTestCase {
+    /// 复用 WaveformTests 的 PCM 构造（internal 化前置：此处独立重建简版）。
+    private func makePCMSample(values: [Float], sampleRate: Double = 44100) throws -> CMSampleBuffer {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2, mFramesPerPacket: 1, mBytesPerFrame: 2,
+            mChannelsPerFrame: 1, mBitsPerChannel: 16, mReserved: 0)
+        var descriptionOut: CMFormatDescription?
+        XCTAssertEqual(CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil,
+            magicCookieSize: 0, magicCookie: nil, extensions: nil,
+            formatDescriptionOut: &descriptionOut), noErr)
+        let description = try XCTUnwrap(descriptionOut)
+        let byteCount = values.count * 2
+        var blockBuffer: CMBlockBuffer?
+        XCTAssertEqual(CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
+            blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: byteCount,
+            flags: 0, blockBufferOut: &blockBuffer), noErr)
+        let block = try XCTUnwrap(blockBuffer)
+        let int16s = values.map { Int16(clamping: Int($0 * 32767)) }
+        XCTAssertEqual(int16s.withUnsafeBytes { raw in
+            CMBlockBufferReplaceDataBytes(
+                with: raw.baseAddress!, blockBuffer: block,
+                offsetIntoDestination: 0, dataLength: byteCount)
+        }, kCMBlockBufferNoErr)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: CMTimeValue(values.count), timescale: CMTimeScale(sampleRate)),
+            presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
+        var sampleBuffer: CMSampleBuffer?
+        XCTAssertEqual(CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault, dataBuffer: block, dataReady: true,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: description,
+            sampleCount: values.count, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &sampleBuffer), noErr)
+        return try XCTUnwrap(sampleBuffer)
+    }
+
+    func testScaledAudioSampleHalvesAmplitude() throws {
+        let values: [Float] = [0, 0.5, -0.5, 1.0, -1.0]
+        let scaled = try XCTUnwrap(
+            OfflineZoomRenderer.scaledAudioSample(makePCMSample(values: values), volume: 0.5))
+        let raw = try XCTUnwrap(CMSampleBufferGetDataBuffer(scaled))
+        var length = 0
+        var pointer: UnsafeMutablePointer<CChar>?
+        XCTAssertEqual(CMBlockBufferGetDataPointer(
+            raw, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &length,
+            dataPointerOut: &pointer), kCMBlockBufferNoErr)
+        let typed = UnsafeMutableRawPointer(try XCTUnwrap(pointer)).bindMemory(to: Int16.self, capacity: values.count)
+        XCTAssertEqual(Float(typed[1]) / 32768.0, 0.25, accuracy: 0.02, "0.5 × 0.5 = 0.25")
+        XCTAssertEqual(Float(typed[3]) / 32768.0, 0.5, accuracy: 0.02, "1.0 × 0.5 = 0.5")
+    }
+
+    func testScaledAudioSamplePassthroughAtUnity() throws {
+        let values: [Float] = [0.5, -0.5]
+        let unitySample = try makePCMSample(values: values)
+        XCTAssertNil(OfflineZoomRenderer.scaledAudioSample(unitySample, volume: 1),
+            "volume 1 → nil（调用方透传零拷贝）")
+    }
+
+    /// v2 草稿（无音轨字段）解码 → 音轨默认值（向后兼容）。
+    func testV2DraftDecodesWithAudioDefaults() throws {
+        let v2JSON = #"{"clips":[{"sourceStart":0,"sourceEnd":5,"speed":1}],"zoomSegments":[]}"#
+        let decoded = try JSONDecoder().decode(EditDocument.self, from: Data(v2JSON.utf8))
+        XCTAssertEqual(decoded.sourceVolume, 1, "v2 缺字段 → 原声默认 1")
+        XCTAssertNil(decoded.backgroundMusic, "v2 缺字段 → 无配乐")
+        XCTAssertEqual(decoded.clips, [EditClip(sourceStart: 0, sourceEnd: 5)])
+    }
+}

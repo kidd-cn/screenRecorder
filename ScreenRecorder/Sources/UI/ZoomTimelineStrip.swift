@@ -389,7 +389,9 @@ final class ZoomTimelineCanvas: NSView {
                     let speed = model.clipsDocument.speed(atSourceTime: sourceTime) ?? 1
                     let slotWidth = max(CGFloat(strip.interval / speed) * scale, 2)
                     let x = ZoomTimelineGeometry.timeToX(outputTime, pxPerSec: scale, offset: offset)
-                    drawAspectFill(image, in: CGRect(x: x, y: 0, width: slotWidth, height: bounds.height))
+                    let bandHeight = bounds.height * 0.60
+                    drawAspectFill(image, in: CGRect(
+                        x: x, y: bounds.height - bandHeight, width: slotWidth, height: bandHeight))
                 }
             }
         }
@@ -406,6 +408,9 @@ final class ZoomTimelineCanvas: NSView {
                 seamPositions.append(x)
                 NSBezierPath(rect: CGRect(x: x - 0.5, y: 0, width: 1, height: bounds.height)).fill()
             }
+            // 车道分隔线（视频带 62% / 音频带 38%）
+            NSColor.separatorColor.setFill()
+            NSBezierPath(rect: CGRect(x: 0, y: bounds.height * 0.385, width: bounds.width, height: 1)).fill()
             if let selected = model.selectedClipIndex, model.clips.indices.contains(selected) {
                 var startCursor: TimeInterval = 0
                 for (index, clip) in model.clips.enumerated() {
@@ -427,9 +432,9 @@ final class ZoomTimelineCanvas: NSView {
         let waveform = model.waveform
         if !waveform.isEmpty, scale > 0 {
             let bucketSeconds = 0.02
-            let bandTop = bounds.height * 0.75
-            let bandHeight = bounds.height * 0.5
-            NSColor.systemBlue.withAlphaComponent(0.45).setFill()
+            let laneCenter = bounds.height * 0.19
+            let laneHalf = bounds.height * 0.13
+            NSColor.systemBlue.withAlphaComponent(0.5).setFill()
             let columns = Int(bounds.width)
             for column in 0..<max(columns, 0) {
                 // 成品时间 → 源时间（波纹删除后列与源桶的对应经映射；裁掉列跳过）
@@ -448,8 +453,8 @@ final class ZoomTimelineCanvas: NSView {
                 }
                 guard maximum > minimum else { continue }
                 let x = CGFloat(column)
-                let top = bandTop - CGFloat(maximum) * bandHeight / 2
-                let bottom = bandTop - CGFloat(minimum) * bandHeight / 2
+                let top = laneCenter + CGFloat(maximum) * laneHalf
+                let bottom = laneCenter + CGFloat(minimum) * laneHalf
                 NSBezierPath(rect: CGRect(x: x, y: bottom, width: 1, height: max(top - bottom, 1))).fill()
             }
         }

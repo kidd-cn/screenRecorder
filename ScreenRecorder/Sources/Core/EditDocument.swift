@@ -21,8 +21,20 @@ struct EditClip: Codable, Equatable {
     var displayDuration: TimeInterval { (sourceEnd - sourceStart) / speed }
 }
 
-/// 剪辑文档（剪辑 v2 片段流 EDL，2026-11-21 剪映对齐批次 4a）：源成片 + 有序片段 +
-/// 缩放段（zoom 段恒定义在**源时间轴**——渲染逐源帧查找不变）。**坐标系钉定**：
+/// 配乐轨（剪辑 v2 批次 4b）：导入的本地音频文件（security-scoped bookmark 锚定）+
+/// 音量。渲染后与成片混音（循环铺满成片时长）。
+struct EditMusicTrack: Codable, Equatable {
+    /// 用户选定文件的 security-scoped bookmark（沙盒访问凭证）。
+    var bookmark: Data
+    /// 展示名（文件名）。
+    var name: String
+    /// 音量（0…1，默认 0.5——配乐盖过人声是常见事故）。
+    var volume: Double
+}
+
+/// 剪辑文档（剪辑 v2 片段流 EDL，2026-11-21 剪映对齐批次 4a；4b 增原声/配乐音轨字段）：
+/// 源成片 + 有序片段 + 缩放段（zoom 段恒定义在**源时间轴**——渲染逐源帧查找不变）。
+/// **坐标系钉定**：
 /// 时间线 UI 与播放头都在**成品时间轴**；源↔成品双向映射（含速度折算）是唯一真源
 ///（`sourceTime(forOutputTime:)` / `outputTime(forSourceTime:)`）。草稿落
 /// `<成片>.zoomdraft.json`（v1 剪除段草稿加载时自动迁移为 clips）。
@@ -31,8 +43,33 @@ struct EditDocument: Codable, Equatable {
     var clips: [EditClip]
     /// 缩放段（源时间轴；validate 同 ZoomSegment）。
     var zoomSegments: [ZoomSegment]
+    /// 原声（源成片自带音轨）音量 0…1（1 = 原样；批次 4b）。
+    var sourceVolume: Double
+    /// 配乐轨（nil = 未导入；批次 4b）。
+    var backgroundMusic: EditMusicTrack?
 
     static let empty = EditDocument(clips: [], zoomSegments: [])
+
+    /// 手写 Codable（v2 草稿无音轨字段 → 默认值 decodeIfPresent）。
+    enum CodingKeys: String, CodingKey {
+        case clips, zoomSegments, sourceVolume, backgroundMusic
+    }
+
+    init(clips: [EditClip], zoomSegments: [ZoomSegment],
+         sourceVolume: Double = 1, backgroundMusic: EditMusicTrack? = nil) {
+        self.clips = clips
+        self.zoomSegments = zoomSegments
+        self.sourceVolume = sourceVolume
+        self.backgroundMusic = backgroundMusic
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        clips = try container.decodeIfPresent([EditClip].self, forKey: .clips) ?? []
+        zoomSegments = try container.decodeIfPresent([ZoomSegment].self, forKey: .zoomSegments) ?? []
+        sourceVolume = try container.decodeIfPresent(Double.self, forKey: .sourceVolume) ?? 1
+        backgroundMusic = try container.decodeIfPresent(EditMusicTrack.self, forKey: .backgroundMusic)
+    }
 
     /// 最短片段源长（秒；validate 硬约束——交互闸另设更宽裕的手感下限）。
     static let minimumClipSourceDuration: TimeInterval = 0.05
@@ -61,7 +98,8 @@ struct EditDocument: Codable, Equatable {
             if let previous = clips.last, clip.sourceStart < previous.sourceEnd { continue } // 重叠保留先者
             clips.append(clip)
         }
-        return EditDocument(clips: clips, zoomSegments: ZoomSegment.validate(document.zoomSegments))
+        return EditDocument(clips: clips, zoomSegments: ZoomSegment.validate(document.zoomSegments),
+                            sourceVolume: document.sourceVolume, backgroundMusic: document.backgroundMusic)
     }
 
     // MARK: 源↔成品双向映射（折叠真源——渲染 PTS、预览 seek、UI 铺排共用）
@@ -141,7 +179,8 @@ struct EditDocument: Codable, Equatable {
                     sourceStart: sourceCut, sourceEnd: clip.sourceEnd, speed: clip.speed))
             }
         }
-        return EditDocument.validate(EditDocument(clips: result, zoomSegments: zoomSegments))
+        return EditDocument.validate(EditDocument(clips: result, zoomSegments: zoomSegments,
+                                                  sourceVolume: sourceVolume, backgroundMusic: backgroundMusic))
     }
 
     /// 接缝移动（剪映 trim 语义）：seamIndex ∈ 0...clips.count——0 = 片头裁切
@@ -171,7 +210,8 @@ struct EditDocument: Codable, Equatable {
             clips[seamIndex - 1].sourceEnd = s
             clips[seamIndex].sourceStart = s
         }
-        return EditDocument.validate(EditDocument(clips: clips, zoomSegments: zoomSegments))
+        return EditDocument.validate(EditDocument(clips: clips, zoomSegments: zoomSegments,
+                                                  sourceVolume: sourceVolume, backgroundMusic: backgroundMusic))
     }
 
     /// 缩放段映射到成品时间轴（UI 铺排用；渲染按源时间查找不走此函数）：

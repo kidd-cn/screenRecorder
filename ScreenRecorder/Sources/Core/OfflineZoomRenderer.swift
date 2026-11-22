@@ -194,6 +194,142 @@ enum OfflineZoomRenderer {
         return images.isEmpty ? nil : Filmstrip(interval: interval, images: images)
     }
 
+    /// 音量缩放（原声音量·批次 4b）：PCM 逐帧乘 volume（16-bit int / 32-bit float），
+    /// 非 1 音量返回重写后的样本；volume == 1 返回 nil（调用方透传原样本，零拷贝）。
+    /// 格式不支持 → nil（透传，尽力而为）。
+    static func scaledAudioSample(_ sample: CMSampleBuffer, volume: Float) -> CMSampleBuffer? {
+        guard abs(volume - 1) > 1e-4,
+              let blockBuffer = CMSampleBufferGetDataBuffer(sample),
+              let description = CMSampleBufferGetFormatDescription(sample),
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee,
+              asbd.mFormatID == kAudioFormatLinearPCM else { return nil }
+        var length = 0
+        var pointer: UnsafeMutablePointer<CChar>?
+        guard CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+                                         totalLengthOut: &length, dataPointerOut: &pointer) == kCMBlockBufferNoErr,
+              let raw = pointer, length > 0 else { return nil }
+        let bytesPerFrame = max(Int(asbd.mBytesPerFrame), 1)
+        let sourceFrames = length / bytesPerFrame
+        guard sourceFrames > 0 else { return nil }
+        let targetBytes = sourceFrames * bytesPerFrame
+        var outBlock: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: targetBytes,
+            blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: targetBytes,
+            flags: 0, blockBufferOut: &outBlock) == kCMBlockBufferNoErr, let outBlock else { return nil }
+        let source = UnsafeMutableRawPointer(raw)
+        let channels = max(Int(asbd.mChannelsPerFrame), 1)
+        if asbd.mBitsPerChannel == 16 {
+            let typed = source.bindMemory(to: Int16.self, capacity: sourceFrames * channels)
+            var scratch = [Int16](repeating: 0, count: sourceFrames * channels)
+            for index in 0..<(sourceFrames * channels) {
+                scratch[index] = Int16(clamping: Int(Float(typed[index]) * volume))
+            }
+            scratch.withUnsafeBytes { rawScratch in
+                _ = CMBlockBufferReplaceDataBytes(
+                    with: rawScratch.baseAddress!, blockBuffer: outBlock,
+                    offsetIntoDestination: 0, dataLength: targetBytes)
+            }
+        } else if asbd.mBitsPerChannel == 32, asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 {
+            let typed = source.bindMemory(to: Float.self, capacity: sourceFrames * channels)
+            var scratch = [Float](repeating: 0, count: sourceFrames * channels)
+            for index in 0..<(sourceFrames * channels) {
+                scratch[index] = typed[index] * volume
+            }
+            scratch.withUnsafeBytes { rawScratch in
+                _ = CMBlockBufferReplaceDataBytes(
+                    with: rawScratch.baseAddress!, blockBuffer: outBlock,
+                    offsetIntoDestination: 0, dataLength: targetBytes)
+            }
+        } else {
+            return nil
+        }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+        var timing = CMSampleTimingInfo()
+        if CMSampleBufferGetSampleTimingInfo(sample, at: 0, timingInfoOut: &timing) != noErr {
+            timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+        }
+        var output: CMSampleBuffer?
+        guard CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault, dataBuffer: outBlock, dataReady: true,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: description,
+            sampleCount: sourceFrames, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &output) == noErr,
+            let output else { return nil }
+        return output
+    }
+
+    /// 配乐混音导出（批次 4b）：成片（已含原声）+ 配乐文件 → AVMutableComposition 双音轨
+    /// + audioMix 音量 → AVAssetExportSession 重编码写 outputURL。配乐短于成片时循环铺满
+    ///（重复插入配乐轨段）。沙盒书签访问由调用方负责包起。
+    static func muxBackgroundMusic(editedURL: URL, musicURL: URL, volume: Float,
+                                   outputURL: URL) async throws {
+        let editedAsset = AVURLAsset(url: editedURL)
+        let musicAsset = AVURLAsset(url: musicURL)
+        let composition = AVMutableComposition()
+        // 视频轨直插
+        guard let editedVideo = try await editedAsset.loadTracks(withMediaType: .video).first,
+              let compositionVideo = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid)
+        else { throw RenderError.cannotAddVideoInput }
+        let editedDuration = try await editedAsset.load(.duration)
+        try compositionVideo.insertTimeRange(
+            CMTimeRange(start: .zero, duration: editedDuration), of: editedVideo, at: .zero)
+        // 原声轨直插（compositionAudio 提出外层——音量参数段引用）
+        var compositionAudio: AVMutableCompositionTrack?
+        if let editedAudio = try await editedAsset.loadTracks(withMediaType: .audio).first {
+            compositionAudio = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            try compositionAudio?.insertTimeRange(
+                CMTimeRange(start: .zero, duration: editedDuration), of: editedAudio, at: .zero)
+        }
+        // 配乐轨：循环铺满成片时长（每段不超配乐自身时长）
+        let musicTracks = try await musicAsset.loadTracks(withMediaType: .audio)
+        guard let musicTrack = musicTracks.first,
+              let compositionMusic = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+        else { throw RenderError.cannotAddAudioInput }
+        let musicDuration = try await musicAsset.load(.duration)
+        let musicSeconds = CMTimeGetSeconds(musicDuration)
+        let totalSeconds = CMTimeGetSeconds(editedDuration)
+        guard musicSeconds > 0.05 else { throw RenderError.cannotAddAudioInput }
+        var cursor: TimeInterval = 0
+        while cursor < totalSeconds - 0.05 {
+            let remaining = totalSeconds - cursor
+            let segment = CMTimeRange(
+                start: .zero,
+                duration: CMTime(seconds: min(musicSeconds, remaining), preferredTimescale: 600))
+            try compositionMusic.insertTimeRange(segment, of: musicTrack, at: CMTime(seconds: cursor, preferredTimescale: 600))
+            cursor += min(musicSeconds, remaining)
+        }
+        // 音量：原声 1.0 / 配乐 volume（audioMix 双参数）
+        let mix = AVMutableAudioMix()
+        var parameters: [AVMutableAudioMixInputParameters] = []
+        if let compositionAudio {
+            let p = AVMutableAudioMixInputParameters(track: compositionAudio)
+            p.trackID = compositionAudio.trackID
+            p.setVolume(1.0, at: .zero)
+            parameters.append(p)
+        }
+        let musicP = AVMutableAudioMixInputParameters(track: compositionMusic)
+        musicP.trackID = compositionMusic.trackID
+        musicP.setVolume(volume, at: .zero)
+        parameters.append(musicP)
+        mix.inputParameters = parameters
+        guard let exportSession = AVAssetExportSession(
+            asset: composition,
+            presetName: AVAssetExportPresetHighestQuality) else {
+            throw RenderError.cannotAddVideoInput
+        }
+        exportSession.audioMix = mix
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        try? FileManager.default.removeItem(at: outputURL)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            exportSession.exportAsynchronously { continuation.resume() }
+        }
+        guard exportSession.status == .completed else {
+            throw RenderError.writerFailed(status: .failed, underlying: exportSession.error)
+        }
+    }
+
     /// 音频线性重采样（变速·v1 变调）：按 speed 对源 PCM 帧最近邻抽帧/复制，构造新
     /// CMSampleBuffer（同格式描述；新时长 = 原时长 ÷ speed）。仅支持 LPCM（渲染器
     /// 音轨解码输出恒 LPCM——16-bit int 或 32-bit float），其他格式返回 nil（调用方
@@ -752,15 +888,18 @@ enum OfflineZoomRenderer {
             // 速度 ≠ 1 → 线性重采样（最近邻抽帧/复制——变调 v1，声调保持归 4c）；
             // 速度 = 1 → PTS 平移原样透传。重写失败转类型化错误（正常源不可达）。
             let speed = editDocument.speed(atSourceTime: t) ?? 1
+            let sourceVolume = Float(editDocument.sourceVolume)
+            var outgoing = sample
             if abs(speed - 1) > 1e-6,
                let resampled = OfflineZoomRenderer.resampledAudioSample(
                 sample, speed: speed, outputPTS: outPTS) {
-                guard input.append(resampled) else {
-                    throw RenderError.appendFailedAudio(underlying: writer.error)
-                }
-                return
+                outgoing = resampled
             }
-            guard let remapped = OfflineZoomRenderer.sampleBuffer(sample, withPresentationTime: outPTS) else {
+            if abs(sourceVolume - 1) > 1e-4,
+               let scaled = OfflineZoomRenderer.scaledAudioSample(outgoing, volume: sourceVolume) {
+                outgoing = scaled
+            }
+            guard let remapped = OfflineZoomRenderer.sampleBuffer(outgoing, withPresentationTime: outPTS) else {
                 throw RenderError.appendFailedAudio(underlying: writer.error)
             }
             guard input.append(remapped) else {

@@ -118,6 +118,10 @@ final class ZoomEditorModel: ObservableObject {
     /// 片段流（剪辑 v2 剪映同构：时间线即成品轨，波纹删除/接缝/变速作用于此）——
     /// 唯一写入口是 `applyClipEdit` 统一闸。
     @Published private(set) var clips: [EditClip] = []
+    /// 原声音量（0…1；批次 4b 音轨）。
+    @Published var sourceVolume: Double = 1
+    /// 配乐轨（nil = 未导入）。
+    @Published var backgroundMusic: EditMusicTrack?
     /// 选中的 clip 下标（⌘+点击选中 → 速度面板；validate 重排后按值回找）。
     @Published var selectedClipIndex: Int?
     /// 选中段下标（行点击/时间线点击选中；validate 重排后按编辑后段值回找）。
@@ -264,6 +268,8 @@ final class ZoomEditorModel: ObservableObject {
                 clips = document.clips
                 segments = document.zoomSegments
             }
+            sourceVolume = document.sourceVolume
+            backgroundMusic = document.backgroundMusic
             saveDocument()
         }
     }
@@ -311,7 +317,10 @@ final class ZoomEditorModel: ObservableObject {
     }
 
     /// 当前 clips 的文档面（映射/编辑操作真源；画布接缝换算只读访问）。
-    var clipsDocument: EditDocument { EditDocument(clips: clips, zoomSegments: segments) }
+    var clipsDocument: EditDocument {
+        EditDocument(clips: clips, zoomSegments: segments,
+                     sourceVolume: sourceVolume, backgroundMusic: backgroundMusic)
+    }
 
     // MARK: 分段编辑（唯一写入口：全部经 ZoomEditorLogic.applyEdit 统一闸）
 
@@ -374,6 +383,56 @@ final class ZoomEditorModel: ObservableObject {
         updateClip(at: index) { $0.speed = speed }
     }
 
+    // MARK: 音轨（批次 4b：原声音量 + 配乐）
+
+    func setSourceVolume(_ volume: Double) {
+        sourceVolume = min(max(volume, 0), 1)
+        saveDocument()
+    }
+
+    /// 导入配乐（NSOpenPanel；沙盒 security-scoped bookmark 锚定）。
+    func importMusic() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if #available(macOS 14.0, *) {
+            panel.allowedContentTypes = [.audio]
+        } else {
+            panel.allowedFileTypes = ["m4a", "mp3", "wav", "aac", "flac"]
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let bookmark = try? url.bookmarkData() else {
+            NSLog("Editor: 配乐书签创建失败（%@）", url.path)
+            return
+        }
+        applyClipEdit { $0.backgroundMusic = EditMusicTrack(
+            bookmark: bookmark, name: url.lastPathComponent, volume: 0.5) }
+    }
+
+    func removeMusic() {
+        applyClipEdit { $0.backgroundMusic = nil }
+    }
+
+    func setMusicVolume(_ volume: Double) {
+        applyClipEdit { $0.backgroundMusic?.volume = min(max(volume, 0), 1) }
+    }
+
+    /// 配乐 URL 解析（书签 → 可访问 URL；渲染/混音期间保持访问，由调用方 stop）。
+    func resolveMusicAccess() -> (url: URL, stop: () -> Void)? {
+        guard let music = backgroundMusic else { return nil }
+        var isStale = false
+        guard let url = try? URL(resolvingBookmarkData: music.bookmark,
+                                 options: [], relativeTo: nil, bookmarkDataIsStale: &isStale) else {
+            NSLog("Editor: 配乐书签解析失败（%@）", music.name)
+            return nil
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        return (url, { if scoped { url.stopAccessingSecurityScopedResource() } })
+    }
+
     /// 成片总时长（摘要行/比例尺面——时间线即成品轨）。
     var outputDuration: TimeInterval { clipsDocument.outputDuration }
 
@@ -428,7 +487,31 @@ final class ZoomEditorModel: ObservableObject {
     /// 在 `renderZoom`）；窗口保持开启，进度条展示渲染进度。剪除段随编排传入（渲染侧
     /// 折叠时间线 + 命名分流 `_剪辑.mp4`）。
     func export() {
-        Task { await listViewModel.renderZoom(item, segments: segments, clips: clips, options: exportOptions) }
+        let document = currentDocument()
+        let hasEditsFlag = hasEdits
+        let itemRef = item
+        Task { @MainActor in
+            let rendered = await listViewModel.renderZoom(
+                itemRef, segments: document.zoomSegments, clips: document.clips,
+                options: exportOptions)
+            // 配乐混音（批次 4b）：渲染成功且有配乐 → AVMutableComposition 双音轨混音，
+            // 原地替换成片（tmp 导出后替换）。
+            guard let music = document.backgroundMusic, music.volume > 0.01, let rendered else { return }
+            guard let access = resolveMusicAccess() else { return }
+            defer { access.stop() }
+            do {
+                let tmpURL = rendered.deletingLastPathComponent().appendingPathComponent(
+                    ".mux_\(UUID().uuidString).mp4")
+                try await OfflineZoomRenderer.muxBackgroundMusic(
+                    editedURL: rendered, musicURL: access.url,
+                    volume: Float(music.volume), outputURL: tmpURL)
+                _ = try FileManager.default.replaceItemAt(rendered, withItemAt: tmpURL)
+                NSLog("Editor: 配乐混音完成（%@ × %.2f）", music.name, music.volume)
+            } catch {
+                NSLog("Editor: 配乐混音失败（保留无配乐成片）：\(error)")
+            }
+            _ = hasEditsFlag
+        }
     }
 
     /// 统一闸执行点：修改 → validate → 落库 → 草稿即时存盘（try? 尽力而为——草稿是
@@ -459,12 +542,15 @@ final class ZoomEditorModel: ObservableObject {
     }
 
     private func currentDocument() -> EditDocument {
-        EditDocument(clips: clips, zoomSegments: segments)
+        EditDocument(clips: clips, zoomSegments: segments,
+                     sourceVolume: sourceVolume, backgroundMusic: backgroundMusic)
     }
 
     private func applyDocument(_ document: EditDocument) {
         segments = document.zoomSegments
         clips = document.clips
+        sourceVolume = document.sourceVolume
+        backgroundMusic = document.backgroundMusic
         saveDocument()
         selectedClipIndex = nil
         selectedIndex = nil
@@ -517,7 +603,7 @@ final class ZoomEditorModel: ObservableObject {
 
     /// 草稿落盘（两段表合一文档；尽力而为）。
     private func saveDocument() {
-        try? listViewModel.saveDraft(EditDocument(clips: clips, zoomSegments: segments), for: item)
+        try? listViewModel.saveDraft(currentDocument(), for: item)
     }
 
     /// 定点修改：对旧段拷贝先算出**编辑后期望值**，validate 后按期望值回找选中下标
@@ -641,7 +727,7 @@ struct ZoomEditorView: View {
                         .help("缩回全程适配")
                     }
                     ZoomTimelineStrip(model: model)
-                        .frame(height: 64) // 时间线条高（旧 64pt；圆角由画布 layer 自裁）
+                        .frame(height: 84) // 双车道：视频带 62% + 音频带 38%（圆角由画布 layer 自裁）
                     Text("空白处按住拖选 = 波纹删除（时间线即时接合，⌘Z 撤销）；拖白色接缝线 = 修剪两侧；⌘+点击选段调速；拖到段边出现黄线 = 磁吸咬合；空格播放，←→ 逐帧。")
                         .font(.caption2)
                         .foregroundStyle(OmiStyle.faintText)
@@ -650,6 +736,7 @@ struct ZoomEditorView: View {
             OmiCard { segmentSection }
             selectedSegmentSection
             selectedClipSection
+            audioTracksSection
             OmiCard { exportSection }
         }
         .padding(16)
@@ -771,6 +858,53 @@ struct ZoomEditorView: View {
                         .buttonStyle(.plain)
                         .font(.footnote)
                 }
+            }
+        }
+    }
+
+    // MARK: 音轨卡（批次 4b：原声音量 + 配乐）
+
+    private var audioTracksSection: some View {
+        OmiCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("音轨").font(.headline)
+                HStack(spacing: 8) {
+                    Text("原声").frame(width: 44, alignment: .leading)
+                        .font(.callout)
+                    Slider(value: Binding(
+                        get: { model.sourceVolume },
+                        set: { model.setSourceVolume($0) }), in: 0...1)
+                    Text("\(Int((model.sourceVolume * 100).rounded()))%")
+                        .font(.system(.footnote, design: .monospaced))
+                        .frame(width: 44, alignment: .trailing)
+                }
+                HStack(spacing: 8) {
+                    Text("配乐").frame(width: 44, alignment: .leading)
+                        .font(.callout)
+                    if let music = model.backgroundMusic {
+                        Slider(value: Binding(
+                            get: { music.volume },
+                            set: { model.setMusicVolume($0) }), in: 0...1)
+                        Text(music.name)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .frame(maxWidth: 110, alignment: .leading)
+                        Button {
+                            model.removeMusic()
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .help("移除配乐")
+                    } else {
+                        Button("导入音频…") { model.importMusic() }
+                        Text("循环铺满成片，导出时混音")
+                            .font(.caption)
+                            .foregroundStyle(OmiStyle.faintText)
+                    }
+                }
+                Text("配乐音量建议 ≤50%——盖过人声是常见事故。")
+                    .font(.caption2)
+                    .foregroundStyle(OmiStyle.faintText)
             }
         }
     }
