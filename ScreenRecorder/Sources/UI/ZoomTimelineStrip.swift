@@ -163,16 +163,20 @@ enum ZoomTimelineGeometry {
                     seamPositions: [CGFloat], height: CGFloat) -> Hit {
         let zoomHit = hit(at: point, in: zoomBlocks)
         if zoomHit != .background { return zoomHit }
-        var nearestIndex: Int?
+        // seamPositions 下标 j = 「第 j+1 个 clip 左侧的缝」——返回**接缝号 j+1**
+        //（transition/接缝移动的键就是接缝号；曾用裸下标导致右键第一缝加转场被
+        // validate 静默丢弃、其余缝错位一档——2026-11-22 用户反馈「多个删除没法
+        // 设置转场」根因）。
+        var nearest: (position: Int, seam: Int)?
         var nearestDistance = seamHitHalfWidth
-        for (index, x) in seamPositions.enumerated() {
+        for (j, x) in seamPositions.enumerated() {
             let distance = abs(point.x - x)
             if distance <= nearestDistance {
-                nearestIndex = index
+                nearest = (j, j + 1)
                 nearestDistance = distance
             }
         }
-        if let nearestIndex { return .seamHandle(index: nearestIndex) }
+        if let nearest { return .seamHandle(index: nearest.seam) }
         _ = height
         return .background
     }

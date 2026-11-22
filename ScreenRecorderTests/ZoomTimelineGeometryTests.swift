@@ -206,3 +206,38 @@ final class ZoomTimelineGeometryTests: XCTestCase {
         XCTAssertEqual(ZoomTimelineGeometry.timecode(1, fps: 0), "—")
     }
 }
+
+/// 接缝号映射钉测（2026-11-22「多个删除没法设置转场」回归）：seamPositions 下标 j
+/// ↔ 接缝号 j+1——裸下标曾致右键第一缝加转场被 validate 丢弃、其余缝错位一档。
+final class SeamNumberMappingTests: XCTestCase {
+    func testHitReturnsSeamNumberNotPositionIndex() {
+        // 三 clip，接缝白线在 x = 100 / 200 / 300（位置下标 0/1/2 ↔ 接缝号 1/2/3）
+        // 点第一条白线（位置下标 0）→ 接缝号 1（validate/转场键即此号）
+        let first = ZoomTimelineGeometry.hit(
+            at: CGPoint(x: 102, y: 30),
+            zoomBlocks: [], seamPositions: [100, 200, 300], height: 64)
+        guard case .seamHandle(let seam1) = first else {
+            XCTFail("白线上应命中接缝，实得 \(first)")
+            return
+        }
+        XCTAssertEqual(seam1, 1, "位置下标 0 → 接缝号 1（裸下标曾致此缝加转场被丢弃）")
+        // 点第二条白线（位置下标 1）→ 接缝号 2
+        let second = ZoomTimelineGeometry.hit(
+            at: CGPoint(x: 202, y: 30),
+            zoomBlocks: [], seamPositions: [100, 200, 300], height: 64)
+        guard case .seamHandle(let seam2) = second else {
+            XCTFail("第二条白线应命中接缝，实得 \(second)")
+            return
+        }
+        XCTAssertEqual(seam2, 2, "位置下标 1 → 接缝号 2")
+    }
+
+    func testHitBackgroundBeyondHotzone() {
+        let hit = ZoomTimelineGeometry.hit(
+            at: CGPoint(x: 150, y: 30),
+            zoomBlocks: [],
+            seamPositions: [100, 200, 300],
+            height: 64)
+        XCTAssertEqual(hit, .background, "距白线 >4pt = 背景（波纹删除可武装）")
+    }
+}
