@@ -483,6 +483,51 @@ final class ZoomEditorModel: ObservableObject {
         applyClipEdit { $0.transitions[seam] = EditTransition(kind: kind) }
     }
 
+    /// 播放头最近的接缝下标（seam ∈ 1...clips.count，即右 clip 下标；无 clip → nil）。
+    func nearestSeam(toOutputTime t: TimeInterval) -> Int? {
+        guard !clips.isEmpty else { return nil }
+        let boundaries = clipsDocument.seamBoundaries(of: clips)
+        var best: (seam: Int, distance: TimeInterval)?
+        for (index, boundary) in boundaries.enumerated() {
+            let distance = abs(boundary - t)
+            if best == nil || distance < best!.distance {
+                best = (index + 1, distance)
+            }
+        }
+        return best?.seam
+    }
+
+    /// 循环切换播放头最近接缝的转场（无 → 黑场 → 溶解 → 无）；返回切换后的种类
+    ///（nil = 该缝已无转场）。键盘 ⇧⌘T 与播放行按钮共用。
+    @discardableResult
+    func cycleTransitionNearPlayhead() -> EditTransition.Kind? {
+        guard let seam = nearestSeam(toOutputTime: playhead) else { return nil }
+        let current = transitions[seam]?.kind
+        let next: EditTransition.Kind? = {
+            switch current {
+            case nil: return .black
+            case .black: return .crossfade
+            case .crossfade: return nil
+            }
+        }()
+        if let next {
+            addTransition(at: seam, kind: next)
+        } else {
+            removeTransition(at: seam)
+        }
+        return next
+    }
+
+    /// 播放头最近接缝的转场显示名（无 clip → nil；无转场 → 「无」）。
+    var transitionLabelAtPlayhead: String? {
+        guard let seam = nearestSeam(toOutputTime: playhead) else { return nil }
+        switch transitions[seam]?.kind {
+        case .black: return NSLocalizedString("黑场", comment: "Transition kind")
+        case .crossfade: return NSLocalizedString("溶解", comment: "Transition kind")
+        case nil: return NSLocalizedString("无", comment: "No transition")
+        }
+    }
+
     func removeTransition(at seam: Int) {
         applyClipEdit { $0.transitions[seam] = nil }
     }
@@ -834,7 +879,7 @@ struct ZoomEditorView: View {
                     }
                     ZoomTimelineStrip(model: model)
                         .frame(height: 84) // 双车道：视频带 62% + 音频带 38%（圆角由画布 layer 自裁）
-                    Text("空白处按住拖选 = 波纹删除（时间线即时接合，⌘Z 撤销）；拖白色接缝线 = 修剪两侧；⌘+点击选段调速；拖到段边出现黄线 = 磁吸咬合；空格播放，←→ 逐帧；音频道双击=加音量关键帧，拖菱形=调整，⌥+点击=删；接缝右键=加转场。")
+                    Text("空白处按住拖选 = 波纹删除（时间线即时接合，⌘Z 撤销）；拖白色接缝线 = 修剪两侧；⌘+点击选段调速；拖到段边出现黄线 = 磁吸咬合；空格播放，←→ 逐帧；音频道双击=加音量关键帧，拖菱形=调整，⌥+点击=删；接缝右键=加转场，⇧⌘T=循环最近接缝转场。")
                         .font(.caption2)
                         .foregroundStyle(OmiStyle.faintText)
                 }
@@ -883,6 +928,15 @@ struct ZoomEditorView: View {
             }
             .disabled(!model.canRedo)
             .help("重做（⇧⌘Z）")
+            // 转场循环按钮（剪映对齐·无鼠标通道）：对播放头最近接缝 无→黑场→溶解→无
+            Button {
+                _ = model.cycleTransitionNearPlayhead()
+            } label: {
+                Text(model.transitionLabelAtPlayhead.map { "转场：\($0)" } ?? "转场")
+                    .font(.callout)
+            }
+            .disabled(model.clips.count < 2)
+            .help("循环切换播放头最近接缝的转场：无 → 黑场 → 溶解（⇧⌘T）")
             Button("在播放头添加分段") {
                 model.addSegment(at: model.playhead)
             }
@@ -1182,6 +1236,9 @@ enum ZoomEditorWindowOpener {
             case 6 where mods.contains(.command): // ⌘Z / ⇧⌘Z = 撤销/重做
                 let isRedo = mods.contains(.shift)
                 Task { @MainActor in isRedo ? model.redo() : model.undo() }
+                return nil
+            case 17 where mods == [.command, .shift]: // ⇧⌘T = 循环最近接缝转场
+                Task { @MainActor in _ = model.cycleTransitionNearPlayhead() }
                 return nil
             default:
                 return event

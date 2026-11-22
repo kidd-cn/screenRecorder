@@ -529,3 +529,42 @@ final class SelectionClampTests: XCTestCase {
         XCTAssertFalse(model.clips.indices.contains(1))
     }
 }
+
+/// 转场循环钉测（批次 4c-2 无鼠标通道）：播放头最近接缝寻址 + 无→黑场→溶解→无 循环。
+@MainActor
+final class TransitionCycleTests: XCTestCase {
+    func testCycleAndNearestSeamOnRealMovie() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TransitionCycle-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("转场循环夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        // 建 3 clip（缝 1 = 0.1、缝 2 = 0.3、缝 3 = 0.4）
+        model.cutOutputRange(lower: 0.1, upper: 0.6)
+        model.cutOutputRange(lower: 0.3, upper: 0.4) // 尾段 0.1s > 最短源长 → 保留
+        XCTAssertEqual(model.clips.count, 3)
+
+        // 播放头在缝 2 附近（0.32）→ 最近缝 2（缝边界 0.1 / 0.3 / 0.4）
+        model.seek(to: 0.32)
+        XCTAssertEqual(model.nearestSeam(toOutputTime: 0.32), 2)
+        XCTAssertEqual(model.transitionLabelAtPlayhead, "无")
+
+        // 循环：无 → 黑场 → 溶解 → 无
+        XCTAssertEqual(model.cycleTransitionNearPlayhead(), .black)
+        XCTAssertEqual(model.transitions[2]?.kind, .black)
+        XCTAssertEqual(model.cycleTransitionNearPlayhead(), .crossfade)
+        XCTAssertEqual(model.transitions[2]?.kind, .crossfade)
+        XCTAssertNil(model.cycleTransitionNearPlayhead(), "第三次循环 = 移除")
+        XCTAssertNil(model.transitions[2])
+        // 缝 1 未被误伤
+        XCTAssertNil(model.transitions[1])
+    }
+}
