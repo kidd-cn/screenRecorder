@@ -210,7 +210,8 @@ enum OfflineZoomRenderer {
     static func renderPitchPreservedAudio(
         sourceURL: URL, clips: [EditClip], targetRate: Double = 48000,
         sourceVolume: Double,
-        fadeIn: TimeInterval, fadeOut: TimeInterval
+        fadeIn: TimeInterval, fadeOut: TimeInterval,
+        keyframes: [EditKeyframe] = []
     ) async throws -> PitchPreservedAudio {
         guard !clips.isEmpty else { throw RenderError.noRenderableSamples }
         let engine = AVAudioEngine()
@@ -268,17 +269,21 @@ enum OfflineZoomRenderer {
         engine.stop()
         // 总帧数按 clips 期望截齐（引擎渲染末尾可能多出尾巴）
         let totalFrames = output.count / 2
-        // 音量 + 淡入淡出（按输出时间逐帧增益）
+        // 音量 + 关键帧/淡入淡出（按输出时间逐帧增益：关键帧插值优先，无帧回退自动曲线）
         let secondsPerFrame = 1.0 / targetRate
         for frame in 0..<totalFrames {
             let t = Double(frame) * secondsPerFrame
             var gain = Float(sourceVolume)
-            if fadeIn > 0, t < fadeIn {
-                gain *= Float(t / fadeIn)
-            }
-            let fromEnd = Double(totalFrames - frame) * secondsPerFrame
-            if fadeOut > 0, fromEnd < fadeOut {
-                gain *= Float(fromEnd / fadeOut)
+            if let keyframed = EditKeyframe.volume(atOutputTime: t, keyframes: keyframes) {
+                gain *= Float(keyframed)
+            } else {
+                if fadeIn > 0, t < fadeIn {
+                    gain *= Float(t / fadeIn)
+                }
+                let fromEnd = Double(totalFrames - frame) * secondsPerFrame
+                if fadeOut > 0, fromEnd < fadeOut {
+                    gain *= Float(fromEnd / fadeOut)
+                }
             }
             output[frame * 2] *= gain
             output[frame * 2 + 1] *= gain
@@ -681,6 +686,7 @@ enum OfflineZoomRenderer {
     /// 缩放段照常在源时间轴上查找变换（映射不动源坐标语义）。含剪辑痕迹 → 输出命名
     /// `_剪辑.mp4`，否则 `_缩放.mp4`。`context` 供 headless 测试注入软件渲染上下文。
     static func render(sourceURL: URL, segments: [ZoomSegment], clips: [EditClip]? = nil,
+                       keyframes: [EditKeyframe] = [],
                        options: ExportVideoOptions,
                        progress: @escaping (Double) -> Void,
                        context: CIContext = CIContext(options: [.useSoftwareRenderer: false])) async throws -> URL {
@@ -688,7 +694,7 @@ enum OfflineZoomRenderer {
         // clips nil = 未剪辑（全程直通，纯缩放渲染兼容）；[] = 无内容保留（全删 →
         // noRenderableSamples）；非空 = 片段流成品轨。
         let validatedClips = clips.map { request in
-            EditDocument.validate(EditDocument(clips: request, zoomSegments: [])).clips
+            EditDocument.validate(EditDocument(clips: request, zoomSegments: [], keyframes: keyframes)).clips
         }
         let push = ExportCore.deduplicatedProgress(progress)
         let asset = AVURLAsset(url: sourceURL)
@@ -698,9 +704,10 @@ enum OfflineZoomRenderer {
         }
         let durationSeconds = CMTimeGetSeconds(try await asset.load(.duration))
         guard durationSeconds.isFinite, durationSeconds > 0 else { throw ExportError.emptySource }
-        let editDocument = validatedClips.map { request in
-            EditDocument(clips: request, zoomSegments: [])
-        } ?? EditDocument.initial(duration: durationSeconds)
+        let editDocument = EditDocument(
+            clips: validatedClips ?? EditDocument.initial(duration: durationSeconds).clips,
+            zoomSegments: [], keyframes: keyframes)
+
         let naturalSize = try await videoTrack.load(.naturalSize)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
@@ -842,7 +849,8 @@ enum OfflineZoomRenderer {
                 let stretched = try await renderPitchPreservedAudio(
                     sourceURL: sourceURL, clips: editDocument.clips,
                     sourceVolume: editDocument.sourceVolume,
-                    fadeIn: fadeSeconds, fadeOut: fadeSeconds)
+                    fadeIn: fadeSeconds, fadeOut: fadeSeconds,
+                    keyframes: editDocument.keyframes)
                 var asbd = AudioStreamBasicDescription(
                     mSampleRate: stretched.sampleRate, mFormatID: kAudioFormatLinearPCM,
                     mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
@@ -1085,15 +1093,11 @@ enum OfflineZoomRenderer {
             // 速度 ≠ 1 → 线性重采样（最近邻抽帧/复制——变调 v1，声调保持归 4c）；
             // 速度 = 1 → PTS 平移原样透传。重写失败转类型化错误（正常源不可达）。
             let speed = editDocument.speed(atSourceTime: t) ?? 1
+            // 关键帧插值优先，回退自动淡入淡出（包中点粒度 ≈23ms 不可感知）
             var sourceVolume = Float(editDocument.sourceVolume)
-            // 淡入淡出（成片首尾 0.5s；包中点粒度 ≈23ms 不可感知）
-            if outSeconds < fadeSeconds {
-                sourceVolume *= Float(max(outSeconds, 0) / fadeSeconds)
-            }
-            let fromEnd = outDuration - outSeconds
-            if fromEnd < fadeSeconds {
-                sourceVolume *= Float(max(fromEnd, 0) / fadeSeconds)
-            }
+            sourceVolume *= Float(editDocument.sourceGain(
+                atOutputTime: outSeconds + CMTimeGetSeconds(CMSampleBufferGetDuration(sample)) / 2,
+                fadeSeconds: fadeSeconds))
             var outgoing = sample
             if abs(speed - 1) > 1e-6,
                let resampled = OfflineZoomRenderer.resampledAudioSample(

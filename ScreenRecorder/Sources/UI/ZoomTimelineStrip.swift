@@ -275,6 +275,9 @@ final class ZoomTimelineCanvas: NSView {
             case seamHandle(seamIndex: Int, baseSourceTime: TimeInterval)
             /// 空白处波纹删除拖选（锚 = 成品时间）。
             case rippleDelete(anchor: TimeInterval)
+            /// 音量关键帧拖动（originalTime = 拖动起始的关键帧时间——validate 重排后
+            /// 下标漂移，按时间寻址）。
+            case keyframeHandle(originalTime: TimeInterval)
         }
         let kind: Kind
         let startX: CGFloat
@@ -505,6 +508,23 @@ final class ZoomTimelineCanvas: NSView {
             NSBezierPath(rect: CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: bounds.height)).fill()
         }
 
+        // 音量关键帧菱形（剪映对齐·批次 4c-2）：音频车道中线，accent 绿旋转方块。
+        for keyframe in model.keyframes {
+            let position = keyframePosition(keyframe, scale: scale, offset: offset)
+            let size: CGFloat = 8
+            let diamond = NSBezierPath()
+            diamond.move(to: CGPoint(x: position.x, y: position.y + size / 2))
+            diamond.line(to: CGPoint(x: position.x + size / 2, y: position.y))
+            diamond.line(to: CGPoint(x: position.x, y: position.y - size / 2))
+            diamond.line(to: CGPoint(x: position.x - size / 2, y: position.y))
+            diamond.close()
+            NSColor.systemGreen.setFill()
+            diamond.fill()
+            NSColor.white.withAlphaComponent(0.9).setStroke()
+            diamond.lineWidth = 1
+            diamond.stroke()
+        }
+
         // 磁吸指示线（剪映对齐·黄色竖线：拖拽中吸附生效的可视反馈，盖段块之上）。
         if let snapTime = activeSnapIndicator, dragSession != nil {
             let snapX = ZoomTimelineGeometry.timeToX(
@@ -548,6 +568,26 @@ final class ZoomTimelineCanvas: NSView {
         let point = convert(event.locationInWindow, from: nil)
         let scale = pxPerSec(model: model)
         let offset = model.timelineOffset
+        // 音频车道（下车道）优先：关键帧菱形命中 → 拖动/⌥删；双击空白 → 添加。
+        if point.y >= bounds.height * 0.385 {
+            if let index = nearestKeyframeIndex(at: point, model: model, scale: scale, offset: offset) {
+                if event.modifierFlags.contains(.option) {
+                    model.removeKeyframe(at: index)
+                    return
+                }
+                dragSession = DragSession(
+                    kind: .keyframeHandle(originalTime: model.keyframes[index].outputTime),
+                    startX: point.x, lastSnappedTime: model.keyframes[index].outputTime)
+                return
+            }
+            if event.clickCount >= 2 {
+                let time = min(max(ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset),
+                                   0), model.outputDuration)
+                model.addKeyframe(at: time, volume: volumeFromY(point.y))
+                return
+            }
+            // 单击音频道 = 跳播（与视频带一致）；拖动落入下方通用波纹删除分支
+        }
         let zoomBlocks = currentBlocks(scale: scale)
         switch ZoomTimelineGeometry.hit(at: point, zoomBlocks: zoomBlocks,
                                         seamPositions: seamPositions(), height: bounds.height) {
@@ -596,6 +636,38 @@ final class ZoomTimelineCanvas: NSView {
             positions.append(ZoomTimelineGeometry.timeToX(cursor, pxPerSec: scale, offset: model.timelineOffset))
         }
         return positions
+    }
+
+    /// 音频车道几何（批次 4c-2）：中线与半幅（y 向上坐标）。
+    private var audioLaneCenter: CGFloat { bounds.height * 0.19 }
+    private var audioLaneHalf: CGFloat { bounds.height * 0.13 }
+
+    /// 关键帧菱形中心（画布坐标）。
+    private func keyframePosition(_ keyframe: EditKeyframe, scale: CGFloat, offset: TimeInterval) -> CGPoint {
+        CGPoint(
+            x: ZoomTimelineGeometry.timeToX(keyframe.outputTime, pxPerSec: scale, offset: offset),
+            y: audioLaneCenter + CGFloat(keyframe.volume) * audioLaneHalf)
+    }
+
+    /// 最近关键帧下标（≤8pt 命中）。
+    private func nearestKeyframeIndex(at point: CGPoint, model: ZoomEditorModel,
+                                      scale: CGFloat, offset: TimeInterval) -> Int? {
+        var nearest: Int?
+        var nearestDistance: CGFloat = 8
+        for (index, keyframe) in model.keyframes.enumerated() {
+            let position = keyframePosition(keyframe, scale: scale, offset: offset)
+            let distance = hypot(point.x - position.x, point.y - position.y)
+            if distance <= nearestDistance {
+                nearest = index
+                nearestDistance = distance
+            }
+        }
+        return nearest
+    }
+
+    /// 音频道纵坐标 → 音量（0…1）。
+    private func volumeFromY(_ y: CGFloat) -> Double {
+        Double(min(max((y - audioLaneCenter) / max(audioLaneHalf, 1), 0), 1))
     }
 
     private func beginZoomDrag(index: Int, isLeading: Bool, startX: CGFloat, model: ZoomEditorModel) {
@@ -674,6 +746,14 @@ final class ZoomTimelineCanvas: NSView {
             model.ripplePreview = (min(anchor, snappedTime), max(anchor, snappedTime))
             model.scrub(to: snappedTime)
             dragSession?.lastSnappedTime = snappedTime
+        case .keyframeHandle(let originalTime):
+            _ = originalTime
+            // 拖动关键帧：横向=时间（钳成片时长），纵向=音量；逐事件提交（撤销栈逐快照）
+            let newTime = min(max(ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: offset),
+                                 0), model.outputDuration)
+            model.moveKeyframe(fromOriginalTime: session.lastSnappedTime,
+                               to: newTime, volume: volumeFromY(point.y))
+            dragSession?.lastSnappedTime = newTime
         }
     }
     override func mouseUp(with event: NSEvent) {
@@ -699,6 +779,8 @@ final class ZoomTimelineCanvas: NSView {
             } else {
                 model.seek(to: session.lastSnappedTime) // 点击背景跳播
             }
+        case .keyframeHandle:
+            break // moveKeyframe 已逐拖拽事件提交（撤销栈逐事件快照）
         }
     }
 

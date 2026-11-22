@@ -414,8 +414,8 @@ private final class GatedZoomRenderer: ZoomRendering, @unchecked Sendable {
     }
 
     func render(
-        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], options: ExportVideoOptions,
-        progress: @escaping (Double) -> Void
+        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
+        options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL {
         record(segments)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -554,8 +554,8 @@ private final class HopCaptureZoomRenderer: ZoomRendering, @unchecked Sendable {
     }
 
     func render(
-        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], options: ExportVideoOptions,
-        progress: @escaping (Double) -> Void
+        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
+        options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL {
         captureForward(progress)
         return outputURL

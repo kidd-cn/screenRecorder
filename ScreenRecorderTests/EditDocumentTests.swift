@@ -263,3 +263,96 @@ enum EditorMovieFixture {
         XCTAssertEqual(writer.status, .completed)
     }
 }
+
+/// 音量关键帧钉测（剪映对齐·批次 4c-2 Task A）：validate 规整、插值三态、波纹删除
+/// 平移、v3 草稿兼容解码、模型级添加-拖动-删除-撤销全链。
+final class KeyframeTests: XCTestCase {
+    func testValidateSortsClampsDedupes() {
+        let validated = EditKeyframe.validate([
+            EditKeyframe(outputTime: 2, volume: 2), // 钳 1
+            EditKeyframe(outputTime: -1, volume: 0.5), // 负时间丢弃
+            EditKeyframe(outputTime: 1, volume: 0.3),
+            EditKeyframe(outputTime: 1 + 5e-7, volume: 0.9), // 去重保留先者
+            EditKeyframe(outputTime: .nan, volume: 0.5), // 丢弃
+        ])
+        XCTAssertEqual(validated, [
+            EditKeyframe(outputTime: 1, volume: 0.3),
+            EditKeyframe(outputTime: 2, volume: 1),
+        ])
+    }
+
+    func testVolumeInterpolationThreeStates() throws {
+        let keyframes = [
+            EditKeyframe(outputTime: 1, volume: 0.2),
+            EditKeyframe(outputTime: 3, volume: 0.8),
+        ]
+        XCTAssertEqual(try XCTUnwrap(EditKeyframe.volume(atOutputTime: 0, keyframes: keyframes)),
+                       0.2, accuracy: 1e-9, "首帧前 = 首帧值")
+        XCTAssertEqual(try XCTUnwrap(EditKeyframe.volume(atOutputTime: 2, keyframes: keyframes)),
+                       0.5, accuracy: 1e-9, "帧间线性")
+        XCTAssertEqual(try XCTUnwrap(EditKeyframe.volume(atOutputTime: 9, keyframes: keyframes)),
+                       0.8, accuracy: 1e-9, "末帧后 = 末帧值")
+        XCTAssertNil(EditKeyframe.volume(atOutputTime: 2, keyframes: []), "空集 nil → 回退自动淡")
+    }
+
+    func testRippleDeleteShiftsKeyframes() {
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 10)],
+            zoomSegments: [],
+            keyframes: [
+                EditKeyframe(outputTime: 1, volume: 0.1),
+                EditKeyframe(outputTime: 3, volume: 0.5), // 删除区间 [2,4) 内 → 丢
+                EditKeyframe(outputTime: 6, volume: 0.9), // 右侧 → −2 平移
+            ])
+        let edited = document.removingOutputRange(lower: 2, upper: 4)
+        XCTAssertEqual(edited.keyframes, [
+            EditKeyframe(outputTime: 1, volume: 0.1),
+            EditKeyframe(outputTime: 4, volume: 0.9),
+        ])
+    }
+
+    func testV3DraftDecodesWithEmptyKeyframes() throws {
+        let v3JSON = #"{"clips":[{"sourceStart":0,"sourceEnd":5,"speed":1}],"zoomSegments":[],"sourceVolume":0.5}"#
+        let decoded = try JSONDecoder().decode(EditDocument.self, from: Data(v3JSON.utf8))
+        XCTAssertEqual(decoded.keyframes, [], "v3 缺字段 → 空关键帧")
+        XCTAssertEqual(decoded.sourceVolume, 0.5)
+    }
+}
+
+/// 关键帧模型链钉测（真实 mp4 夹具）：添加-拖动-删除-撤销全链。
+@MainActor
+final class KeyframeModelTests: XCTestCase {
+    func testAddMoveRemoveUndoOnRealMovie() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KeyframeModelTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("关键帧夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        model.addKeyframe(at: 0.4, volume: 0.3)
+        XCTAssertEqual(model.keyframes, [EditKeyframe(outputTime: 0.4, volume: 0.3)])
+
+        // 拖动（按原时间寻址；重排后下标漂移不影响）
+        model.moveKeyframe(fromOriginalTime: 0.4, to: 0.7, volume: 0.9)
+        XCTAssertEqual(model.keyframes, [EditKeyframe(outputTime: 0.7, volume: 0.9)])
+
+        // 删除 + 撤销
+        model.removeKeyframe(at: 0)
+        XCTAssertEqual(model.keyframes, [])
+        XCTAssertTrue(model.canUndo)
+        model.undo()
+        XCTAssertEqual(model.keyframes, [EditKeyframe(outputTime: 0.7, volume: 0.9)], "撤销恢复删除前")
+
+        // 草稿同步
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 1.0).keyframes,
+                       model.keyframes, "关键帧随草稿落盘")
+    }
+}

@@ -32,7 +32,56 @@ struct EditMusicTrack: Codable, Equatable {
     var volume: Double
 }
 
-/// 剪辑文档（剪辑 v2 片段流 EDL，2026-11-21 剪映对齐批次 4a；4b 增原声/配乐音轨字段）：
+/// 音量关键帧（剪辑 v2 批次 4c-2）：**成品时间轴**上锚定的原声音量点。相邻帧线性
+/// 插值；首帧前取首帧值、末帧后取末帧值；无关键帧 → 自动首尾 0.5s 淡入淡出（4c-1）。
+struct EditKeyframe: Codable, Equatable {
+    var outputTime: TimeInterval
+    var volume: Double
+
+    init(outputTime: TimeInterval, volume: Double) {
+        self.outputTime = outputTime
+        self.volume = volume
+    }
+
+    /// 关键帧集校验 + 规整：时间有限非负、音量钳 0…1、**先排序后去重**（1e-6 内保留
+    /// 先者——去重若在排序前执行，无序输入会把更早时间误判为重复而丢弃）。
+    static func validate(_ keyframes: [EditKeyframe]) -> [EditKeyframe] {
+        var cleaned: [EditKeyframe] = []
+        for var keyframe in keyframes {
+            guard keyframe.outputTime.isFinite, keyframe.outputTime >= 0,
+                  keyframe.volume.isFinite else { continue }
+            keyframe.volume = min(max(keyframe.volume, 0), 1)
+            cleaned.append(keyframe)
+        }
+        let sorted = cleaned.sorted { $0.outputTime < $1.outputTime }
+        var result: [EditKeyframe] = []
+        for keyframe in sorted {
+            if let previous = result.last, keyframe.outputTime - previous.outputTime < 1e-6 {
+                continue // 去重保留先者
+            }
+            result.append(keyframe)
+        }
+        return result
+    }
+
+    /// 插值（纯函数）：帧间线性；首帧前=首帧值；末帧后=末帧值；空集 → nil（回退自动淡入淡出）。
+    static func volume(atOutputTime t: TimeInterval, keyframes: [EditKeyframe]) -> Double? {
+        let sorted = keyframes // validate 后有序；调用方闸保证
+        guard let first = sorted.first else { return nil }
+        if t <= first.outputTime { return first.volume }
+        guard let last = sorted.last else { return nil }
+        if t >= last.outputTime { return last.volume }
+        for (previous, next) in zip(sorted, sorted.dropFirst()) where t >= previous.outputTime && t <= next.outputTime {
+            let span = next.outputTime - previous.outputTime
+            guard span > 1e-9 else { return next.volume }
+            let progress = (t - previous.outputTime) / span
+            return previous.volume + (next.volume - previous.volume) * progress
+        }
+        return last.volume
+    }
+}
+
+/// 剪辑文档（剪辑 v2 片段流 EDL，2026-11-21 剪映对齐批次 4a；4b 增原声/配乐音轨字段；4c-2 增音量关键帧）：
 /// 源成片 + 有序片段 + 缩放段（zoom 段恒定义在**源时间轴**——渲染逐源帧查找不变）。
 /// **坐标系钉定**：
 /// 时间线 UI 与播放头都在**成品时间轴**；源↔成品双向映射（含速度折算）是唯一真源
@@ -47,20 +96,24 @@ struct EditDocument: Codable, Equatable {
     var sourceVolume: Double
     /// 配乐轨（nil = 未导入；批次 4b）。
     var backgroundMusic: EditMusicTrack?
+    /// 音量关键帧（成品时间轴；空 = 自动首尾淡入淡出；批次 4c-2）。
+    var keyframes: [EditKeyframe]
 
     static let empty = EditDocument(clips: [], zoomSegments: [])
 
-    /// 手写 Codable（v2 草稿无音轨字段 → 默认值 decodeIfPresent）。
+    /// 手写 Codable（旧版草稿缺字段 → 默认值 decodeIfPresent）。
     enum CodingKeys: String, CodingKey {
-        case clips, zoomSegments, sourceVolume, backgroundMusic
+        case clips, zoomSegments, sourceVolume, backgroundMusic, keyframes
     }
 
     init(clips: [EditClip], zoomSegments: [ZoomSegment],
-         sourceVolume: Double = 1, backgroundMusic: EditMusicTrack? = nil) {
+         sourceVolume: Double = 1, backgroundMusic: EditMusicTrack? = nil,
+         keyframes: [EditKeyframe] = []) {
         self.clips = clips
         self.zoomSegments = zoomSegments
         self.sourceVolume = sourceVolume
         self.backgroundMusic = backgroundMusic
+        self.keyframes = EditKeyframe.validate(keyframes)
     }
 
     init(from decoder: Decoder) throws {
@@ -69,6 +122,8 @@ struct EditDocument: Codable, Equatable {
         zoomSegments = try container.decodeIfPresent([ZoomSegment].self, forKey: .zoomSegments) ?? []
         sourceVolume = try container.decodeIfPresent(Double.self, forKey: .sourceVolume) ?? 1
         backgroundMusic = try container.decodeIfPresent(EditMusicTrack.self, forKey: .backgroundMusic)
+        keyframes = EditKeyframe.validate(
+            try container.decodeIfPresent([EditKeyframe].self, forKey: .keyframes) ?? [])
     }
 
     /// 最短片段源长（秒；validate 硬约束——交互闸另设更宽裕的手感下限）。
@@ -77,9 +132,10 @@ struct EditDocument: Codable, Equatable {
     static let speedRange: ClosedRange<Double> = 0.25...4
 
     /// 初始文档：单 clip 全程原速（新建编辑的起点）。
-    static func initial(duration: TimeInterval) -> EditDocument {
+    static func initial(duration: TimeInterval, keyframes: [EditKeyframe] = []) -> EditDocument {
         guard duration.isFinite, duration > 0 else { return empty }
-        return EditDocument(clips: [EditClip(sourceStart: 0, sourceEnd: duration)], zoomSegments: [])
+        return EditDocument(clips: [EditClip(sourceStart: 0, sourceEnd: duration)], zoomSegments: [],
+                            keyframes: keyframes)
     }
 
     /// 校验 + 规整：clips 非法丢弃/钳制/排序/去重叠保留先者；zoom 段过既有闸。
@@ -99,7 +155,8 @@ struct EditDocument: Codable, Equatable {
             clips.append(clip)
         }
         return EditDocument(clips: clips, zoomSegments: ZoomSegment.validate(document.zoomSegments),
-                            sourceVolume: document.sourceVolume, backgroundMusic: document.backgroundMusic)
+                            sourceVolume: document.sourceVolume, backgroundMusic: document.backgroundMusic,
+                            keyframes: document.keyframes)
     }
 
     // MARK: 源↔成品双向映射（折叠真源——渲染 PTS、预览 seek、UI 铺排共用）
@@ -136,6 +193,19 @@ struct EditDocument: Codable, Equatable {
             outputCursor += clip.displayDuration
         }
         return nil
+    }
+
+    /// 原声增益（批次 4c-2）：有关键帧 → 插值；无 → 自动首尾 0.5s 淡入淡出曲线。
+    /// `sourceVolume`（全局音量）由调用方另行乘积。
+    func sourceGain(atOutputTime t: TimeInterval, fadeSeconds: TimeInterval) -> Double {
+        if let keyframed = EditKeyframe.volume(atOutputTime: t, keyframes: keyframes) {
+            return keyframed
+        }
+        var gain = 1.0
+        if fadeSeconds > 0, t < fadeSeconds { gain *= t / fadeSeconds }
+        let fromEnd = outputDuration - t
+        if fadeSeconds > 0, fromEnd < fadeSeconds { gain *= max(fromEnd, 0) / fadeSeconds }
+        return gain
     }
 
     /// s 所在 clip 的速度（不在任何 clip → nil）。
@@ -179,8 +249,18 @@ struct EditDocument: Codable, Equatable {
                     sourceStart: sourceCut, sourceEnd: clip.sourceEnd, speed: clip.speed))
             }
         }
+        // 关键帧随接合平移：删除区间内的丢弃，右侧 −(hi−lo) 平移（validate 去重）
+        let shift = hi - lo
+        let shiftedKeyframes = keyframes.compactMap { keyframe -> EditKeyframe? in
+            guard keyframe.outputTime < lo else { return nil }
+            return keyframe
+        } + keyframes.compactMap { keyframe -> EditKeyframe? in
+            guard keyframe.outputTime > hi else { return nil }
+            return EditKeyframe(outputTime: keyframe.outputTime - shift, volume: keyframe.volume)
+        }
         return EditDocument.validate(EditDocument(clips: result, zoomSegments: zoomSegments,
-                                                  sourceVolume: sourceVolume, backgroundMusic: backgroundMusic))
+                                                  sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
+                                                  keyframes: shiftedKeyframes))
     }
 
     /// 接缝移动（剪映 trim 语义）：seamIndex ∈ 0...clips.count——0 = 片头裁切

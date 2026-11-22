@@ -122,6 +122,8 @@ final class ZoomEditorModel: ObservableObject {
     @Published var sourceVolume: Double = 1
     /// 配乐轨（nil = 未导入）。
     @Published var backgroundMusic: EditMusicTrack?
+    /// 音量关键帧（成品时间轴；空 = 自动首尾淡入淡出；批次 4c-2）。
+    @Published private(set) var keyframes: [EditKeyframe] = []
     /// 选中的 clip 下标（⌘+点击选中 → 速度面板；validate 重排后按值回找）。
     @Published var selectedClipIndex: Int?
     /// 选中段下标（行点击/时间线点击选中；validate 重排后按编辑后段值回找）。
@@ -270,6 +272,7 @@ final class ZoomEditorModel: ObservableObject {
             }
             sourceVolume = document.sourceVolume
             backgroundMusic = document.backgroundMusic
+            keyframes = document.keyframes
             saveDocument()
         }
     }
@@ -319,7 +322,8 @@ final class ZoomEditorModel: ObservableObject {
     /// 当前 clips 的文档面（映射/编辑操作真源；画布接缝换算只读访问）。
     var clipsDocument: EditDocument {
         EditDocument(clips: clips, zoomSegments: segments,
-                     sourceVolume: sourceVolume, backgroundMusic: backgroundMusic)
+                     sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
+                     keyframes: keyframes)
     }
 
     // MARK: 分段编辑（唯一写入口：全部经 ZoomEditorLogic.applyEdit 统一闸）
@@ -420,6 +424,33 @@ final class ZoomEditorModel: ObservableObject {
         applyClipEdit { $0.backgroundMusic?.volume = min(max(volume, 0), 1) }
     }
 
+    // MARK: 音量关键帧（批次 4c-2：成品时间轴锚定，双击音频道添加）
+
+    func addKeyframe(at outputTime: TimeInterval, volume: Double) {
+        applyClipEdit { $0.keyframes = EditKeyframe.validate(
+            $0.keyframes + [EditKeyframe(outputTime: outputTime, volume: min(max(volume, 0), 1))]) }
+    }
+
+    /// 拖动关键帧（按**拖动起始时间**寻址——validate 重排后下标漂移）。
+    /// 拖动关键帧（按**拖动起始时间**寻址——validate 重排后下标漂移；时间/音量越邻帧
+    /// 界由 validate 排序/去重收口）。
+    func moveKeyframe(fromOriginalTime original: TimeInterval, to outputTime: TimeInterval, volume: Double) {
+        applyClipEdit { document in
+            guard let index = document.keyframes.firstIndex(
+                where: { abs($0.outputTime - original) < 1e-6 }) else { return }
+            var keyframe = document.keyframes[index]
+            keyframe.outputTime = max(0, outputTime)
+            keyframe.volume = min(max(volume, 0), 1)
+            document.keyframes[index] = keyframe
+            document.keyframes = EditKeyframe.validate(document.keyframes)
+        }
+    }
+
+    func removeKeyframe(at index: Int) {
+        guard keyframes.indices.contains(index) else { return }
+        applyClipEdit { $0.keyframes.remove(at: index) }
+    }
+
     /// 配乐 URL 解析（书签 → 可访问 URL；渲染/混音期间保持访问，由调用方 stop）。
     func resolveMusicAccess() -> (url: URL, stop: () -> Void)? {
         guard let music = backgroundMusic else { return nil }
@@ -493,7 +524,7 @@ final class ZoomEditorModel: ObservableObject {
         Task { @MainActor in
             let rendered = await listViewModel.renderZoom(
                 itemRef, segments: document.zoomSegments, clips: document.clips,
-                options: exportOptions)
+                keyframes: document.keyframes, options: exportOptions)
             // 配乐混音（批次 4b）：渲染成功且有配乐 → AVMutableComposition 双音轨混音，
             // 原地替换成片（tmp 导出后替换）。
             guard let music = document.backgroundMusic, music.volume > 0.01, let rendered else { return }
@@ -518,7 +549,14 @@ final class ZoomEditorModel: ObservableObject {
     /// 便利持久化，写失败不阻断编辑，失败形态归真机验收观察）。
     private func applyEdit(_ edit: (inout [ZoomSegment]) -> Void) {
         pushUndo()
-        segments = ZoomEditorLogic.applyEdit(segments, edit: edit)
+        var document = clipsDocument
+        edit(&document.zoomSegments)
+        let validated = EditDocument.validate(document)
+        segments = validated.zoomSegments
+        clips = validated.clips
+        sourceVolume = validated.sourceVolume
+        backgroundMusic = validated.backgroundMusic
+        keyframes = validated.keyframes
         saveDocument()
     }
 
@@ -543,7 +581,8 @@ final class ZoomEditorModel: ObservableObject {
 
     private func currentDocument() -> EditDocument {
         EditDocument(clips: clips, zoomSegments: segments,
-                     sourceVolume: sourceVolume, backgroundMusic: backgroundMusic)
+                     sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
+                     keyframes: keyframes)
     }
 
     private func applyDocument(_ document: EditDocument) {
@@ -551,6 +590,7 @@ final class ZoomEditorModel: ObservableObject {
         clips = document.clips
         sourceVolume = document.sourceVolume
         backgroundMusic = document.backgroundMusic
+        keyframes = document.keyframes
         saveDocument()
         selectedClipIndex = nil
         selectedIndex = nil
@@ -598,6 +638,9 @@ final class ZoomEditorModel: ObservableObject {
         let validated = EditDocument.validate(document)
         clips = validated.clips
         segments = validated.zoomSegments
+        sourceVolume = validated.sourceVolume
+        backgroundMusic = validated.backgroundMusic
+        keyframes = validated.keyframes
         saveDocument()
     }
 
@@ -728,7 +771,7 @@ struct ZoomEditorView: View {
                     }
                     ZoomTimelineStrip(model: model)
                         .frame(height: 84) // 双车道：视频带 62% + 音频带 38%（圆角由画布 layer 自裁）
-                    Text("空白处按住拖选 = 波纹删除（时间线即时接合，⌘Z 撤销）；拖白色接缝线 = 修剪两侧；⌘+点击选段调速；拖到段边出现黄线 = 磁吸咬合；空格播放，←→ 逐帧。")
+                    Text("空白处按住拖选 = 波纹删除（时间线即时接合，⌘Z 撤销）；拖白色接缝线 = 修剪两侧；⌘+点击选段调速；拖到段边出现黄线 = 磁吸咬合；空格播放，←→ 逐帧；音频道双击=加音量关键帧，拖菱形=调整，⌥+点击=删。")
                         .font(.caption2)
                         .foregroundStyle(OmiStyle.faintText)
                 }

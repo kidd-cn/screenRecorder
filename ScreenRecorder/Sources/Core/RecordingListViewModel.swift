@@ -22,19 +22,20 @@ protocol ExportServing {
 /// 0…1 严格递增、终值恰一次、主线程外调用（UI/编排侧自行 hop）。
 protocol ZoomRendering {
     func render(
-        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], options: ExportVideoOptions,
-        progress: @escaping (Double) -> Void
+        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
+        options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL
 }
 
 /// `ZoomRendering` 生产实现：直调 OfflineZoomRenderer 静态函数（T17 消费契约零损耗转发）。
 struct OfflineZoomRendererService: ZoomRendering {
     func render(
-        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], options: ExportVideoOptions,
-        progress: @escaping (Double) -> Void
+        sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
+        options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL {
         try await OfflineZoomRenderer.render(
-            sourceURL: sourceURL, segments: segments, clips: clips, options: options, progress: progress)
+            sourceURL: sourceURL, segments: segments, clips: clips, keyframes: keyframes,
+            options: options, progress: progress)
     }
 }
 
@@ -384,7 +385,8 @@ final class RecordingListViewModel: ObservableObject {
     ///   校验丢弃，不冒充下一代（钉测 testLateProgressHopFromFinishedGenerationIsDropped）。
     @discardableResult
     func renderZoom(_ item: RecordingFileMetadata, segments: [ZoomSegment],
-                    clips: [EditClip] = [], options: ExportVideoOptions) async -> URL? {
+                    clips: [EditClip] = [], keyframes: [EditKeyframe] = [],
+                    options: ExportVideoOptions) async -> URL? {
         guard !zoomRenderInFlight, !exportInFlight else { return nil }
         zoomRenderInFlight = true
         zoomRenderRunID += 1
@@ -406,6 +408,7 @@ final class RecordingListViewModel: ObservableObject {
             let outputURL = try await zoomRenderer.render(
                 sourceURL: item.url, segments: ZoomSegment.validate(segments),
                 clips: EditDocument.validate(EditDocument(clips: clips, zoomSegments: [])).clips,
+                keyframes: EditKeyframe.validate(keyframes),
                 options: options, progress: forward)
             await refresh() // 自动入列（成功产物立即可见；_压缩.mp4 先例）
             // Q6 编辑导出后动作（仅本编排挂钩）：偏好**导出完成时刻**读缝（两次导出间
