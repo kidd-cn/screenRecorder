@@ -1400,7 +1400,7 @@ struct ZoomEditorView: View {
                 ZoomTimelineStrip(model: model)
                     .frame(height: 120)
             }
-            Text("空白拖选=波纹删除 · 拖白线=修剪接缝 · ⌘+点击=选段调速 · 双击音频道=音量关键帧 · 接缝右键/⇧⌘T=转场 · 空格播放 ←→ 逐帧")
+            Text("空白拖选=波纹删除 · 拖白线=修剪接缝 · ⌘+点击=选段调速 · 双击音频道=音量关键帧 · 接缝右键/⇧⌘T=转场 · 空格播放 ←→ 逐帧 · ⌘B 分割")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
                 .lineLimit(1)
@@ -1417,8 +1417,10 @@ struct ZoomEditorView: View {
             Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
                 .disabled(!model.canRedo).help("重做（⇧⌘Z）")
             Divider().frame(height: 16)
-            Button { model.splitAtPlayhead() } label: { Image(systemName: "scissors") }
-                .help("在播放头处分割")
+            Button { model.splitAtPlayhead() } label: {
+                Label("分割", systemImage: "rectangle.split.2x1")
+            }
+            .help("在播放头处分割片段（⌘B）")
             Button { model.deleteSelectedClip() } label: { Image(systemName: "trash") }
                 .help("删除选中片段")
             Button { model.trimLeftAtPlayhead() } label: { Image(systemName: "arrow.left.to.line") }
@@ -1793,6 +1795,9 @@ enum ZoomEditorWindowOpener {
             case 6 where mods.contains(.command): // ⌘Z / ⇧⌘Z = 撤销/重做
                 let isRedo = mods.contains(.shift)
                 Task { @MainActor in isRedo ? model.redo() : model.undo() }
+                return nil
+            case 11 where mods == .command: // ⌘B = 播放头处分割
+                Task { @MainActor in model.splitAtPlayhead() }
                 return nil
             case 17 where mods == [.command, .shift]: // ⇧⌘T = 循环最近接缝转场
                 Task { @MainActor in _ = model.cycleTransitionNearPlayhead() }
