@@ -415,7 +415,7 @@ private final class GatedZoomRenderer: ZoomRendering, @unchecked Sendable {
 
     func render(
         sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
-        transitions: [Int: EditTransition],
+        transitions: [Int: EditTransition], transform: EditTransform, adjust: EditAdjust,
         options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL {
         record(segments)
@@ -556,7 +556,7 @@ private final class HopCaptureZoomRenderer: ZoomRendering, @unchecked Sendable {
 
     func render(
         sourceURL: URL, segments: [ZoomSegment], clips: [EditClip], keyframes: [EditKeyframe],
-        transitions: [Int: EditTransition],
+        transitions: [Int: EditTransition], transform: EditTransform, adjust: EditAdjust,
         options: ExportVideoOptions, progress: @escaping (Double) -> Void
     ) async throws -> URL {
         captureForward(progress)

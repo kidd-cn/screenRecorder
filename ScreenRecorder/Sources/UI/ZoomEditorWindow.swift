@@ -128,6 +128,8 @@ final class ZoomEditorModel: ObservableObject {
     @Published private(set) var transitions: [Int: EditTransition] = [:]
     /// 画面变换（缩放/位置/旋转/圆角；剪映 02.png 画面面板）。
     @Published private(set) var transform: EditTransform = .identity
+    /// 画面调整（亮度/对比度/饱和度；剪映 02.png 调整面板）。
+    @Published private(set) var adjust: EditAdjust = .identity
     /// 视频自然尺寸（比例显示/预览变换基准；loadMediaInfo 补齐）。
     @Published private(set) var videoSize: CGSize = .zero
     /// 选中的 clip 下标（⌘+点击选中 → 速度面板；validate 重排后按值回找）。
@@ -296,6 +298,7 @@ final class ZoomEditorModel: ObservableObject {
             keyframes = document.keyframes
             transitions = document.transitions
             transform = document.transform
+            adjust = document.adjust
             clampTimelineOffset()
             saveDocument()
         }
@@ -361,7 +364,8 @@ final class ZoomEditorModel: ObservableObject {
         // 漏带 = 该字段的所有编辑互相抹除（transitions 曾犯，keyframes 同前科）
         EditDocument(clips: clips, zoomSegments: segments,
                      sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                     keyframes: keyframes, transitions: transitions)
+                     keyframes: keyframes, transitions: transitions,
+                     transform: transform, adjust: adjust)
     }
 
     // MARK: 分段编辑（唯一写入口：全部经 ZoomEditorLogic.applyEdit 统一闸）
@@ -561,6 +565,26 @@ final class ZoomEditorModel: ObservableObject {
         applyClipEdit { $0.transform = .identity }
     }
 
+    /// 对齐预设（剪映 02.png 六向对齐）：按当前缩放把内容贴到画布边。
+    func alignTransform(horizontal: Int, vertical: Int) {
+        // horizontal: -1 左 / 0 中 / 1 右；vertical: -1 下 / 0 中 / 1 上（CI y 向上）
+        var next = transform
+        let margin = max((1 - next.scale) / 2, 0)
+        next.offsetX = Double(horizontal) * margin
+        next.offsetY = Double(vertical) * margin
+        setTransform(next)
+    }
+
+    // MARK: 画面调整（亮度/对比度/饱和度）
+
+    func setAdjust(_ newAdjust: EditAdjust) {
+        applyClipEdit { $0.adjust = newAdjust.validated }
+    }
+
+    func resetAdjust() {
+        applyClipEdit { $0.adjust = .identity }
+    }
+
     // MARK: 分割 / 删除（剪映 02.png 顶部工具栏）
 
     /// 在播放头处分割当前 clip：成品时间处把所在 clip 一分为二（共享源切点）。
@@ -739,6 +763,7 @@ final class ZoomEditorModel: ObservableObject {
             let rendered = await listViewModel.renderZoom(
                 itemRef, segments: document.zoomSegments, clips: document.clips,
                 keyframes: document.keyframes, transitions: document.transitions,
+                transform: document.transform, adjust: document.adjust,
                 options: exportOptions)
             // 配乐混音（批次 4b）：渲染成功且有配乐 → AVMutableComposition 双音轨混音，
             // 原地替换成片（tmp 导出后替换）。
@@ -774,6 +799,7 @@ final class ZoomEditorModel: ObservableObject {
         keyframes = validated.keyframes
         transitions = validated.transitions
         transform = validated.transform
+        adjust = validated.adjust
         saveDocument()
     }
 
@@ -799,7 +825,8 @@ final class ZoomEditorModel: ObservableObject {
     private func currentDocument() -> EditDocument {
         EditDocument(clips: clips, zoomSegments: segments,
                      sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                     keyframes: keyframes, transitions: transitions, transform: transform)
+                     keyframes: keyframes, transitions: transitions, transform: transform,
+                     adjust: adjust)
     }
 
     private func applyDocument(_ document: EditDocument) {
@@ -810,6 +837,7 @@ final class ZoomEditorModel: ObservableObject {
         keyframes = document.keyframes
         transitions = document.transitions
         transform = document.transform
+        adjust = document.adjust
         clampTimelineOffset()
         selectedClipIndex = nil
         selectedIndex = nil
@@ -864,6 +892,7 @@ final class ZoomEditorModel: ObservableObject {
         keyframes = validated.keyframes
         transitions = validated.transitions
         transform = validated.transform
+        adjust = validated.adjust
         clampTimelineOffset() // 时长可能变短（波纹删除）——平移不得越界
         clampSelections() // 过期选中下标置 nil（防 SwiftUI Binding 越界）
         saveDocument()
@@ -966,11 +995,12 @@ struct ZoomEditorView: View {
 
     /// 右侧检查器页签（剪映 02.png：画面/变速/动画/音频）。
     enum InspectorTab: String, CaseIterable, Identifiable {
-        case video, speed, animation, audio
+        case video, adjust, speed, animation, audio
         var id: String { rawValue }
         var title: String {
             switch self {
             case .video: return NSLocalizedString("画面", comment: "Inspector tab")
+            case .adjust: return NSLocalizedString("调整", comment: "Inspector tab")
             case .speed: return NSLocalizedString("变速", comment: "Inspector tab")
             case .animation: return NSLocalizedString("动画", comment: "Inspector tab")
             case .audio: return NSLocalizedString("音频", comment: "Inspector tab")
@@ -1133,6 +1163,9 @@ struct ZoomEditorView: View {
                         y: -model.transform.offsetY * geo.size.height)
                     .clipShape(RoundedRectangle(
                         cornerRadius: CGFloat(model.transform.cornerRadius) * min(geo.size.width, geo.size.height)))
+                    .brightness(model.adjust.brightness)
+                    .contrast(model.adjust.contrast)
+                    .saturation(model.adjust.saturation)
             }
             .frame(maxHeight: .infinity)
             transportRow
@@ -1201,6 +1234,8 @@ struct ZoomEditorView: View {
         switch inspectorTab {
         case .video:
             transformPanel
+        case .adjust:
+            adjustPanel
         case .speed:
             speedPanel
         case .animation:
@@ -1216,12 +1251,37 @@ struct ZoomEditorView: View {
     private var transformPanel: some View {
         let current = model.transform
         return VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("基础").font(.subheadline.weight(.semibold))
+            // 子页签（剪映 02.png：基础/抠像/蒙版/美颜媒体——仅基础已实现，其余置灰占位）
+            HStack(spacing: 6) {
+                Text("基础")
+                    .font(.caption.weight(.semibold))
+                    .padding(.horizontal, 8).padding(.vertical, 3)
+                    .background(Capsule().fill(OmiStyle.accent.opacity(0.2)))
+                ForEach(["抠像", "蒙版", "美颜媒体"], id: \.self) { title in
+                    Text(title)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.secondary.opacity(0.1)))
+                        .help("\(title)：暂未实现")
+                }
                 Spacer()
                 Button("重置") { model.resetTransform() }
                     .disabled(current.isIdentity)
                     .font(.caption)
+            }
+            // 六向对齐（剪映 02.png 对齐按钮组）
+            HStack(spacing: 6) {
+                ForEach(Array([(-1, 1), (0, 1), (1, 1), (-1, 0), (1, -1), (0, -1)].enumerated()),
+                        id: \.offset) { _, pair in
+                    Button {
+                        model.alignTransform(horizontal: pair.0, vertical: pair.1)
+                    } label: {
+                        Image(systemName: alignmentSymbol(horizontal: pair.0, vertical: pair.1))
+                            .font(.caption)
+                    }
+                    .help("对齐")
+                }
             }
             transformSlider("缩放",
                             value: current.scale * 100, range: 10...400, suffix: "%") {
@@ -1261,6 +1321,46 @@ struct ZoomEditorView: View {
                     .foregroundStyle(.secondary)
             }
             Slider(value: Binding(get: { value }, set: onChange), in: range)
+        }
+    }
+
+    // MARK: 调整面板（亮度/对比度/饱和度）
+
+    private var adjustPanel: some View {
+        let current = model.adjust
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("调整").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("重置") { model.resetAdjust() }
+                    .disabled(current.isIdentity)
+                    .font(.caption)
+            }
+            transformSlider("亮度",
+                            value: current.brightness * 200, range: -100...100, suffix: "") {
+                var next = current; next.brightness = $0 / 200; model.setAdjust(next)
+            }
+            transformSlider("对比度",
+                            value: (current.contrast - 1) * 200, range: -100...100, suffix: "") {
+                var next = current; next.contrast = 1 + $0 / 200; model.setAdjust(next)
+            }
+            transformSlider("饱和度",
+                            value: (current.saturation - 1) * 100, range: -100...100, suffix: "") {
+                var next = current; next.saturation = 1 + $0 / 100; model.setAdjust(next)
+            }
+            Text("调整作用于整条成片，导出时应用。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func alignmentSymbol(horizontal: Int, vertical: Int) -> String {
+        switch (horizontal, vertical) {
+        case (-1, 0): return "arrow.left.to.line"
+        case (1, 0): return "arrow.right.to.line"
+        case (0, 1): return "arrow.up.to.line"
+        case (0, -1): return "arrow.down.to.line"
+        default: return "dot.squareshape.split.2x2"
         }
     }
 

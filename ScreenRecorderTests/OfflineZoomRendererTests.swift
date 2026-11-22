@@ -678,6 +678,28 @@ final class OfflineZoomRendererTests: XCTestCase {
         try assertPixel(frame, x: 150, y: 170, near: background, "中心内容仍在")
     }
 
+
+    /// 画面调整渲染钉测：亮度 +0.25 → 背景由 0.10 提亮（>0.25）。
+    func testRenderBrightnessAdjust() async throws {
+        let sourceURL = directory.appendingPathComponent("调整夹具源.mp4")
+        try await makeFixtureVideo(at: sourceURL)
+        let outputURL = try await OfflineZoomRenderer.render(
+            sourceURL: sourceURL, segments: [],
+            clips: [EditClip(sourceStart: 0, sourceEnd: 2)],
+            keyframes: [], transitions: [:],
+            transform: .identity, adjust: EditAdjust(brightness: 0.25),
+            options: ExportVideoOptions(fps: nil, maxHeight: nil, codec: .h264),
+            progress: { _ in },
+            context: CIContext(options: [.useSoftwareRenderer: true]))
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: outputURL))
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let frame = try await generator.image(at: CMTime(seconds: 0.5, preferredTimescale: 600)).image
+        let pixel = try pixelComponents(of: frame, x: 150, y: 170)
+        XCTAssertGreaterThan(pixel.0, 0.25, "亮度 +0.25 后背景提亮")
+    }
+
     /// 黑场转场集成钉测（批次 4c-2 Task B）：2s 夹具切两 clip、缝 1 处挂黑场 0.4s
     ///（窗口 [0.8,1.2)）——窗口中点输出帧应接近全黑，窗口外保持正常画面。
     func testRenderBlackTransitionDarkensMidpoint() async throws {

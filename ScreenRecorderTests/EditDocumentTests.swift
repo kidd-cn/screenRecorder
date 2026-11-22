@@ -758,3 +758,85 @@ final class TrimSidesTests: XCTestCase {
         XCTAssertEqual(model.clips[0].sourceStart, 0, accuracy: 1e-12)
     }
 }
+
+
+/// 画面调整钉测（剪映 02.png「调整」）：钳制/Codable/模型链。
+final class AdjustTests: XCTestCase {
+    func testAdjustValidateAndCodable() throws {
+        let wild = EditAdjust(brightness: 9, contrast: -3, saturation: 9).validated
+        XCTAssertEqual(wild.brightness, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(wild.contrast, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(wild.saturation, 2, accuracy: 1e-9)
+        XCTAssertTrue(EditAdjust().isIdentity)
+
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 5)], zoomSegments: [],
+            adjust: EditAdjust(brightness: 0.1, contrast: 1.2, saturation: 0.8))
+        let decoded = try JSONDecoder().decode(EditDocument.self, from: JSONEncoder().encode(document))
+        XCTAssertEqual(decoded.adjust, document.adjust)
+        let legacy = try JSONDecoder().decode(EditDocument.self,
+                                              from: Data(#"{"clips":[],"zoomSegments":[]}"#.utf8))
+        XCTAssertTrue(legacy.adjust.isIdentity)
+    }
+}
+
+@MainActor
+final class AdjustModelTests: XCTestCase {
+    func testSetResetAdjustAndAlignment() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AdjustModel-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("调整夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        model.setAdjust(EditAdjust(brightness: 0.2))
+        XCTAssertEqual(model.adjust.brightness, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 1.0).adjust.brightness, 0.2, accuracy: 1e-9)
+        model.resetAdjust()
+        XCTAssertTrue(model.adjust.isIdentity)
+
+        // 对齐：缩放 0.5 时右对齐 → offsetX = 0.25
+        model.setTransform(EditTransform(scale: 0.5))
+        model.alignTransform(horizontal: 1, vertical: 0)
+        XCTAssertEqual(model.transform.offsetX, 0.25, accuracy: 1e-9)
+        XCTAssertEqual(model.transform.offsetY, 0, accuracy: 1e-9)
+    }
+}
+
+/// 字段携带回归（反复踩坑）：波纹删除等「非变换类」编辑必须保留 transform/adjust。
+@MainActor
+final class TransformCarryTests: XCTestCase {
+    func testRippleDeleteKeepsTransformAndAdjust() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Carry-\\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("携带夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        model.setTransform(EditTransform(scale: 1.5, rotationDegrees: 10))
+        model.setAdjust(EditAdjust(brightness: 0.2, contrast: 1.2, saturation: 0.9))
+        model.cutOutputRange(lower: 0.1, upper: 0.4)
+
+        XCTAssertEqual(model.transform.scale, 1.5, accuracy: 1e-9, "波纹删除后变换仍在")
+        XCTAssertEqual(model.transform.rotationDegrees, 10, accuracy: 1e-9)
+        XCTAssertEqual(model.adjust.brightness, 0.2, accuracy: 1e-9, "波纹删除后调整仍在")
+
+        let draft = vm.loadDraft(for: item, sourceDuration: 1.0)
+        XCTAssertEqual(draft.transform.scale, 1.5, accuracy: 1e-9, "草稿携带变换")
+        XCTAssertEqual(draft.adjust.brightness, 0.2, accuracy: 1e-9, "草稿携带调整")
+    }
+}

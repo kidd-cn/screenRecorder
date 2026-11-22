@@ -507,6 +507,16 @@ enum OfflineZoomRenderer {
         return min(max(source, left.sourceStart), left.sourceEnd)
     }
 
+    /// 画面调整（剪映 02.png「调整」面板）：亮度/对比度/饱和度 → CIColorControls。
+    static func applyingAdjust(_ image: CIImage, adjust: EditAdjust) -> CIImage {
+        let clean = adjust.validated
+        return image.applyingFilter("CIColorControls", parameters: [
+            kCIInputBrightnessKey: clean.brightness,
+            kCIInputContrastKey: clean.contrast,
+            kCIInputSaturationKey: clean.saturation,
+        ])
+    }
+
     /// 画面变换（剪映 02.png 画面面板，纯函数）：以画布中心为基准旋转+缩放、按画布
     /// 比例平移，余处填黑；圆角用 CIRoundedRectangleGenerator 生成 alpha 掩膜。
     static func applyingFrameTransform(_ image: CIImage,
@@ -768,6 +778,7 @@ enum OfflineZoomRenderer {
     static func render(sourceURL: URL, segments: [ZoomSegment], clips: [EditClip]? = nil,
                        keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:],
                        transform: EditTransform = .identity,
+                       adjust: EditAdjust = .identity,
                        options: ExportVideoOptions,
                        progress: @escaping (Double) -> Void,
                        context: CIContext = CIContext(options: [.useSoftwareRenderer: false])) async throws -> URL {
@@ -776,7 +787,8 @@ enum OfflineZoomRenderer {
         // noRenderableSamples）；非空 = 片段流成品轨。
         let validatedDocument = clips.map { request in
             EditDocument.validate(EditDocument(clips: request, zoomSegments: [], keyframes: keyframes,
-                                               transitions: transitions, transform: transform))
+                                               transitions: transitions, transform: transform,
+                                               adjust: adjust))
         }
         let validatedClips = validatedDocument?.clips
         let validatedTransitions = validatedDocument?.transitions ?? [:]
@@ -791,7 +803,7 @@ enum OfflineZoomRenderer {
         let editDocument = EditDocument(
             clips: validatedClips ?? EditDocument.initial(duration: durationSeconds).clips,
             zoomSegments: [], keyframes: keyframes,
-            transitions: validatedTransitions, transform: transform)
+            transitions: validatedTransitions, transform: transform, adjust: adjust)
 
         let naturalSize = try await videoTrack.load(.naturalSize)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
@@ -1168,13 +1180,18 @@ enum OfflineZoomRenderer {
             // 画面变换（剪映 02.png「画面」面板）：缩放/位置/旋转/圆角——画布不变、余处填黑。
             let frameTransform = editDocument.transform
             let hasFrameTransform = !frameTransform.isIdentity
+            let adjustValue = editDocument.adjust
+            let hasAdjust = !adjustValue.isIdentity
             var outputBuffer: CVPixelBuffer
-            if total == .identity && !hasFrameTransform {
+            if total == .identity && !hasFrameTransform && !hasAdjust {
                 outputBuffer = sourceBuffer // 无缩放/变换且画布同尺寸：零渲染直通
             } else {
                 var image = CIImage(cvPixelBuffer: sourceBuffer).transformed(by: total)
                 if hasFrameTransform {
                     image = OfflineZoomRenderer.applyingFrameTransform(image, transform: frameTransform)
+                }
+                if hasAdjust {
+                    image = OfflineZoomRenderer.applyingAdjust(image, adjust: adjustValue)
                 }
                 let rendered = try makeOutputBuffer()
                 context.render(image, to: rendered)
@@ -1217,7 +1234,10 @@ enum OfflineZoomRenderer {
                 }
                 if let composed {
                     let rendered = try makeOutputBuffer()
-                    context.render(composed, to: rendered)
+                    let finalImage = hasAdjust
+                        ? OfflineZoomRenderer.applyingAdjust(composed, adjust: adjustValue)
+                        : composed
+                    context.render(finalImage, to: rendered)
                     outputBuffer = rendered
                 }
             }
