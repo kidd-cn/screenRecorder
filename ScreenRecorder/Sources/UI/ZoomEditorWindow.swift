@@ -1033,38 +1033,21 @@ struct ZoomEditorView: View {
         .task { model.loadWaveform() }
     }
 
-    // MARK: 顶部工具栏（剪映 02.png）
+    // MARK: 顶部栏（剪映 02.png：编辑工具在底部时间线栏，顶栏只放分享/导出）
 
     private var topBar: some View {
         HStack(spacing: 12) {
-            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
-                .disabled(!model.canUndo).help("撤销（⌘Z）")
-            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
-                .disabled(!model.canRedo).help("重做（⇧⌘Z）")
-            Divider().frame(height: 18)
-            Button { model.splitAtPlayhead() } label: {
-                Label("分割", systemImage: "scissors")
-            }.help("在播放头处分割片段")
-            Button { model.deleteSelectedClip() } label: {
-                Label("删除", systemImage: "trash")
-            }.help("删除选中片段（未选中 = 播放头所在片段）")
-            Button { model.trimLeftAtPlayhead() } label: {
-                Label("向左裁剪", systemImage: "arrow.left.to.line")
-            }.help("以播放头为刀口裁掉片段左半（入点移到播放头）")
-            Button { model.trimRightAtPlayhead() } label: {
-                Label("向右裁剪", systemImage: "arrow.right.to.line")
-            }.help("以播放头为刀口裁掉片段右半（出点移到播放头）")
-            Button { model.saveCoverFrame() } label: {
-                Label("封面", systemImage: "photo.on.rectangle.angled")
-            }.help("抓播放头当前帧存为封面 PNG")
-            Button { _ = model.cycleTransitionNearPlayhead() } label: {
-                Label("转场", systemImage: "square.on.square.dashed")
-            }.disabled(model.clips.count < 2).help("循环最近接缝转场（⇧⌘T）")
-            Spacer()
             Text(model.item.name)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.callout.weight(.medium))
                 .lineLimit(1)
+            Spacer()
+            Button {
+                // 分享：剪映为发布到平台/生成链接；本应用离线，占位提示
+            } label: {
+                Label("分享", systemImage: "square.and.arrow.up.on.square")
+            }
+            .disabled(true)
+            .help("分享：暂未实现（离线应用，可先用导出）")
             Button { model.export() } label: {
                 Label("导出", systemImage: "square.and.arrow.up")
                     .font(.callout.weight(.semibold))
@@ -1077,7 +1060,7 @@ struct ZoomEditorView: View {
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 12)
-        .frame(height: 46)
+        .frame(height: 42)
         .background(panelBackground)
     }
 
@@ -1397,25 +1380,26 @@ struct ZoomEditorView: View {
 
     private var timelinePane: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text("共 \(model.clips.count) 段 · 源裁切 \(String(format: "%.1f", model.totalCutSeconds))s · 成片 ≈ \(String(format: "%.1f", model.exportDuration))s")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Slider(
-                    value: Binding(get: { model.timelineZoom }, set: { model.timelineZoom = $0 }),
-                    in: 1...200)
-                    .frame(width: 100)
-                    .help("时间线缩放（⌘+滚轮 / 捏合同效）")
-                Button("适应") {
-                    model.timelineZoom = 1
-                    model.timelineOffset = 0
+            timelineToolbar
+            HStack(alignment: .top, spacing: 4) {
+                // 封面（剪映 02.png：轨道左缘的小按钮）
+                Button {
+                    model.saveCoverFrame()
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: "pencil.and.scribble")
+                            .font(.caption)
+                        Text("封面").font(.caption2)
+                    }
+                    .frame(width: 44, height: 52)
+                    .background(RoundedRectangle(cornerRadius: 6)
+                        .fill(Color(nsColor: .controlBackgroundColor)))
                 }
-                .font(.caption)
-                .disabled(model.timelineZoom <= 1 && model.timelineOffset <= 0)
+                .buttonStyle(.plain)
+                .help("抓播放头当前帧存为封面 PNG")
+                ZoomTimelineStrip(model: model)
+                    .frame(height: 120)
             }
-            ZoomTimelineStrip(model: model)
-                .frame(height: 120)
             Text("空白拖选=波纹删除 · 拖白线=修剪接缝 · ⌘+点击=选段调速 · 双击音频道=音量关键帧 · 接缝右键/⇧⌘T=转场 · 空格播放 ←→ 逐帧")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -1423,6 +1407,45 @@ struct ZoomEditorView: View {
         }
         .padding(8)
         .background(panelBackground)
+    }
+
+    /// 时间线编辑工具栏（剪映 02.png 底部那一排：撤销/重做/分割/删除/裁剪/转场）。
+    private var timelineToolbar: some View {
+        HStack(spacing: 10) {
+            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                .disabled(!model.canUndo).help("撤销（⌘Z）")
+            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+                .disabled(!model.canRedo).help("重做（⇧⌘Z）")
+            Divider().frame(height: 16)
+            Button { model.splitAtPlayhead() } label: { Image(systemName: "scissors") }
+                .help("在播放头处分割")
+            Button { model.deleteSelectedClip() } label: { Image(systemName: "trash") }
+                .help("删除选中片段")
+            Button { model.trimLeftAtPlayhead() } label: { Image(systemName: "arrow.left.to.line") }
+                .help("向左裁剪（裁掉播放头左侧）")
+            Button { model.trimRightAtPlayhead() } label: { Image(systemName: "arrow.right.to.line") }
+                .help("向右裁剪（裁掉播放头右侧）")
+            Button { _ = model.cycleTransitionNearPlayhead() } label: { Image(systemName: "square.on.square.dashed") }
+                .disabled(model.clips.count < 2)
+                .help("循环最近接缝转场（⇧⌘T）")
+            Spacer()
+            Text("共 \(model.clips.count) 段 · 源裁切 \(String(format: "%.1f", model.totalCutSeconds))s · 成片 ≈ \(String(format: "%.1f", model.exportDuration))s")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Slider(
+                value: Binding(get: { model.timelineZoom }, set: { model.timelineZoom = $0 }),
+                in: 1...200)
+                .frame(width: 90)
+                .help("时间线缩放（⌘+滚轮）")
+            Button("适应") {
+                model.timelineZoom = 1
+                model.timelineOffset = 0
+            }
+            .font(.caption2)
+            .disabled(model.timelineZoom <= 1 && model.timelineOffset <= 0)
+        }
+        .buttonStyle(.plain)
+        .font(.callout)
     }
 
     // MARK: 播放行
