@@ -497,3 +497,35 @@ final class TransitionTests: XCTestCase {
             0.9, accuracy: 1e-9)
     }
 }
+
+/// 选中下标钳制钉测（2026-11-22 右键崩溃回归）：波纹删除缩短 clips 后，过期
+/// selectedClipIndex 必须被置 nil——否则 SwiftUI Binding 差分评估越界崩溃。
+@MainActor
+final class SelectionClampTests: XCTestCase {
+    func testRippleDeleteClampsSelectedClipIndex() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SelectionClamp-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("选中钳制夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        // 两 clip，选中第二个（下标 1）
+        model.cutOutputRange(lower: 0.1, upper: 0.6)
+        XCTAssertEqual(model.clips.count, 2)
+        model.selectedClipIndex = 1
+        XCTAssertEqual(model.clips.indices.contains(1), true)
+
+        // 再删除第二个 clip 的整个成品区间 → clips 变 1 → 选中失效置 nil
+        model.cutOutputRange(lower: 0.1, upper: 0.5)
+        XCTAssertEqual(model.clips.count, 1, "第二个 clip 整段被删")
+        XCTAssertNil(model.selectedClipIndex, "过期下标必须置 nil（防 Binding 越界）")
+        XCTAssertFalse(model.clips.indices.contains(1))
+    }
+}

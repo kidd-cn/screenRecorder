@@ -301,6 +301,18 @@ final class ZoomEditorModel: ObservableObject {
         }
     }
 
+    /// 选中下标钳制（clips/segments 数量变化——波纹删除/validate 丢弃——后，过期下标
+    /// 会让 SwiftUI Binding 差分评估越界崩溃，2026-11-22 崩溃报告实锤：右键触发更新时
+    /// selectedClipSection 的 Binding get 用旧下标访问已缩短的数组）。
+    private func clampSelections() {
+        if let selected = selectedClipIndex, !clips.indices.contains(selected) {
+            selectedClipIndex = nil
+        }
+        if let selected = selectedIndex, !segments.indices.contains(selected) {
+            selectedIndex = nil
+        }
+    }
+
     // MARK: 播放控制
 
     func togglePlay() {
@@ -624,8 +636,9 @@ final class ZoomEditorModel: ObservableObject {
         keyframes = document.keyframes
         transitions = document.transitions
         clampTimelineOffset()
-        saveDocument()
         selectedClipIndex = nil
+        selectedIndex = nil
+        saveDocument()
         selectedIndex = nil
     }
 
@@ -676,6 +689,7 @@ final class ZoomEditorModel: ObservableObject {
         keyframes = validated.keyframes
         transitions = validated.transitions
         clampTimelineOffset() // 时长可能变短（波纹删除）——平移不得越界
+        clampSelections() // 过期选中下标置 nil（防 SwiftUI Binding 越界）
         saveDocument()
     }
 
@@ -931,8 +945,9 @@ struct ZoomEditorView: View {
                 HStack(spacing: 16) {
                     Text("片段 \(index + 1)")
                         .font(.subheadline.weight(.semibold))
+                    // Binding get 防御过期下标（差分更新可能在 body 守卫重评前触达）
                     Picker("速度", selection: Binding(
-                        get: { model.clips[index].speed },
+                        get: { model.clips.indices.contains(index) ? model.clips[index].speed : 1.0 },
                         set: { model.setClipSpeed(at: index, speed: $0) })) {
                         Text("0.5×").tag(0.5)
                         Text("1×").tag(1.0)
@@ -942,7 +957,7 @@ struct ZoomEditorView: View {
                         Text("3×").tag(3.0)
                     }
                     .frame(width: 120)
-                    Text("时长 \(String(format: "%.1f", model.clips[index].displayDuration))s")
+                    Text("时长 \(model.clips.indices.contains(index) ? String(format: "%.1f", model.clips[index].displayDuration) : "—")s")
                         .font(.footnote)
                         .foregroundStyle(OmiStyle.subtleText)
                     Spacer()
