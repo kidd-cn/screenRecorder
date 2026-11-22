@@ -184,14 +184,14 @@ final class ZoomTimelineGeometryTests: XCTestCase {
                                                              bucketSeconds: 0.02, count: 0))
     }
 
-    /// 车道判定钉测（2026-11-22 双击音频道不加关键帧回归）：非翻转坐标 y=0 在底部，
-    /// 音频车道 = 底侧 38.5%。
+    /// 车道判定钉测（2026-11-22 双击音频道不加关键帧回归 + 剪映复刻改版）：
+    /// 非翻转坐标 y=0 在底部，音频子行 = 底部 16pt。
     func testAudioLaneDetection() {
         let height: CGFloat = 84
-        XCTAssertTrue(ZoomTimelineGeometry.isAudioLane(y: 0, height: height), "底边 = 音频车道")
-        XCTAssertTrue(ZoomTimelineGeometry.isAudioLane(y: 32, height: height), "38.5% 以内 = 音频车道")
-        XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 33, height: height), "38.5% 以上 = 视频车道")
-        XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 80, height: height), "顶边 = 视频车道")
+        XCTAssertTrue(ZoomTimelineGeometry.isAudioLane(y: 0, height: height), "底边 = 音频子行")
+        XCTAssertTrue(ZoomTimelineGeometry.isAudioLane(y: 15, height: height), "16pt 以内 = 音频子行")
+        XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 16, height: height), "16pt 起 = 视频缩略图带")
+        XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 80, height: height), "顶部（ruler 区）= 视频带")
         XCTAssertFalse(ZoomTimelineGeometry.isAudioLane(y: 10, height: 0), "零高退化")
     }
 
@@ -239,5 +239,23 @@ final class SeamNumberMappingTests: XCTestCase {
             seamPositions: [100, 200, 300],
             height: 64)
         XCTAssertEqual(hit, .background, "距白线 >4pt = 背景（波纹删除可武装）")
+    }
+}
+
+/// 刻度尺钉测（剪映 01.png 像素复刻）：主刻度间隔自适应 + mm:ss 标签。
+final class RulerTests: XCTestCase {
+    func testRulerIntervalAdapts() {
+        // 14px/s（zoom 1 @664pt/48.4s）：0.5s = 7pt ✗、1s = 14 ✗……3s = 41 ✗、5s = 70 ✗、10s = 140 ✓
+        XCTAssertEqual(ZoomTimelineGeometry.rulerInterval(pxPerSec: 13.7), 10)
+        // 高倍放大 200×：0.5s 即 ≥72pt
+        XCTAssertEqual(ZoomTimelineGeometry.rulerInterval(pxPerSec: 300), 0.5)
+        // 极低像素率全档不满足 → 回退最大 120s
+        XCTAssertEqual(ZoomTimelineGeometry.rulerInterval(pxPerSec: 0.1), 120)
+    }
+
+    func testRulerLabel() {
+        XCTAssertEqual(ZoomTimelineGeometry.rulerLabel(0), "00:00")
+        XCTAssertEqual(ZoomTimelineGeometry.rulerLabel(3), "00:03")
+        XCTAssertEqual(ZoomTimelineGeometry.rulerLabel(66), "01:06")
     }
 }

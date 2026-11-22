@@ -197,13 +197,32 @@ enum ZoomTimelineGeometry {
         return .background
     }
 
-    /// 车道判定（批次 4c-2，纯函数）：画布为非翻转坐标（y = 0 在**底部**）——
-    /// 音频车道 = 底侧 38.5%（与分隔线绘制 y = height × 0.385 同源）。曾因比较写反
-    /// （>=）致双击音频道进不了加关键帧分支——2026-11-22 用户反馈实证。
-    static let audioLaneRatio: CGFloat = 0.385
+    // MARK: 剪映专业版像素复刻（01.png）车道几何：非翻转坐标（y=0 底部）
+    //   [0, 16)            音频波形子行
+    //   [16, h-20)         视频缩略图带
+    //   [h-20, h]          时间刻度尺 ruler
+    static let audioLaneHeight: CGFloat = 16
+    static let rulerHeight: CGFloat = 20
+
+    /// 车道判定（纯函数）：音频子行 = 底部 16pt。
     static func isAudioLane(y: CGFloat, height: CGFloat) -> Bool {
         guard height > 0 else { return false }
-        return y <= height * audioLaneRatio
+        return y < audioLaneHeight
+    }
+
+    /// 刻度尺主刻度间隔（纯函数，剪映自适应）：候选档里选使像素间距 ≥ 72pt 的最小档。
+    static func rulerInterval(pxPerSec: CGFloat) -> TimeInterval {
+        let candidates: [TimeInterval] = [0.5, 1, 2, 3, 5, 10, 15, 30, 60, 120]
+        for candidate in candidates where CGFloat(candidate) * pxPerSec >= 72 {
+            return candidate
+        }
+        return candidates.last ?? 60
+    }
+
+    /// 刻度标签（mm:ss，剪映同款短格式）。
+    static func rulerLabel(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded())
+        return String(format: "%02d:%02d", total / 60, total % 60)
     }
 
     /// 波形桶区间（纯函数，含越界钳制）：源时间区间 → bucket 下标闭区间；两端钳进
@@ -389,6 +408,37 @@ final class ZoomTimelineCanvas: NSView {
         NSColor.quaternaryLabelColor.setFill()
         NSBezierPath(rect: bounds).fill()
 
+        let rulerTop = bounds.height - ZoomTimelineGeometry.rulerHeight // ruler 底缘（y 向上）
+        let laneCenter = ZoomTimelineGeometry.audioLaneHeight / 2
+        let laneHalf = ZoomTimelineGeometry.audioLaneHeight / 2 - 2
+
+        // ── 时间刻度尺（剪映 01.png：主刻度标签 + 细分刻度，画在顶部 20pt 带）──
+        let pxPerSecRuler = scale
+        let major = ZoomTimelineGeometry.rulerInterval(pxPerSec: pxPerSecRuler)
+        let minor = major / 5
+        let visibleSpan = Double(bounds.width) / max(pxPerSecRuler, 0.001)
+        let rulerFont = NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)
+        var tick: TimeInterval = 0
+        while tick <= visibleSpan + major {
+            let x = ZoomTimelineGeometry.timeToX(tick, pxPerSec: pxPerSecRuler, offset: offset)
+            guard x >= -40, x <= bounds.width + 40 else { tick += minor; continue }
+            let isMajor = abs(tick.truncatingRemainder(dividingBy: major)) < 1e-6
+                || abs(tick.truncatingRemainder(dividingBy: major) - major) < 1e-6
+            NSColor.secondaryLabelColor.withAlphaComponent(isMajor ? 0.8 : 0.35).setFill()
+            NSBezierPath(rect: CGRect(
+                x: x - 0.5, y: rulerTop,
+                width: 1, height: isMajor ? 10 : 5)).fill()
+            if isMajor {
+                let label = ZoomTimelineGeometry.rulerLabel(tick) as NSString
+                let attributes: [NSAttributedString.Key: Any] = [
+                    .font: rulerFont, .foregroundColor: NSColor.secondaryLabelColor]
+                let size = label.size(withAttributes: attributes)
+                label.draw(at: CGPoint(x: x + 4, y: rulerTop + 4), withAttributes: attributes)
+                _ = size
+            }
+            tick += minor
+        }
+
         // 轨道缩略图 filmstrip（剪映对齐·批次 3+4a）：槽位网格锚定**源时间**，成品轴
         // 定位经 outputTime 映射（波纹删除后缩略图随接缝重排——被删源区间的槽位无映射
         // 即跳过）；槽宽按所在 clip 速度折算。未就绪/无视频轨 → 空过。
@@ -406,9 +456,10 @@ final class ZoomTimelineCanvas: NSView {
                     let speed = model.clipsDocument.speed(atSourceTime: sourceTime) ?? 1
                     let slotWidth = max(CGFloat(strip.interval / speed) * scale, 2)
                     let x = ZoomTimelineGeometry.timeToX(outputTime, pxPerSec: scale, offset: offset)
-                    let bandHeight = bounds.height * 0.60
+                    let bandTop = bounds.height - ZoomTimelineGeometry.rulerHeight
+                    let bandBottom = ZoomTimelineGeometry.audioLaneHeight
                     drawAspectFill(image, in: CGRect(
-                        x: x, y: bounds.height - bandHeight, width: slotWidth, height: bandHeight))
+                        x: x, y: bandBottom, width: slotWidth, height: bandTop - bandBottom))
                 }
             }
         }
@@ -423,13 +474,16 @@ final class ZoomTimelineCanvas: NSView {
                 cursor += clip.displayDuration
                 let x = ZoomTimelineGeometry.timeToX(cursor, pxPerSec: scale, offset: offset)
                 seamPositions.append(x)
-                NSBezierPath(rect: CGRect(x: x - 0.5, y: 0, width: 1, height: bounds.height)).fill()
+                NSBezierPath(rect: CGRect(
+                    x: x - 0.5, y: ZoomTimelineGeometry.audioLaneHeight,
+                    width: 1, height: bounds.height - ZoomTimelineGeometry.rulerHeight
+                        - ZoomTimelineGeometry.audioLaneHeight)).fill()
             }
             // 转场标记（批次 4c-2）：橙色菱形挂在带转场的接缝上（视频带上缘）。
             for (seam, _) in model.transitions {
                 guard seam >= 1, seam - 1 < seamPositions.count else { continue }
                 let x = seamPositions[seam - 1]
-                let center = CGPoint(x: x, y: bounds.height * 0.9)
+                let center = CGPoint(x: x, y: bounds.height - ZoomTimelineGeometry.rulerHeight - 7)
                 let size: CGFloat = 7
                 let diamond = NSBezierPath()
                 diamond.move(to: CGPoint(x: center.x, y: center.y + size / 2))
@@ -441,9 +495,11 @@ final class ZoomTimelineCanvas: NSView {
                 diamond.fill()
             }
 
-            // 车道分隔线（视频带 62% / 音频带 38%）
-            NSColor.separatorColor.setFill()
-            NSBezierPath(rect: CGRect(x: 0, y: bounds.height * 0.385, width: bounds.width, height: 1)).fill()
+            // 音频子行上缘细线（波形/缩略图分界）
+            NSColor.separatorColor.withAlphaComponent(0.6).setFill()
+            NSBezierPath(rect: CGRect(
+                x: 0, y: ZoomTimelineGeometry.audioLaneHeight,
+                width: bounds.width, height: 1)).fill()
             if let selected = model.selectedClipIndex, model.clips.indices.contains(selected) {
                 var startCursor: TimeInterval = 0
                 for (index, clip) in model.clips.enumerated() {
@@ -465,9 +521,9 @@ final class ZoomTimelineCanvas: NSView {
         let waveform = model.waveform
         if !waveform.isEmpty, scale > 0 {
             let bucketSeconds = 0.02
-            let laneCenter = bounds.height * 0.19
-            let laneHalf = bounds.height * 0.13
-            NSColor.systemBlue.withAlphaComponent(0.5).setFill()
+            let laneCenter = ZoomTimelineGeometry.audioLaneHeight / 2
+            let laneHalf = ZoomTimelineGeometry.audioLaneHeight / 2 - 2
+            NSColor.systemTeal.withAlphaComponent(0.55).setFill()
             let columns = Int(bounds.width)
             for column in 0..<max(columns, 0) {
                 // 成品时间 → 源时间（波纹删除后列与源桶的对应经映射；裁掉列跳过）
@@ -530,12 +586,36 @@ final class ZoomTimelineCanvas: NSView {
                 width: handle, height: block.rect.height)).fill()
         }
 
+        // 片头标签（剪映 01.png 款）：文件名 + 总时间码，黑底半透明圆角（缩略图带左上）。
+        let nameLabel = ("\(model.item.name)  \(model.durationTimecode)") as NSString
+        let nameAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .medium),
+            .foregroundColor: NSColor.white]
+        let nameSize = nameLabel.size(withAttributes: nameAttributes)
+        let tagRect = CGRect(x: 2, y: bounds.height - ZoomTimelineGeometry.rulerHeight - nameSize.height - 10,
+                             width: nameSize.width + 12, height: nameSize.height + 6)
+        NSColor.black.withAlphaComponent(0.55).setFill()
+        NSBezierPath(roundedRect: tagRect, xRadius: 3, yRadius: 3).fill()
+        nameLabel.draw(at: CGPoint(x: tagRect.minX + 6, y: tagRect.minY + 3), withAttributes: nameAttributes)
+
+        // 轨道选中青色描边（剪映 01.png：整条轨道 teal 1pt 外框）
+        NSColor.systemTeal.withAlphaComponent(0.9).setStroke()
+        NSBezierPath(rect: CGRect(
+            x: 0.5, y: ZoomTimelineGeometry.audioLaneHeight + 0.5,
+            width: bounds.width - 1,
+            height: bounds.height - ZoomTimelineGeometry.rulerHeight
+                - ZoomTimelineGeometry.audioLaneHeight - 1)).stroke()
+
         // 波纹删除拖选红罩预览（成品区间，盖段块之上——松手即删除接合）。
         if let preview = model.ripplePreview {
             let x0 = ZoomTimelineGeometry.timeToX(preview.0, pxPerSec: scale, offset: offset)
             let x1 = ZoomTimelineGeometry.timeToX(preview.1, pxPerSec: scale, offset: offset)
             NSColor.systemRed.withAlphaComponent(0.35).setFill()
-            NSBezierPath(rect: CGRect(x: x0, y: 0, width: max(x1 - x0, 1), height: bounds.height)).fill()
+            NSBezierPath(rect: CGRect(
+                x: x0, y: ZoomTimelineGeometry.audioLaneHeight,
+                width: max(x1 - x0, 1),
+                height: bounds.height - ZoomTimelineGeometry.rulerHeight
+                    - ZoomTimelineGeometry.audioLaneHeight)).fill()
         }
 
         // 音量关键帧菱形（剪映对齐·批次 4c-2）：音频车道中线，accent 绿旋转方块。
@@ -563,13 +643,20 @@ final class ZoomTimelineCanvas: NSView {
             NSBezierPath(rect: CGRect(x: snapX - 0.5, y: 0, width: 1, height: bounds.height)).fill()
         }
 
-        // 播放头竖线。
+        // 播放头（剪映 01.png 款）：白色 1.5pt 竖线贯穿全高 + ruler 顶部青色圆点。
         let playheadX = ZoomTimelineGeometry.playheadX(
             playhead: model.playhead, scale: scale, width: bounds.width, offset: offset)
-        NSColor.systemGreen.setFill()
+        NSColor.white.setFill()
         NSBezierPath(rect: CGRect(
             x: playheadX, y: 0,
             width: ZoomTimelineGeometry.playheadWidth, height: bounds.height)).fill()
+        let dotRadius: CGFloat = 5
+        let dot = NSBezierPath(
+            ovalIn: CGRect(x: playheadX + ZoomTimelineGeometry.playheadWidth / 2 - dotRadius,
+                           y: bounds.height - dotRadius * 2 - 3,
+                           width: dotRadius * 2, height: dotRadius * 2))
+        NSColor.systemTeal.setFill()
+        dot.fill()
     }
 
     /// aspect-fill 绘制（裁切铺满目标矩形——缩略图槽位同款裁切语义）。
@@ -668,9 +755,9 @@ final class ZoomTimelineCanvas: NSView {
         return positions
     }
 
-    /// 音频车道几何（批次 4c-2）：中线与半幅（y 向上坐标）。
-    private var audioLaneCenter: CGFloat { bounds.height * 0.19 }
-    private var audioLaneHalf: CGFloat { bounds.height * 0.13 }
+    /// 音频子行几何（剪映复刻）：中线与半幅（y 向上；子行 = 底部 16pt）。
+    private var audioLaneCenter: CGFloat { ZoomTimelineGeometry.audioLaneHeight / 2 }
+    private var audioLaneHalf: CGFloat { ZoomTimelineGeometry.audioLaneHeight / 2 - 2 }
 
     /// 关键帧菱形中心（画布坐标）。
     private func keyframePosition(_ keyframe: EditKeyframe, scale: CGFloat, offset: TimeInterval) -> CGPoint {

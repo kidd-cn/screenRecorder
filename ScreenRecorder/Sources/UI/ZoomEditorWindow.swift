@@ -570,6 +570,30 @@ final class ZoomEditorModel: ObservableObject {
     /// 缩放段映射到成品时间轴（画布铺排用）。
     var mappedZoomSegments: [ZoomSegment] { clipsDocument.mappedZoomSegments() }
 
+    /// 抓播放头当前帧存为封面（剪映 01.png「封面」按钮复刻）：
+    /// 源时间取成品→源映射，PNG 落成片同目录 `<原名>_封面.png`。
+    func saveCoverFrame() {
+        let source = clipsDocument.sourceTime(forOutputTime: playhead)
+            ?? clipsDocument.sourceTime(forOutputTime: min(playhead, outputDuration))
+        guard let source else { return }
+        let url = item.url
+        Task.detached(priority: .utility) { [weak self] in
+            let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+            generator.appliesPreferredTrackTransform = true
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
+            guard let result = try? await generator.image(
+                at: CMTime(seconds: source, preferredTimescale: 600)).image else { return }
+            let coverURL = url.deletingLastPathComponent()
+                .appendingPathComponent(url.deletingPathExtension().lastPathComponent + "_封面.png")
+            let bitmap = NSBitmapImageRep(cgImage: result)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else { return }
+            try? FileManager.default.removeItem(at: coverURL)
+            try? png.write(to: coverURL)
+            NSLog("Editor: 封面已存 %@", coverURL.lastPathComponent)
+        }
+    }
+
     /// 播放头所在/成品时间所在 clip 的下标（选中面板兜底）。
     func clipIndex(atOutputTime t: TimeInterval) -> Int? {
         var cursor: TimeInterval = 0
@@ -931,6 +955,13 @@ struct ZoomEditorView: View {
             }
             .disabled(!model.canRedo)
             .help("重做（⇧⌘Z）")
+            // 封面（剪映 01.png 左侧按钮复刻）：抓播放头当前帧存 PNG
+            Button {
+                model.saveCoverFrame()
+            } label: {
+                Label("封面", systemImage: "photo.on.rectangle.angled")
+            }
+            .help("抓取播放头当前帧存为封面图（PNG）")
             // 转场循环按钮（剪映对齐·无鼠标通道）：对播放头最近接缝 无→黑场→溶解→无
             Button {
                 _ = model.cycleTransitionNearPlayhead()
