@@ -588,6 +588,47 @@ final class ZoomEditorModel: ObservableObject {
         }
     }
 
+    /// 播放头所在 clip 的（下标，源时间）——裁剪/分割共用寻址。
+    private func clipAddress(atOutputTime t: TimeInterval) -> (index: Int, sourceTime: TimeInterval)? {
+        guard !clips.isEmpty else { return nil }
+        var cursor: TimeInterval = 0
+        for (index, clip) in clips.enumerated() {
+            let start = cursor
+            let end = cursor + clip.displayDuration
+            cursor = end
+            if t >= start, t < end {
+                return (index, clip.sourceStart + (t - start) * clip.speed)
+            }
+        }
+        return nil
+    }
+
+    /// 向左裁剪（剪映 01.png 工具栏）：裁掉播放头所在片段的左半——入点移到播放头。
+    func trimLeftAtPlayhead() {
+        guard let address = clipAddress(atOutputTime: playhead) else { return }
+        applyClipEdit { document in
+            guard document.clips.indices.contains(address.index) else { return }
+            var clip = document.clips[address.index]
+            guard address.sourceTime - clip.sourceStart >= EditDocument.minimumClipSourceDuration else { return }
+            clip.sourceStart = address.sourceTime
+            document.clips[address.index] = clip
+        }
+        selectedClipIndex = nil
+    }
+
+    /// 向右裁剪（剪映 01.png 工具栏）：裁掉播放头所在片段的右半——出点移到播放头。
+    func trimRightAtPlayhead() {
+        guard let address = clipAddress(atOutputTime: playhead) else { return }
+        applyClipEdit { document in
+            guard document.clips.indices.contains(address.index) else { return }
+            var clip = document.clips[address.index]
+            guard clip.sourceEnd - address.sourceTime >= EditDocument.minimumClipSourceDuration else { return }
+            clip.sourceEnd = address.sourceTime
+            document.clips[address.index] = clip
+        }
+        selectedClipIndex = nil
+    }
+
     /// 删除选中 clip（整段波纹删除）；未选中 → 删除播放头所在 clip。
     func deleteSelectedClip() {
         guard !clips.isEmpty else { return }
@@ -977,6 +1018,12 @@ struct ZoomEditorView: View {
             Button { model.deleteSelectedClip() } label: {
                 Label("删除", systemImage: "trash")
             }.help("删除选中片段（未选中 = 播放头所在片段）")
+            Button { model.trimLeftAtPlayhead() } label: {
+                Label("向左裁剪", systemImage: "arrow.left.to.line")
+            }.help("以播放头为刀口裁掉片段左半（入点移到播放头）")
+            Button { model.trimRightAtPlayhead() } label: {
+                Label("向右裁剪", systemImage: "arrow.right.to.line")
+            }.help("以播放头为刀口裁掉片段右半（出点移到播放头）")
             Button { model.saveCoverFrame() } label: {
                 Label("封面", systemImage: "photo.on.rectangle.angled")
             }.help("抓播放头当前帧存为封面 PNG")

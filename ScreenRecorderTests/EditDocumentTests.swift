@@ -702,3 +702,59 @@ final class SplitDeleteModelTests: XCTestCase {
         XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 1.0).transform, .identity)
     }
 }
+
+/// 向左/向右裁剪钉测（剪映 01.png 工具栏）：以播放头为刀口裁片段左/右半。
+@MainActor
+final class TrimSidesTests: XCTestCase {
+    func testTrimLeftAndRightAtPlayhead() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TrimSides-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("左右裁剪夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        // 向左裁剪：播放头 0.3 → 入点 0.3，成片 0.7s
+        model.seek(to: 0.3)
+        model.trimLeftAtPlayhead()
+        XCTAssertEqual(model.clips.count, 1)
+        XCTAssertEqual(model.clips[0].sourceStart, 0.3, accuracy: 1e-9)
+        XCTAssertEqual(model.outputDuration, 0.7, accuracy: 1e-9)
+
+        // 向右裁剪：成片 0.7s 内播放头 0.5 → 源 0.8 → 出点 0.8，成片 0.5s
+        model.seek(to: 0.5)
+        model.trimRightAtPlayhead()
+        XCTAssertEqual(model.clips[0].sourceEnd, 0.8, accuracy: 1e-9)
+        XCTAssertEqual(model.outputDuration, 0.5, accuracy: 1e-9)
+
+        // 撤销两步回到全程
+        model.undo()
+        model.undo()
+        XCTAssertEqual(model.clips[0].sourceStart, 0, accuracy: 1e-9)
+        XCTAssertEqual(model.clips[0].sourceEnd, 1.0, accuracy: 1e-12)
+    }
+
+    func testTrimAtBoundaryNoOp() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TrimBoundary-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("边界裁剪夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+        model.seek(to: 0)
+        model.trimLeftAtPlayhead() // 刀口在入点 → 不动作
+        XCTAssertEqual(model.clips[0].sourceStart, 0, accuracy: 1e-12)
+    }
+}
