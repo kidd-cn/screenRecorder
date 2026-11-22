@@ -1017,17 +1017,20 @@ struct ZoomEditorView: View {
         VStack(spacing: 0) {
             topBar
             Divider().overlay(dividerColor)
-            HStack(spacing: 0) {
-                sideBar.frame(width: 196)
-                Divider().overlay(dividerColor)
-                centerPane
-                Divider().overlay(dividerColor)
-                inspector.frame(width: 256)
+            // 02.png 比例：左 30% / 中 41% / 右 29%；时间线区约 36% 窗高
+            GeometryReader { geo in
+                HStack(spacing: 0) {
+                    sideBar.frame(width: geo.size.width * 0.30)
+                    Divider().overlay(dividerColor)
+                    centerPane
+                    Divider().overlay(dividerColor)
+                    inspector.frame(width: geo.size.width * 0.29)
+                }
             }
             Divider().overlay(dividerColor)
-            timelinePane
+            timelinePane.frame(height: 330)
         }
-        .frame(minWidth: 1180, minHeight: 760)
+        .frame(minWidth: 1200, minHeight: 760)
         .background(Color(nsColor: .windowBackgroundColor))
         .task { await model.loadMediaInfo(); model.loadFilmstrip() }
         .task { model.loadWaveform() }
@@ -1064,40 +1067,130 @@ struct ZoomEditorView: View {
         .background(panelBackground)
     }
 
-    // MARK: 左侧素材栏
+    // MARK: 左侧素材栏（02.png：顶部 12 个功能页签 + 素材浏览）
+
+    private enum SideTab: String, CaseIterable, Identifiable {
+        case media, audio, text, sticker, effect, transition,
+             subtitle, smartPack, filter, adjust, template, digitalHuman
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .media: return NSLocalizedString("素材", comment: "Side tab")
+            case .audio: return NSLocalizedString("音频", comment: "Side tab")
+            case .text: return NSLocalizedString("文本", comment: "Side tab")
+            case .sticker: return NSLocalizedString("贴纸", comment: "Side tab")
+            case .effect: return NSLocalizedString("特效", comment: "Side tab")
+            case .transition: return NSLocalizedString("转场", comment: "Side tab")
+            case .subtitle: return NSLocalizedString("字幕", comment: "Side tab")
+            case .smartPack: return NSLocalizedString("智能包装", comment: "Side tab")
+            case .filter: return NSLocalizedString("滤镜", comment: "Side tab")
+            case .adjust: return NSLocalizedString("调节", comment: "Side tab")
+            case .template: return NSLocalizedString("模板", comment: "Side tab")
+            case .digitalHuman: return NSLocalizedString("数字人", comment: "Side tab")
+            }
+        }
+        var symbol: String {
+            switch self {
+            case .media: return "square.grid.2x2"
+            case .audio: return "music.note"
+            case .text: return "textformat"
+            case .sticker: return "face.smiling"
+            case .effect: return "sparkles"
+            case .transition: return "square.on.square"
+            case .subtitle: return "captions.bubble"
+            case .smartPack: return "rectangle.3.group"
+            case .filter: return "camera.filters"
+            case .adjust: return "slider.horizontal.3"
+            case .template: return "rectangle.on.rectangle"
+            case .digitalHuman: return "person.crop.circle"
+            }
+        }
+        var isImplemented: Bool { self == .media || self == .audio }
+    }
+
+    @State private var sideTab: SideTab = .media
 
     private var sideBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("素材").font(.subheadline.weight(.semibold))
-            ScrollView {
-                VStack(alignment: .leading, spacing: 10) {
-                    sourceCard
-                    Divider().overlay(dividerColor)
-                    Text("音频").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                    if let music = model.backgroundMusic {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Label(music.name, systemImage: "music.note")
-                                .font(.caption).lineLimit(1)
-                            Text("配乐 · \(Int((music.volume * 100).rounded()))%")
-                                .font(.caption2).foregroundStyle(.secondary)
-                        }
-                    } else {
+        VStack(alignment: .leading, spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(SideTab.allCases) { tab in
                         Button {
-                            model.importMusic()
+                            sideTab = tab
                         } label: {
-                            Label("导入音频…", systemImage: "plus.circle")
-                                .font(.caption)
+                            VStack(spacing: 3) {
+                                Image(systemName: tab.symbol).font(.caption)
+                                Text(tab.title).font(.system(size: 9))
+                            }
+                            .frame(width: 40)
+                            .foregroundStyle(tab == sideTab ? OmiStyle.accent
+                                             : (tab.isImplemented ? Color.secondary : Color.secondary.opacity(0.35)))
                         }
+                        .buttonStyle(.plain)
+                        .disabled(!tab.isImplemented)
+                        .help(tab.isImplemented ? tab.title : "\(tab.title)：暂未实现")
                     }
                 }
+                .padding(.horizontal, 8)
             }
-            Spacer()
-            Text("录音本身为素材；导入音频进配乐轨")
+            .padding(.vertical, 6)
+            Divider().overlay(dividerColor)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if sideTab == .audio {
+                        audioMaterialContent
+                    } else {
+                        materialContent
+                    }
+                }
+                .padding(10)
+            }
+        }
+        .background(panelBackground)
+    }
+
+    /// 素材页（02.png：搜索框 / 全部 / 已添加素材网格）。
+    private var materialContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.caption).foregroundStyle(.tertiary)
+                Text("搜索文件名").font(.caption).foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .padding(6)
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(Color.secondary.opacity(0.12)))
+            HStack {
+                Text("已添加").font(.caption.weight(.semibold))
+                Spacer()
+                Text("全部").font(.caption2).foregroundStyle(.tertiary)
+            }
+            sourceCard
+            Text("导入的音频会进入配乐轨")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
-        .padding(10)
-        .background(panelBackground)
+    }
+
+    /// 音频页（配乐导入/信息）。
+    private var audioMaterialContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let music = model.backgroundMusic {
+                VStack(alignment: .leading, spacing: 4) {
+                    Label(music.name, systemImage: "music.note")
+                        .font(.caption).lineLimit(1)
+                    Text("配乐 · \(Int((music.volume * 100).rounded()))%")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            } else {
+                Button {
+                    model.importMusic()
+                } label: {
+                    Label("导入音频…", systemImage: "plus.circle")
+                        .font(.caption)
+                }
+            }
+        }
     }
 
     private var sourceCard: some View {
@@ -1116,7 +1209,7 @@ struct ZoomEditorView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .frame(height: 74)
+            .frame(height: 110)
             .clipped()
             Text(model.item.name)
                 .font(.caption)
@@ -1137,6 +1230,12 @@ struct ZoomEditorView: View {
 
     private var centerPane: some View {
         VStack(spacing: 6) {
+            HStack {
+                Text("播放器-时间线01").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Spacer()
+                Image(systemName: "line.3.horizontal").font(.caption).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 4)
             GeometryReader { geo in
                 PlayerPreview(player: model.player)
                     .scaleEffect(model.transform.scale)
@@ -1194,6 +1293,12 @@ struct ZoomEditorView: View {
 
     private var inspector: some View {
         VStack(spacing: 0) {
+            HStack {
+                Text("AI编辑").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.top, 6)
             Picker("", selection: $inspectorTab) {
                 ForEach(InspectorTab.allCases) { tab in
                     Text(tab.title).tag(tab)
@@ -1400,6 +1505,7 @@ struct ZoomEditorView: View {
                 ZoomTimelineStrip(model: model)
                     .frame(height: 120)
             }
+            Spacer(minLength: 0)
             Text("空白拖选=波纹删除 · 拖白线=修剪接缝 · ⌘+点击=选段调速 · 双击音频道=音量关键帧 · 接缝右键/⇧⌘T=转场 · 空格播放 ←→ 逐帧 · ⌘B 分割")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -1864,7 +1970,7 @@ enum ZoomEditorWindowOpener {
         }
         let model = ZoomEditorModel(item: item, listViewModel: viewModel)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+            contentRect: NSRect(x: 0, y: 0, width: 1440, height: 900),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
