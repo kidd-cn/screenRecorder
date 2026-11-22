@@ -507,6 +507,41 @@ enum OfflineZoomRenderer {
         return min(max(source, left.sourceStart), left.sourceEnd)
     }
 
+    /// 画面变换（剪映 02.png 画面面板，纯函数）：以画布中心为基准旋转+缩放、按画布
+    /// 比例平移，余处填黑；圆角用 CIRoundedRectangleGenerator 生成 alpha 掩膜。
+    static func applyingFrameTransform(_ image: CIImage,
+                                       transform: EditTransform) -> CIImage {
+        let clean = transform.validated
+        let extent = image.extent
+        let width = extent.width
+        let height = extent.height
+        var affine = CGAffineTransform(translationX: extent.midX, y: extent.midY)
+        affine = affine.rotated(by: CGFloat(clean.rotationDegrees) * .pi / 180)
+        affine = affine.scaledBy(x: CGFloat(clean.scale), y: CGFloat(clean.scale))
+        affine = affine.translatedBy(x: -extent.midX, y: -extent.midY)
+        affine = affine.translatedBy(x: width * CGFloat(clean.offsetX),
+                                     y: height * CGFloat(clean.offsetY))
+        var transformed = image.transformed(by: affine)
+        if clean.cornerRadius > 0 {
+            let radius = CGFloat(clean.cornerRadius) * min(width, height)
+            if let generator = CIFilter(name: "CIRoundedRectangleGenerator") {
+                generator.setValue(CIVector(cgRect: extent), forKey: "inputExtent")
+                generator.setValue(radius, forKey: "inputRadius")
+                generator.setValue(CIColor(red: 1, green: 1, blue: 1, alpha: 1), forKey: "inputColor")
+                if let mask = generator.outputImage?.cropped(to: extent) {
+                    let black = CIImage(color: .black).cropped(to: extent)
+                    transformed = transformed.applyingFilter("CIBlendWithAlphaMask", parameters: [
+                        kCIInputBackgroundImageKey: black,
+                        kCIInputMaskImageKey: mask,
+                    ])
+                }
+            }
+        }
+        // 收束回画布（旋转/平移可能超出 extent——多余部分裁掉、空处由黑底合成）
+        let black = CIImage(color: .black).cropped(to: extent)
+        return transformed.cropped(to: extent).composited(over: black)
+    }
+
     /// 音频线性重采样（变速·v1 变调）：按 speed 对源 PCM 帧最近邻抽帧/复制，构造新
     /// CMSampleBuffer（同格式描述；新时长 = 原时长 ÷ speed）。仅支持 LPCM（渲染器
     /// 音轨解码输出恒 LPCM——16-bit int 或 32-bit float），其他格式返回 nil（调用方
@@ -732,6 +767,7 @@ enum OfflineZoomRenderer {
     /// `_剪辑.mp4`，否则 `_缩放.mp4`。`context` 供 headless 测试注入软件渲染上下文。
     static func render(sourceURL: URL, segments: [ZoomSegment], clips: [EditClip]? = nil,
                        keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:],
+                       transform: EditTransform = .identity,
                        options: ExportVideoOptions,
                        progress: @escaping (Double) -> Void,
                        context: CIContext = CIContext(options: [.useSoftwareRenderer: false])) async throws -> URL {
@@ -740,7 +776,7 @@ enum OfflineZoomRenderer {
         // noRenderableSamples）；非空 = 片段流成品轨。
         let validatedDocument = clips.map { request in
             EditDocument.validate(EditDocument(clips: request, zoomSegments: [], keyframes: keyframes,
-                                               transitions: transitions))
+                                               transitions: transitions, transform: transform))
         }
         let validatedClips = validatedDocument?.clips
         let validatedTransitions = validatedDocument?.transitions ?? [:]
@@ -755,7 +791,7 @@ enum OfflineZoomRenderer {
         let editDocument = EditDocument(
             clips: validatedClips ?? EditDocument.initial(duration: durationSeconds).clips,
             zoomSegments: [], keyframes: keyframes,
-            transitions: validatedTransitions)
+            transitions: validatedTransitions, transform: transform)
 
         let naturalSize = try await videoTrack.load(.naturalSize)
         let preferredTransform = try await videoTrack.load(.preferredTransform)
@@ -1129,12 +1165,19 @@ enum OfflineZoomRenderer {
                 .concatenating(zoomTransform ?? .identity)
                 .concatenating(canvasScale)
 
+            // 画面变换（剪映 02.png「画面」面板）：缩放/位置/旋转/圆角——画布不变、余处填黑。
+            let frameTransform = editDocument.transform
+            let hasFrameTransform = !frameTransform.isIdentity
             var outputBuffer: CVPixelBuffer
-            if total == .identity {
-                outputBuffer = sourceBuffer // 无缩放且画布同尺寸：零渲染直通（同 PiPCompositor 全缺省直返）
+            if total == .identity && !hasFrameTransform {
+                outputBuffer = sourceBuffer // 无缩放/变换且画布同尺寸：零渲染直通
             } else {
+                var image = CIImage(cvPixelBuffer: sourceBuffer).transformed(by: total)
+                if hasFrameTransform {
+                    image = OfflineZoomRenderer.applyingFrameTransform(image, transform: frameTransform)
+                }
                 let rendered = try makeOutputBuffer()
-                context.render(CIImage(cvPixelBuffer: sourceBuffer).transformed(by: total), to: rendered)
+                context.render(image, to: rendered)
                 outputBuffer = rendered
             }
 

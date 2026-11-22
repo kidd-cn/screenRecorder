@@ -639,3 +639,66 @@ final class MultiTransitionTests: XCTestCase {
         XCTAssertEqual(model.nearestSeam(toOutputTime: 0.3), 1)
     }
 }
+
+
+/// 画面变换 + 分割/删除钉测（剪映 02.png 编辑器复刻）。
+final class TransformSplitTests: XCTestCase {
+    func testTransformValidateAndCodable() throws {
+        let wild = EditTransform(scale: 99, offsetX: -9, offsetY: 9,
+                                 rotationDegrees: 999, cornerRadius: 5).validated
+        XCTAssertEqual(wild.scale, 4, accuracy: 1e-9)
+        XCTAssertEqual(wild.offsetX, -1, accuracy: 1e-9)
+        XCTAssertEqual(wild.offsetY, 1, accuracy: 1e-9)
+        XCTAssertEqual(wild.rotationDegrees, 180, accuracy: 1e-9)
+        XCTAssertEqual(wild.cornerRadius, 0.5, accuracy: 1e-9)
+        XCTAssertTrue(EditTransform().isIdentity)
+        XCTAssertFalse(EditTransform(scale: 1.5).isIdentity)
+
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 5)], zoomSegments: [],
+            transform: EditTransform(scale: 1.4, rotationDegrees: 12, cornerRadius: 0.1))
+        let decoded = try JSONDecoder().decode(EditDocument.self, from: JSONEncoder().encode(document))
+        XCTAssertEqual(decoded.transform, document.transform, "Codable 往返保值")
+        // 旧草稿（无 transform 键）→ identity
+        let legacy = try JSONDecoder().decode(EditDocument.self,
+                                              from: Data(#"{"clips":[],"zoomSegments":[]}"#.utf8))
+        XCTAssertTrue(legacy.transform.isIdentity)
+    }
+}
+
+@MainActor
+final class SplitDeleteModelTests: XCTestCase {
+    func testSplitAtPlayheadAndDeleteClip() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SplitDelete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("分割夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+
+        model.seek(to: 0.5)
+        model.splitAtPlayhead()
+        XCTAssertEqual(model.clips.count, 2, "播放头处一分为二")
+        XCTAssertEqual(model.clips[0].sourceEnd, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(model.clips[1].sourceStart, 0.5, accuracy: 1e-9)
+        XCTAssertTrue(model.canUndo)
+
+        // 删除播放头所在（第二个）片段 → 成片剩 0.5s
+        model.deleteSelectedClip()
+        XCTAssertEqual(model.clips.count, 1)
+        XCTAssertEqual(model.outputDuration, 0.5, accuracy: 1e-9)
+
+        // 变换：设置/撤销/草稿
+        model.setTransform(EditTransform(scale: 1.5))
+        XCTAssertEqual(model.transform.scale, 1.5, accuracy: 1e-9)
+        model.resetTransform()
+        XCTAssertTrue(model.transform.isIdentity)
+        XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 1.0).transform, .identity)
+    }
+}

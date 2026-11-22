@@ -32,6 +32,37 @@ struct EditMusicTrack: Codable, Equatable {
     var volume: Double
 }
 
+/// 画面变换（剪映 02.png 右侧「画面」面板复刻）：缩放/位置/旋转/圆角，作用于成片
+/// 画布上的视频内容（content 变换，画布尺寸不变，余处填黑）。
+struct EditTransform: Codable, Equatable {
+    /// 缩放（1 = 100%；0.1…4）。
+    var scale: Double = 1
+    /// 水平偏移（画布宽度的比例；−1…1）。
+    var offsetX: Double = 0
+    /// 垂直偏移（画布高度的比例；−1…1；正 = 向上）。
+    var offsetY: Double = 0
+    /// 旋转角度（度；−180…180）。
+    var rotationDegrees: Double = 0
+    /// 圆角（min(宽,高) 的比例；0…0.5）。
+    var cornerRadius: Double = 0
+
+    static let identity = EditTransform()
+
+    var isIdentity: Bool {
+        abs(scale - 1) < 1e-4 && abs(offsetX) < 1e-4 && abs(offsetY) < 1e-4
+            && abs(rotationDegrees) < 1e-4 && abs(cornerRadius) < 1e-4
+    }
+
+    var validated: EditTransform {
+        EditTransform(
+            scale: min(max(scale, 0.1), 4),
+            offsetX: min(max(offsetX, -1), 1),
+            offsetY: min(max(offsetY, -1), 1),
+            rotationDegrees: min(max(rotationDegrees, -180), 180),
+            cornerRadius: min(max(cornerRadius, 0), 0.5))
+    }
+}
+
 /// 片段间转场（剪辑 v2 批次 4c-2）：挂在**接缝**上（clips[i-1] 与 clips[i] 之间，
 /// 键 = i ∈ 1..<clips.count）。转场窗口 [boundary − d/2, boundary + d/2) 占用两侧
 /// 各半——成片总时长不变（占用两侧素材的头尾）。v1 两种：黑场 / 交叉溶解。
@@ -122,23 +153,27 @@ struct EditDocument: Codable, Equatable {
     var keyframes: [EditKeyframe]
     /// 接缝转场（键 = 接缝下标 = 该接缝右侧 clip 的下标；批次 4c-2）。
     var transitions: [Int: EditTransition]
+    /// 画面变换（缩放/位置/旋转/圆角；剪映 02.png 画面面板）。
+    var transform: EditTransform
 
     static let empty = EditDocument(clips: [], zoomSegments: [])
 
     /// 手写 Codable（旧版草稿缺字段 → 默认值 decodeIfPresent）。
     enum CodingKeys: String, CodingKey {
-        case clips, zoomSegments, sourceVolume, backgroundMusic, keyframes, transitions
+        case clips, zoomSegments, sourceVolume, backgroundMusic, keyframes, transitions, transform
     }
 
     init(clips: [EditClip], zoomSegments: [ZoomSegment],
          sourceVolume: Double = 1, backgroundMusic: EditMusicTrack? = nil,
-         keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:]) {
+         keyframes: [EditKeyframe] = [], transitions: [Int: EditTransition] = [:],
+         transform: EditTransform = .identity) {
         self.clips = clips
         self.zoomSegments = zoomSegments
         self.sourceVolume = sourceVolume
         self.backgroundMusic = backgroundMusic
         self.keyframes = EditKeyframe.validate(keyframes)
         self.transitions = transitions
+        self.transform = transform.validated
     }
 
     init(from decoder: Decoder) throws {
@@ -157,6 +192,8 @@ struct EditDocument: Codable, Equatable {
             if let index = Int(key) { parsed[index] = value }
         }
         transitions = parsed
+        transform = (try container.decodeIfPresent(EditTransform.self, forKey: .transform)
+                     ?? .identity).validated
     }
 
     func encode(to encoder: Encoder) throws {
@@ -168,6 +205,7 @@ struct EditDocument: Codable, Equatable {
         try container.encode(keyframes, forKey: .keyframes)
         let stringKeys = Dictionary(uniqueKeysWithValues: transitions.map { (String($0.key), $0.value) })
         try container.encode(stringKeys, forKey: .transitions)
+        try container.encode(transform, forKey: .transform)
     }
 
     /// 最短片段源长（秒；validate 硬约束——交互闸另设更宽裕的手感下限）。
@@ -206,7 +244,8 @@ struct EditDocument: Codable, Equatable {
         }
         return EditDocument(clips: clips, zoomSegments: ZoomSegment.validate(document.zoomSegments),
                             sourceVolume: document.sourceVolume, backgroundMusic: document.backgroundMusic,
-                            keyframes: document.keyframes, transitions: transitions)
+                            keyframes: document.keyframes, transitions: transitions,
+                            transform: document.transform.validated)
     }
 
     // MARK: 源↔成品双向映射（折叠真源——渲染 PTS、预览 seek、UI 铺排共用）
@@ -311,7 +350,7 @@ struct EditDocument: Codable, Equatable {
         var document = EditDocument.validate(EditDocument(
             clips: result, zoomSegments: zoomSegments,
             sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-            keyframes: shiftedKeyframes))
+            keyframes: shiftedKeyframes, transform: transform))
         // 转场随波纹删除重定位：与删除区间相交的窗口丢弃；其余接缝按新边界重算下标
         var repositioned: [Int: EditTransition] = [:]
         let oldBoundaries = seamBoundaries(of: clips)
@@ -397,7 +436,8 @@ struct EditDocument: Codable, Equatable {
         }
         return EditDocument.validate(EditDocument(clips: clips, zoomSegments: zoomSegments,
                                                   sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                                                  keyframes: keyframes, transitions: transitions))
+                                                  keyframes: keyframes, transitions: transitions,
+                                                  transform: transform))
     }
 
     /// 缩放段映射到成品时间轴（UI 铺排用；渲染按源时间查找不走此函数）：

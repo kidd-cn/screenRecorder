@@ -126,6 +126,10 @@ final class ZoomEditorModel: ObservableObject {
     @Published private(set) var keyframes: [EditKeyframe] = []
     /// 接缝转场（键 = 接缝下标；批次 4c-2）。
     @Published private(set) var transitions: [Int: EditTransition] = [:]
+    /// 画面变换（缩放/位置/旋转/圆角；剪映 02.png 画面面板）。
+    @Published private(set) var transform: EditTransform = .identity
+    /// 视频自然尺寸（比例显示/预览变换基准；loadMediaInfo 补齐）。
+    @Published private(set) var videoSize: CGSize = .zero
     /// 选中的 clip 下标（⌘+点击选中 → 速度面板；validate 重排后按值回找）。
     @Published var selectedClipIndex: Int?
     /// 选中段下标（行点击/时间线点击选中；validate 重排后按编辑后段值回找）。
@@ -271,9 +275,14 @@ final class ZoomEditorModel: ObservableObject {
     /// 片段流（v2）：空文档（含 v1 草稿迁移场景——迁移需要时长）在时长就绪后重读草稿
     /// 或置单 clip 全程。
     func loadMediaInfo() async {
-        let seconds = try? await AVURLAsset(url: item.url).load(.duration).seconds
+        let asset = AVURLAsset(url: item.url)
+        let seconds = try? await asset.load(.duration).seconds
         guard let seconds, seconds.isFinite, seconds > 0 else { return }
         sourceDuration = seconds
+        if let track = try? await asset.loadTracks(withMediaType: .video).first,
+           let size = try? await track.load(.naturalSize) {
+            videoSize = size
+        }
         if clips.isEmpty {
             let document = listViewModel.loadDraft(for: item, sourceDuration: seconds)
             if document.clips.isEmpty {
@@ -286,6 +295,7 @@ final class ZoomEditorModel: ObservableObject {
             backgroundMusic = document.backgroundMusic
             keyframes = document.keyframes
             transitions = document.transitions
+            transform = document.transform
             clampTimelineOffset()
             saveDocument()
         }
@@ -540,6 +550,56 @@ final class ZoomEditorModel: ObservableObject {
         applyClipEdit { $0.transitions[seam]?.duration = duration }
     }
 
+    // MARK: 画面变换（剪映 02.png 右侧「画面」面板）
+
+    /// 应用画面变换（滑杆实时；经统一闸 → 撤销栈/草稿）。
+    func setTransform(_ newTransform: EditTransform) {
+        applyClipEdit { $0.transform = newTransform.validated }
+    }
+
+    func resetTransform() {
+        applyClipEdit { $0.transform = .identity }
+    }
+
+    // MARK: 分割 / 删除（剪映 02.png 顶部工具栏）
+
+    /// 在播放头处分割当前 clip：成品时间处把所在 clip 一分为二（共享源切点）。
+    func splitAtPlayhead() {
+        let t = playhead
+        guard t > 0.05, t < outputDuration - 0.05 else { return }
+        var cursor: TimeInterval = 0
+        for (index, clip) in clips.enumerated() {
+            let start = cursor
+            let end = cursor + clip.displayDuration
+            cursor = end
+            guard t > start + 0.05, t < end - 0.05 else { continue }
+            let sourceCut = clip.sourceStart + (t - start) * clip.speed
+            guard sourceCut - clip.sourceStart >= EditDocument.minimumClipSourceDuration,
+                  clip.sourceEnd - sourceCut >= EditDocument.minimumClipSourceDuration else { return }
+            applyClipEdit { document in
+                var before = document.clips[index]
+                var after = document.clips[index]
+                before.sourceEnd = sourceCut
+                after.sourceStart = sourceCut
+                document.clips[index] = before
+                document.clips.insert(after, at: index + 1)
+            }
+            return
+        }
+    }
+
+    /// 删除选中 clip（整段波纹删除）；未选中 → 删除播放头所在 clip。
+    func deleteSelectedClip() {
+        guard !clips.isEmpty else { return }
+        let index = selectedClipIndex
+            ?? clipIndex(atOutputTime: min(playhead, max(outputDuration - 0.01, 0)))
+        guard let index, clips.indices.contains(index) else { return }
+        var cursor: TimeInterval = 0
+        for clip in clips.prefix(index) { cursor += clip.displayDuration }
+        cutOutputRange(lower: cursor, upper: cursor + clips[index].displayDuration)
+        selectedClipIndex = nil
+    }
+
     /// 配乐 URL 解析（书签 → 可访问 URL；渲染/混音期间保持访问，由调用方 stop）。
     func resolveMusicAccess() -> (url: URL, stop: () -> Void)? {
         guard let music = backgroundMusic else { return nil }
@@ -672,6 +732,7 @@ final class ZoomEditorModel: ObservableObject {
         backgroundMusic = validated.backgroundMusic
         keyframes = validated.keyframes
         transitions = validated.transitions
+        transform = validated.transform
         saveDocument()
     }
 
@@ -697,7 +758,7 @@ final class ZoomEditorModel: ObservableObject {
     private func currentDocument() -> EditDocument {
         EditDocument(clips: clips, zoomSegments: segments,
                      sourceVolume: sourceVolume, backgroundMusic: backgroundMusic,
-                     keyframes: keyframes, transitions: transitions)
+                     keyframes: keyframes, transitions: transitions, transform: transform)
     }
 
     private func applyDocument(_ document: EditDocument) {
@@ -707,6 +768,7 @@ final class ZoomEditorModel: ObservableObject {
         backgroundMusic = document.backgroundMusic
         keyframes = document.keyframes
         transitions = document.transitions
+        transform = document.transform
         clampTimelineOffset()
         selectedClipIndex = nil
         selectedIndex = nil
@@ -760,6 +822,7 @@ final class ZoomEditorModel: ObservableObject {
         backgroundMusic = validated.backgroundMusic
         keyframes = validated.keyframes
         transitions = validated.transitions
+        transform = validated.transform
         clampTimelineOffset() // 时长可能变短（波纹删除）——平移不得越界
         clampSelections() // 过期选中下标置 nil（防 SwiftUI Binding 越界）
         saveDocument()
@@ -860,69 +923,359 @@ struct ZoomEditorView: View {
     @ObservedObject var model: ZoomEditorModel
     @ObservedObject var viewModel: RecordingListViewModel
 
+    /// 右侧检查器页签（剪映 02.png：画面/变速/动画/音频）。
+    enum InspectorTab: String, CaseIterable, Identifiable {
+        case video, speed, animation, audio
+        var id: String { rawValue }
+        var title: String {
+            switch self {
+            case .video: return NSLocalizedString("画面", comment: "Inspector tab")
+            case .speed: return NSLocalizedString("变速", comment: "Inspector tab")
+            case .animation: return NSLocalizedString("动画", comment: "Inspector tab")
+            case .audio: return NSLocalizedString("音频", comment: "Inspector tab")
+            }
+        }
+    }
+
+    @State private var inspectorTab: InspectorTab = .video
+
+    private var panelBackground: Color { Color(nsColor: .controlBackgroundColor) }
+    private var dividerColor: Color { Color(nsColor: .separatorColor) }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: OmiStyle.sectionSpacing) {
-            PlayerPreview(player: model.player)
-                .frame(minHeight: 220, maxHeight: 300)
-                .frame(maxWidth: .infinity)
-                .clipShape(RoundedRectangle(cornerRadius: OmiStyle.cardRadius))
-            OmiCard { playControlRow }
-            OmiCard {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        // 剪辑摘要（剪辑 v2）：片段数 + 源裁切量 + 成片时长。
-                        Text("共 \(model.clips.count) 段 · 源裁切 \(String(format: "%.1f", model.totalCutSeconds))s · 成片 ≈ \(String(format: "%.1f", model.exportDuration))s")
-                            .font(.footnote.weight(.medium))
-                            .foregroundStyle(OmiStyle.subtleText)
-                        Spacer()
-                        // 缩放控制（剪映对齐·批次 1）：−/+ 步进 ×2、滑杆 1…200、适应复位。
+        VStack(spacing: 0) {
+            topBar
+            Divider().overlay(dividerColor)
+            HStack(spacing: 0) {
+                sideBar.frame(width: 196)
+                Divider().overlay(dividerColor)
+                centerPane
+                Divider().overlay(dividerColor)
+                inspector.frame(width: 256)
+            }
+            Divider().overlay(dividerColor)
+            timelinePane
+        }
+        .frame(minWidth: 1180, minHeight: 760)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .task { await model.loadMediaInfo(); model.loadFilmstrip() }
+        .task { model.loadWaveform() }
+    }
+
+    // MARK: 顶部工具栏（剪映 02.png）
+
+    private var topBar: some View {
+        HStack(spacing: 12) {
+            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                .disabled(!model.canUndo).help("撤销（⌘Z）")
+            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+                .disabled(!model.canRedo).help("重做（⇧⌘Z）")
+            Divider().frame(height: 18)
+            Button { model.splitAtPlayhead() } label: {
+                Label("分割", systemImage: "scissors")
+            }.help("在播放头处分割片段")
+            Button { model.deleteSelectedClip() } label: {
+                Label("删除", systemImage: "trash")
+            }.help("删除选中片段（未选中 = 播放头所在片段）")
+            Button { model.saveCoverFrame() } label: {
+                Label("封面", systemImage: "photo.on.rectangle.angled")
+            }.help("抓播放头当前帧存为封面 PNG")
+            Button { _ = model.cycleTransitionNearPlayhead() } label: {
+                Label("转场", systemImage: "square.on.square.dashed")
+            }.disabled(model.clips.count < 2).help("循环最近接缝转场（⇧⌘T）")
+            Spacer()
+            Text(model.item.name)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Button { model.export() } label: {
+                Label("导出", systemImage: "square.and.arrow.up")
+                    .font(.callout.weight(.semibold))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(OmiStyle.accent))
+                    .foregroundStyle(.white)
+            }
+            .disabled(viewModel.zoomRenderProgress != nil)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .frame(height: 46)
+        .background(panelBackground)
+    }
+
+    // MARK: 左侧素材栏
+
+    private var sideBar: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("素材").font(.subheadline.weight(.semibold))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    sourceCard
+                    Divider().overlay(dividerColor)
+                    Text("音频").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    if let music = model.backgroundMusic {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Label(music.name, systemImage: "music.note")
+                                .font(.caption).lineLimit(1)
+                            Text("配乐 · \(Int((music.volume * 100).rounded()))%")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                    } else {
                         Button {
-                            model.timelineZoom = max(1, model.timelineZoom / 2)
+                            model.importMusic()
                         } label: {
-                            Image(systemName: "minus.magnifyingglass")
+                            Label("导入音频…", systemImage: "plus.circle")
+                                .font(.caption)
                         }
-                        .disabled(model.timelineZoom <= 1)
-                        .help("缩小时间线")
-                        Slider(
-                            value: Binding(
-                                get: { model.timelineZoom },
-                                set: { model.timelineZoom = $0 }),
-                            in: 1...200)
-                            .frame(width: 110)
-                            .help("时间线缩放（⌘+滚轮 / 捏合同效）")
-                        Button {
-                            model.timelineZoom = min(200, model.timelineZoom * 2)
-                        } label: {
-                            Image(systemName: "plus.magnifyingglass")
-                        }
-                        .disabled(model.timelineZoom >= 200)
-                        .help("放大时间线")
-                        Button("适应") {
-                            model.timelineZoom = 1
-                            model.timelineOffset = 0
-                        }
-                        .disabled(model.timelineZoom <= 1 && model.timelineOffset <= 0)
-                        .help("缩回全程适配")
                     }
-                    ZoomTimelineStrip(model: model)
-                        .frame(height: 84) // 双车道：视频带 62% + 音频带 38%（圆角由画布 layer 自裁）
-                    Text("空白处按住拖选 = 波纹删除（时间线即时接合，⌘Z 撤销）；拖白色接缝线 = 修剪两侧；⌘+点击选段调速；拖到段边出现黄线 = 磁吸咬合；空格播放，←→ 逐帧；音频道双击=加音量关键帧，拖菱形=调整，⌥+点击=删；接缝右键=加转场，⇧⌘T=循环最近接缝转场。")
-                        .font(.caption2)
-                        .foregroundStyle(OmiStyle.faintText)
                 }
             }
-            OmiCard { segmentSection }
-            selectedSegmentSection
-            selectedClipSection
-            audioTracksSection
-            OmiCard { exportSection }
+            Spacer()
+            Text("录音本身为素材；导入音频进配乐轨")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
-        .padding(16)
-        .frame(width: 720)
-        .background(OmiStyle.panelBackground) // Omi 化（2026-11-14）：分区卡片 + 绿 accent
-        .task { await model.loadMediaInfo() }
-        .task { await model.loadMediaInfo(); model.loadFilmstrip() } // 抽帧后台进行（时长就绪后）
-        .task { model.loadWaveform() } // 波形解码后台进行（剪映对齐·批次 2）
+        .padding(10)
+        .background(panelBackground)
+    }
+
+    private var sourceCard: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.black.opacity(0.35))
+                if let thumbnail = representativeThumbnail {
+                    Image(nsImage: thumbnail)
+                        .resizable()
+                        .aspectRatio(contentMode: .fill)
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                } else {
+                    Image(systemName: "film")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(height: 74)
+            .clipped()
+            Text(model.item.name)
+                .font(.caption)
+                .lineLimit(1)
+            Text(model.durationTimecode)
+                .font(.system(.caption2, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var representativeThumbnail: NSImage? {
+        guard let strip = model.filmstrip,
+              let first = strip.images.min(by: { $0.key < $1.key })?.value else { return nil }
+        return NSImage(cgImage: first, size: NSSize(width: first.width, height: first.height))
+    }
+
+    // MARK: 中间播放器（变换实时预览）
+
+    private var centerPane: some View {
+        VStack(spacing: 6) {
+            GeometryReader { geo in
+                PlayerPreview(player: model.player)
+                    .scaleEffect(model.transform.scale)
+                    .rotationEffect(.degrees(model.transform.rotationDegrees))
+                    .offset(
+                        x: model.transform.offsetX * geo.size.width,
+                        y: -model.transform.offsetY * geo.size.height)
+                    .clipShape(RoundedRectangle(
+                        cornerRadius: CGFloat(model.transform.cornerRadius) * min(geo.size.width, geo.size.height)))
+            }
+            .frame(maxHeight: .infinity)
+            transportRow
+        }
+        .padding(10)
+    }
+
+    private var transportRow: some View {
+        HStack(spacing: 12) {
+            Text("\(model.playheadTimecode) / \(model.durationTimecode)")
+                .font(.system(.footnote, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button { model.stepFrames(-1) } label: { Image(systemName: "backward.frame") }
+                .help("上一帧（←）")
+            Button { model.togglePlay() } label: {
+                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.title3)
+            }.help("播放/暂停（空格）")
+            Button { model.stepFrames(1) } label: { Image(systemName: "forward.frame") }
+                .help("下一帧（→）")
+            Spacer()
+            Button("画面") { inspectorTab = .video }
+            Button("缩放") { inspectorTab = .video }
+            Text("比例 \(aspectText)").foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .font(.callout)
+    }
+
+    private var aspectText: String {
+        let size = model.videoSize
+        guard size.width > 0, size.height > 0 else { return "—" }
+        let ratio = size.width / size.height
+        if abs(ratio - 16.0 / 9.0) < 0.01 { return "16:9" }
+        if abs(ratio - 4.0 / 3.0) < 0.01 { return "4:3" }
+        if abs(ratio - 9.0 / 16.0) < 0.01 { return "9:16" }
+        if abs(ratio - 1) < 0.01 { return "1:1" }
+        return String(format: "%.2f:1", ratio)
+    }
+
+    // MARK: 右侧检查器
+
+    private var inspector: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $inspectorTab) {
+                ForEach(InspectorTab.allCases) { tab in
+                    Text(tab.title).tag(tab)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(8)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    inspectorContent
+                }
+                .padding(10)
+            }
+        }
+        .background(panelBackground)
+    }
+
+    @ViewBuilder
+    private var inspectorContent: some View {
+        switch inspectorTab {
+        case .video:
+            transformPanel
+        case .speed:
+            speedPanel
+        case .animation:
+            segmentSection
+            selectedSegmentSection
+        case .audio:
+            audioTracksSection
+        }
+    }
+
+    // MARK: 画面变换面板（缩放/位置/旋转/圆角）
+
+    private var transformPanel: some View {
+        let current = model.transform
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("基础").font(.subheadline.weight(.semibold))
+                Spacer()
+                Button("重置") { model.resetTransform() }
+                    .disabled(current.isIdentity)
+                    .font(.caption)
+            }
+            transformSlider("缩放",
+                            value: current.scale * 100, range: 10...400, suffix: "%") {
+                var next = current; next.scale = $0 / 100; model.setTransform(next)
+            }
+            transformSlider("位置 X",
+                            value: current.offsetX * 100, range: -100...100, suffix: "%") {
+                var next = current; next.offsetX = $0 / 100; model.setTransform(next)
+            }
+            transformSlider("位置 Y",
+                            value: current.offsetY * 100, range: -100...100, suffix: "%") {
+                var next = current; next.offsetY = $0 / 100; model.setTransform(next)
+            }
+            transformSlider("旋转",
+                            value: current.rotationDegrees, range: -180...180, suffix: "°") {
+                var next = current; next.rotationDegrees = $0; model.setTransform(next)
+            }
+            transformSlider("圆角",
+                            value: current.cornerRadius * 100, range: 0...50, suffix: "%") {
+                var next = current; next.cornerRadius = $0 / 100; model.setTransform(next)
+            }
+            Text("位置单位为画布比例；圆角为短边比例。导出时按此应用。")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func transformSlider(_ title: String, value: Double,
+                                 range: ClosedRange<Double>, suffix: String,
+                                 onChange: @escaping (Double) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title).font(.caption)
+                Spacer()
+                Text(String(format: "%.0f%@", value, suffix))
+                    .font(.system(.caption2, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: Binding(get: { value }, set: onChange), in: range)
+        }
+    }
+
+    // MARK: 变速面板
+
+    @ViewBuilder
+    private var speedPanel: some View {
+        if let index = model.selectedClipIndex, model.clips.indices.contains(index) {
+            let clip = model.clips[index]
+            VStack(alignment: .leading, spacing: 8) {
+                Text("片段 \(index + 1)").font(.subheadline.weight(.semibold))
+                Picker("速度", selection: Binding(
+                    get: { clip.speed },
+                    set: { model.setClipSpeed(at: index, speed: $0) })) {
+                    Text("0.5×").tag(0.5)
+                    Text("1×").tag(1.0)
+                    Text("1.25×").tag(1.25)
+                    Text("1.5×").tag(1.5)
+                    Text("2×").tag(2.0)
+                    Text("3×").tag(3.0)
+                }
+                Text("时长 \(String(format: "%.1f", clip.displayDuration))s")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else {
+            Text("⌘+点击时间线选中片段后调速（0.5–3×，音高保持）")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: 底部时间线
+
+    private var timelinePane: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text("共 \(model.clips.count) 段 · 源裁切 \(String(format: "%.1f", model.totalCutSeconds))s · 成片 ≈ \(String(format: "%.1f", model.exportDuration))s")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Slider(
+                    value: Binding(get: { model.timelineZoom }, set: { model.timelineZoom = $0 }),
+                    in: 1...200)
+                    .frame(width: 100)
+                    .help("时间线缩放（⌘+滚轮 / 捏合同效）")
+                Button("适应") {
+                    model.timelineZoom = 1
+                    model.timelineOffset = 0
+                }
+                .font(.caption)
+                .disabled(model.timelineZoom <= 1 && model.timelineOffset <= 0)
+            }
+            ZoomTimelineStrip(model: model)
+                .frame(height: 120)
+            Text("空白拖选=波纹删除 · 拖白线=修剪接缝 · ⌘+点击=选段调速 · 双击音频道=音量关键帧 · 接缝右键/⇧⌘T=转场 · 空格播放 ←→ 逐帧")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+        }
+        .padding(8)
+        .background(panelBackground)
     }
 
     // MARK: 播放行
@@ -1289,12 +1642,14 @@ enum ZoomEditorWindowOpener {
         }
         let model = ZoomEditorModel(item: item, listViewModel: viewModel)
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 760, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = String(format: NSLocalizedString("编辑 — %@", comment: "Editor window title"), item.name)
+        // 剪映 02.png 复刻：整窗深色观感（面板/检查器/时间线同一色阶）
+        window.appearance = NSAppearance(named: .darkAqua)
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: ZoomEditorView(model: model, viewModel: viewModel))
         window.center()
