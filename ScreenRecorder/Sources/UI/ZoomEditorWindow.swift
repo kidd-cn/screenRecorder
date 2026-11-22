@@ -1409,27 +1409,74 @@ struct ZoomEditorView: View {
         .background(panelBackground)
     }
 
-    /// 时间线编辑工具栏（剪映 02.png 底部那一排：撤销/重做/分割/删除/裁剪/转场）。
+    /// 时间线编辑工具栏（剪映 02.png 底部那一排，图标顺序逐一对齐）：
+    /// +（添加素材）/ 选择▾ / 撤销 / 重做 / 分割 / 向左裁剪 / 向右裁剪 / 删除。
     private var timelineToolbar: some View {
         HStack(spacing: 10) {
+            Button {
+                model.importMusic() // 「+」= 添加素材（离线应用可导入的即配乐）
+            } label: {
+                ZStack(alignment: .topTrailing) {
+                    Image(systemName: "plus")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(OmiStyle.accent)
+                    Circle()
+                        .fill(OmiStyle.accent)
+                        .frame(width: 4, height: 4)
+                        .offset(x: 4, y: -3)
+                }
+            }
+            .help("添加素材（导入音频到配乐轨）")
+            Menu {
+                Button("指针选择") {}
+            } label: {
+                HStack(spacing: 2) {
+                    Image(systemName: "cursorarrow")
+                    Image(systemName: "chevron.down").font(.caption2)
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("选择工具")
+            Divider().frame(height: 16)
             Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
                 .disabled(!model.canUndo).help("撤销（⌘Z）")
             Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
                 .disabled(!model.canRedo).help("重做（⇧⌘Z）")
             Divider().frame(height: 16)
             Button { model.splitAtPlayhead() } label: {
-                Label("分割", systemImage: "rectangle.split.2x1")
+                Image(systemName: "rectangle.split.2x1")
+            }.help("分割（⌘B）：播放头处一分为二")
+            Button { model.trimLeftAtPlayhead() } label: {
+                Image(systemName: "arrow.left.to.line")
+            }.help("向左裁剪：裁掉播放头左侧")
+            Button { model.trimRightAtPlayhead() } label: {
+                Image(systemName: "arrow.right.to.line")
+            }.help("向右裁剪：裁掉播放头右侧")
+            Button { model.deleteSelectedClip() } label: {
+                Image(systemName: "trash")
+            }.help("删除选中片段（未选中 = 播放头所在片段）")
+            // 以下按 02.png 图标顺序保留占位（未实现，置灰 + 悬停注明）
+            ForEach(Array([
+                ("textformat", "文本"),
+                ("shield", "遮挡/马赛克"),
+                ("square.split.2x1", "分割删除"),
+                ("rotate.right", "旋转"),
+                ("arrow.left.and.right.square", "镜像"),
+                ("sparkles", "特效"),
+                ("crop", "裁剪"),
+                ("rectangle.dashed", "选中工具"),
+                ("rectangle.portrait.and.arrow.right", "导出片段"),
+                ("pencil", "编辑"),
+                ("square.on.square", "复制"),
+                ("scissors", "智能裁剪（限免）"),
+            ].enumerated()), id: \.offset) { _, item in
+                Button {} label: {
+                    Image(systemName: item.0)
+                }
+                .disabled(true)
+                .help("\(item.1)：暂未实现")
             }
-            .help("在播放头处分割片段（⌘B）")
-            Button { model.deleteSelectedClip() } label: { Image(systemName: "trash") }
-                .help("删除选中片段")
-            Button { model.trimLeftAtPlayhead() } label: { Image(systemName: "arrow.left.to.line") }
-                .help("向左裁剪（裁掉播放头左侧）")
-            Button { model.trimRightAtPlayhead() } label: { Image(systemName: "arrow.right.to.line") }
-                .help("向右裁剪（裁掉播放头右侧）")
-            Button { _ = model.cycleTransitionNearPlayhead() } label: { Image(systemName: "square.on.square.dashed") }
-                .disabled(model.clips.count < 2)
-                .help("循环最近接缝转场（⇧⌘T）")
             Spacer()
             Text("共 \(model.clips.count) 段 · 源裁切 \(String(format: "%.1f", model.totalCutSeconds))s · 成片 ≈ \(String(format: "%.1f", model.exportDuration))s")
                 .font(.caption2)
