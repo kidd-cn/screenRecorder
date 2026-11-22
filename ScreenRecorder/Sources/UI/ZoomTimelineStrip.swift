@@ -862,7 +862,18 @@ enum ZoomEditorMenus {
             menu.addItem(item)
             proxies.append(proxy)
         }
-        if model.transitions[seamIndex] != nil {
+        if let existing = model.transitions[seamIndex] {
+            // 已有转场：时长档位 + 删除
+            for duration in [0.2, 0.5, 1.0, 2.0] {
+                let selected = abs(existing.duration - duration) < 1e-9
+                addItem(
+                    String(format: NSLocalizedString("%.1fs%@", comment: "Transition duration"),
+                           duration, selected ? " ✓" : "")) { [weak model] in
+                    Task { @MainActor in
+                        model?.setTransitionDuration(at: seamIndex, duration: duration)
+                    }
+                }
+            }
             addItem(NSLocalizedString("删除转场", comment: "Transition menu delete")) { [weak model] in
                 Task { @MainActor in model?.removeTransition(at: seamIndex) }
             }

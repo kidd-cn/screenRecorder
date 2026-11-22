@@ -475,6 +475,11 @@ final class ZoomEditorModel: ObservableObject {
         applyClipEdit { $0.transitions[seam] = nil }
     }
 
+    /// 改转场时长（EditTransition init 内钳 0.2…2s）。
+    func setTransitionDuration(at seam: Int, duration: TimeInterval) {
+        applyClipEdit { $0.transitions[seam]?.duration = duration }
+    }
+
     /// 配乐 URL 解析（书签 → 可访问 URL；渲染/混音期间保持访问，由调用方 stop）。
     func resolveMusicAccess() -> (url: URL, stop: () -> Void)? {
         guard let music = backgroundMusic else { return nil }

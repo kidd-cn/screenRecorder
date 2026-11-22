@@ -451,6 +451,18 @@ final class TransitionTests: XCTestCase {
         XCTAssertEqual(moved?.transitions[1], EditTransition(kind: .crossfade))
     }
 
+    /// 转场时长档位钳制（init 内 0.2…2s）。
+    func testTransitionDurationClamp() throws {
+        let document = EditDocument(
+            clips: [EditClip(sourceStart: 0, sourceEnd: 1), EditClip(sourceStart: 1, sourceEnd: 2)],
+            zoomSegments: [],
+            transitions: [1: EditTransition(kind: .black, duration: 9)])
+        let clamped = try XCTUnwrap(document.transitions[1]).duration
+        XCTAssertEqual(clamped, 2, accuracy: 1e-9, "超上限钳 2s")
+        let small = EditTransition(kind: .crossfade, duration: 0.05)
+        XCTAssertEqual(small.duration, 0.2, accuracy: 1e-9, "低于下限钳 0.2s")
+    }
+
     func testV3DraftDecodesWithoutTransitions() throws {
         let v3JSON = #"{"clips":[{"sourceStart":0,"sourceEnd":5,"speed":1}],"zoomSegments":[]}"#
         let decoded = try JSONDecoder().decode(EditDocument.self, from: Data(v3JSON.utf8))
