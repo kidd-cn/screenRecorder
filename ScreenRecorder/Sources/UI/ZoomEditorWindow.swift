@@ -145,10 +145,20 @@ final class ZoomEditorModel: ObservableObject {
 
     /// 缩放倍率（1 = 全程适配；上限 200 —— 48s 片 @200 → 1 帧 ≈ 46pt，帧级精剪）。
     @Published var timelineZoom: Double = 1 {
-        didSet { timelineOffset = ZoomTimelineGeometry.clampedOffset(timelineOffset, sourceDuration: sourceDuration, zoom: timelineZoom) }
+        didSet { clampTimelineOffset() }
     }
     /// 左缘时间（秒，钳制随 zoom）。
     @Published var timelineOffset: TimeInterval = 0
+
+    /// 时间线可视时长（**成品轴**——剪掉素材后时间线 = 成片时长；未就绪回退源时长）。
+    /// 比例尺/平移钳制必须用它：曾误用源时长致放大后可滚出内容尽头（2026-11-22 用户反馈）。
+    var timelineDuration: TimeInterval { outputDuration > 0 ? outputDuration : sourceDuration }
+
+    /// 平移钳制（zoom/时长/内容变化后统一调用）。
+    func clampTimelineOffset() {
+        timelineOffset = ZoomTimelineGeometry.clampedOffset(
+            timelineOffset, sourceDuration: timelineDuration, zoom: timelineZoom)
+    }
 
     // MARK: 音频波形（剪映对齐·批次 2：看波形找停顿点下刀）
 
@@ -276,6 +286,7 @@ final class ZoomEditorModel: ObservableObject {
             backgroundMusic = document.backgroundMusic
             keyframes = document.keyframes
             transitions = document.transitions
+            clampTimelineOffset()
             saveDocument()
         }
     }
@@ -607,6 +618,7 @@ final class ZoomEditorModel: ObservableObject {
         backgroundMusic = document.backgroundMusic
         keyframes = document.keyframes
         transitions = document.transitions
+        clampTimelineOffset()
         saveDocument()
         selectedClipIndex = nil
         selectedIndex = nil
@@ -658,6 +670,7 @@ final class ZoomEditorModel: ObservableObject {
         backgroundMusic = validated.backgroundMusic
         keyframes = validated.keyframes
         transitions = validated.transitions
+        clampTimelineOffset() // 时长可能变短（波纹删除）——平移不得越界
         saveDocument()
     }
 
@@ -691,6 +704,19 @@ final class ZoomEditorModel: ObservableObject {
         }
     }
 
+    /// 播放跟随（放大时）：播放头逼近/越过右缘 → 视窗左移，播放头保持距左缘 8%
+    ///（剪映同款滚动跟随）。zoom = 1 全程可见无需跟随。
+    private func followPlayheadIfNeeded() {
+        guard isPlaying, timelineZoom > 1.001, timelineDuration > 0 else { return }
+        let span = timelineDuration / timelineZoom
+        let rightEdge = timelineOffset + span
+        if playhead > rightEdge - span * 0.08 || playhead < timelineOffset {
+            timelineOffset = ZoomTimelineGeometry.clampedOffset(
+                playhead - span * 0.08,
+                sourceDuration: timelineDuration, zoom: timelineZoom)
+        }
+    }
+
     /// 播放头驱动：主队列 periodic 观察器（0.25s 步进）。回调为 AVFoundation @Sendable
     /// 缝（主队列投递）——写回经 `Task { @MainActor }` hop（willSet sink 裁定同款纪律：
     /// 异步缝闭包不直写主 actor 状态）。
@@ -714,6 +740,7 @@ final class ZoomEditorModel: ObservableObject {
                 }
                 self.playhead = seconds
                 self.isPlaying = self.player.timeControlStatus == .playing
+                self.followPlayheadIfNeeded()
             }
         }
     }

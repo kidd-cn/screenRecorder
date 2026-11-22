@@ -222,6 +222,32 @@ final class ClipEditModelTests: XCTestCase {
         // 草稿同步
         XCTAssertEqual(vm.loadDraft(for: item, sourceDuration: 1.0).clips, model.clips)
     }
+
+    /// 时间线平移钳制按**成品轴**（2026-11-22 用户反馈：放大可滚出内容尽头）：
+    /// 成片 0.5s、zoom 2 → 可视 0.25s，offset 上限 0.25（不得按源时长 1.0 放到 0.5）。
+    func testTimelineOffsetClampsToOutputDuration() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("TimelineClamp-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("钳制夹具.mp4")
+        try await EditorMovieFixture.makeMovie(at: url)
+        let item = RecordingFileMetadata(
+            id: url, url: url, name: url.lastPathComponent, sizeBytes: 1, createdAt: nil, duration: nil)
+        let vm = RecordingListViewModel(
+            store: RecordingFileStore(baseDirectory: directory), durationProvider: { _ in 0 })
+        let model = ZoomEditorModel(item: item, listViewModel: vm)
+        await model.loadMediaInfo()
+        model.cutOutputRange(lower: 0.1, upper: 0.6) // 成片 0.5s
+        XCTAssertEqual(model.outputDuration, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(model.timelineDuration, 0.5, accuracy: 1e-9, "比例尺基准 = 成品时长")
+        model.timelineOffset = 100
+        model.timelineZoom = 2 // didSet 钳制
+        XCTAssertEqual(model.timelineOffset, 0.25, accuracy: 1e-6,
+                       "offset 上限 = 成片 − 可视（0.5 − 0.25）")
+        model.timelineZoom = 1
+        XCTAssertEqual(model.timelineOffset, 0, accuracy: 1e-9, "zoom=1 平移归零")
+    }
 }
 
 /// 真实 mp4 夹具工厂（编辑器模型级钉测共用）：1s@30fps 320×180 纯色视频。

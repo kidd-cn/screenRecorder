@@ -306,7 +306,7 @@ final class ZoomTimelineCanvas: NSView {
     // 普通滚轮（横向或纵向）= 平移。
 
     override func scrollWheel(with event: NSEvent) {
-        guard let model, model.sourceDuration > 0, bounds.width > 0 else {
+        guard let model, model.timelineDuration > 0, bounds.width > 0 else {
             return super.scrollWheel(with: event)
         }
         let scale = pxPerSec(model: model)
@@ -319,20 +319,20 @@ final class ZoomTimelineCanvas: NSView {
             let newScale = pxPerSec(model: model)
             model.timelineOffset = ZoomTimelineGeometry.clampedOffset(
                 cursorTime - point.x / max(newScale, 0.001),
-                sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+                sourceDuration: model.timelineDuration, zoom: model.timelineZoom)
         } else {
             // 平移：横向分量优先（触控板横扫），否则纵向分量（鼠标滚轮）。
             let delta = event.scrollingDeltaX != 0 ? event.scrollingDeltaX : event.scrollingDeltaY
             guard delta != 0 else { return }
             model.timelineOffset = ZoomTimelineGeometry.clampedOffset(
                 model.timelineOffset + TimeInterval(delta / max(scale, 0.001)),
-                sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+                sourceDuration: model.timelineDuration, zoom: model.timelineZoom)
         }
     }
 
     /// 触控板捏合缩放（光标锚定）。
     override func magnify(with event: NSEvent) {
-        guard let model, model.sourceDuration > 0, bounds.width > 0 else { return }
+        guard let model, model.timelineDuration > 0, bounds.width > 0 else { return }
         let scale = pxPerSec(model: model)
         let point = convert(event.locationInWindow, from: nil)
         let cursorTime = ZoomTimelineGeometry.xToTime(point.x, pxPerSec: scale, offset: model.timelineOffset)
@@ -341,7 +341,7 @@ final class ZoomTimelineCanvas: NSView {
         let newScale = pxPerSec(model: model)
         model.timelineOffset = ZoomTimelineGeometry.clampedOffset(
             cursorTime - point.x / max(newScale, 0.001),
-            sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+            sourceDuration: model.timelineDuration, zoom: model.timelineZoom)
     }
 
     /// 尺寸变化即重绘（比例尺依赖条宽；macOS NSView 无 needsDisplayOnBoundsChange）。
@@ -354,8 +354,9 @@ final class ZoomTimelineCanvas: NSView {
 
     /// 有效像素率与平移（模型持有缩放态；画布经订阅重绘）。
     private func pxPerSec(model: ZoomEditorModel) -> CGFloat {
+        // 比例尺按**成品轴**时长（剪掉素材后时间线 = 成片时长——误用源时长会留白/越界）
         ZoomTimelineGeometry.pxPerSec(
-            width: bounds.width, sourceDuration: model.sourceDuration, zoom: model.timelineZoom)
+            width: bounds.width, sourceDuration: model.timelineDuration, zoom: model.timelineZoom)
     }
 
     private func currentRanges() -> [(index: Int, start: TimeInterval, end: TimeInterval)] {
@@ -713,7 +714,7 @@ final class ZoomTimelineCanvas: NSView {
     /// 磁点收集（剪映对齐）：0 / 源时长 / 播放头 / 各剪除段与缩放段端点（排除集由调用方过滤）。
     private func magnetCandidates(model: ZoomEditorModel, excludingCut cutIndex: Int? = nil,
                                   excludingZoom zoomIndex: Int? = nil) -> [TimeInterval] {
-        var candidates: [TimeInterval] = [0, model.sourceDuration, model.playhead]
+        var candidates: [TimeInterval] = [0, model.timelineDuration, model.playhead]
         for (index, clip) in model.clips.enumerated() where index != cutIndex {
             candidates.append(contentsOf: [clip.sourceStart, clip.sourceEnd])
         }
