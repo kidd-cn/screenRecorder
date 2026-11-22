@@ -194,6 +194,133 @@ enum OfflineZoomRenderer {
         return images.isEmpty ? nil : Filmstrip(interval: interval, images: images)
     }
 
+    /// 变调不变声音频离线渲染（批次 4c）：AVAudioEngine manual rendering +
+    /// AVAudioUnitTimePitch——各 clip 段按其速度经 timePitch 播放（音高保持），
+    /// 顺序渲染拼接成整条成片音轨。返回交错 float32（L R L R…）@ targetRate 双声道。
+    /// 失败抛错（调用方回退线性重采样路径）。
+    struct PitchPreservedAudio {
+        let sampleRate: Double
+        let channelCount: Int
+        /// 交错 float32 样本（L R L R…）。
+        let samples: [Float]
+        /// 总帧数（每帧 = channelCount 个样本）。
+        let frameCount: Int
+    }
+
+    static func renderPitchPreservedAudio(
+        sourceURL: URL, clips: [EditClip], targetRate: Double = 48000,
+        sourceVolume: Double,
+        fadeIn: TimeInterval, fadeOut: TimeInterval
+    ) async throws -> PitchPreservedAudio {
+        guard !clips.isEmpty else { throw RenderError.noRenderableSamples }
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        let timePitch = AVAudioUnitTimePitch()
+        engine.attach(player)
+        engine.attach(timePitch)
+        guard let renderFormat = AVAudioFormat(
+            standardFormatWithSampleRate: targetRate, channels: 2) else {
+            throw RenderError.cannotAddAudioInput
+        }
+        engine.connect(player, to: timePitch, format: renderFormat)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: renderFormat)
+        let maximumFrameCount: AVAudioFrameCount = 4096
+        try engine.enableManualRenderingMode(
+            .offline, format: renderFormat, maximumFrameCount: maximumFrameCount)
+        engine.prepare()
+        try engine.start()
+        let file = try AVAudioFile(forReading: sourceURL)
+        let fileFrames = AVAudioFrameCount(file.length)
+        let fileRate = file.processingFormat.sampleRate
+        let fileChannels = max(Int(file.processingFormat.channelCount), 1)
+        var output: [Float] = []
+        output.reserveCapacity(Int((CMTimeGetSeconds(try await AVURLAsset(url: sourceURL).load(.duration)) * targetRate).rounded(.up)) * 2)
+        try player.play()
+        for clip in clips {
+            let clipSourceFrames = clip.sourceEnd - clip.sourceStart
+            guard clipSourceFrames > 0.05 else { continue }
+            let startFrame = AVAudioFramePosition(max(clip.sourceStart, 0) * fileRate)
+            let frameCount = AVAudioFrameCount(min(clipSourceFrames * fileRate, Double(fileFrames) - Double(startFrame)))
+            guard frameCount > 0 else { continue }
+            timePitch.rate = Float(clip.speed)
+            let expectedOutputFrames = AVAudioFrameCount((Double(frameCount) / fileRate / clip.speed * targetRate).rounded(.up))
+            player.scheduleSegment(
+                file, startingFrame: startFrame, frameCount: frameCount, at: nil,
+                completionHandler: {})
+            let buffer = AVAudioPCMBuffer(pcmFormat: renderFormat, frameCapacity: AVAudioFrameCount(maximumFrameCount))!
+            var rendered: AVAudioFrameCount = 0
+            while rendered < expectedOutputFrames {
+                let framesToRender = min(AVAudioFrameCount(maximumFrameCount), expectedOutputFrames - rendered)
+                let status = try engine.renderOffline(framesToRender, to: buffer)
+                guard status == .success else { throw RenderError.cannotAddAudioInput }
+                let frames = Int(buffer.frameLength)
+                guard frames > 0 else { break }
+                rendered += AVAudioFrameCount(frames)
+                let left = buffer.floatChannelData![0]
+                let right = buffer.floatChannelData![1]
+                for frame in 0..<frames {
+                    output.append(left[frame])
+                    output.append(right[frame])
+                }
+            }
+        }
+        player.stop()
+        engine.stop()
+        // 总帧数按 clips 期望截齐（引擎渲染末尾可能多出尾巴）
+        let totalFrames = output.count / 2
+        // 音量 + 淡入淡出（按输出时间逐帧增益）
+        let secondsPerFrame = 1.0 / targetRate
+        for frame in 0..<totalFrames {
+            let t = Double(frame) * secondsPerFrame
+            var gain = Float(sourceVolume)
+            if fadeIn > 0, t < fadeIn {
+                gain *= Float(t / fadeIn)
+            }
+            let fromEnd = Double(totalFrames - frame) * secondsPerFrame
+            if fadeOut > 0, fromEnd < fadeOut {
+                gain *= Float(fromEnd / fadeOut)
+            }
+            output[frame * 2] *= gain
+            output[frame * 2 + 1] *= gain
+        }
+        return PitchPreservedAudio(
+            sampleRate: targetRate, channelCount: 2,
+            samples: output, frameCount: totalFrames)
+    }
+
+    /// 交错 float32 音频 → CMSampleBuffer 包（帧数 chunkFrames；PTS 递进）。
+    static func interleavedFloatSample(
+        samples: [Float], chunkStartFrame: Int, chunkFrames: Int,
+        channelCount: Int, sampleRate: Double, description: CMFormatDescription,
+        pts: CMTime) -> CMSampleBuffer? {
+        let byteCount = chunkFrames * channelCount * 4
+        var blockBuffer: CMBlockBuffer?
+        guard CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
+            blockAllocator: nil, customBlockSource: nil, offsetToData: 0, dataLength: byteCount,
+            flags: 0, blockBufferOut: &blockBuffer) == kCMBlockBufferNoErr,
+            let blockBuffer else { return nil }
+        let base = chunkStartFrame * channelCount // 元素索引（Float 数组，非字节）
+        let slice = samples[base..<(base + chunkFrames * channelCount)]
+        let copied = slice.withUnsafeBytes { raw -> OSStatus in
+            CMBlockBufferReplaceDataBytes(
+                with: raw.baseAddress!, blockBuffer: blockBuffer,
+                offsetIntoDestination: 0, dataLength: byteCount)
+        }
+        guard copied == kCMBlockBufferNoErr else { return nil }
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: CMTimeValue(chunkFrames), timescale: CMTimeScale(sampleRate)),
+            presentationTimeStamp: pts, decodeTimeStamp: .invalid)
+        var output: CMSampleBuffer?
+        guard CMSampleBufferCreate(
+            allocator: kCFAllocatorDefault, dataBuffer: blockBuffer, dataReady: true,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: description,
+            sampleCount: chunkFrames, sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &output) == noErr,
+            let output else { return nil }
+        return output
+    }
+
     /// 音量缩放（原声音量·批次 4b）：PCM 逐帧乘 volume（16-bit int / 32-bit float），
     /// 非 1 音量返回重写后的样本；volume == 1 返回 nil（调用方透传原样本，零拷贝）。
     /// 格式不支持 → nil（透传，尽力而为）。
@@ -595,6 +722,11 @@ enum OfflineZoomRenderer {
         let outputWidth = Int(outputSize.width.rounded())
         let outputHeight = Int(outputSize.height.rounded())
 
+        // 音轨路径裁决（批次 4c）：任一 clip 速度 ≠ 1 → 整条音轨走变调不变声离线渲染
+        //（AVAudioUnitTimePitch，音高保持）；否则沿用 reader PCM 包路径（原速透传）。
+        let needsPitchPreservedAudio = editDocument.clips.contains { abs($0.speed - 1) > 1e-6 }
+        let fadeSeconds: TimeInterval = 0.5
+
         // reader：视频 BGRA 像素缓冲；音轨 PCM 解码（AAC 重编码的源口径）
         let reader = try AVAssetReader(asset: asset)
         let videoOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: [
@@ -603,7 +735,7 @@ enum OfflineZoomRenderer {
         videoOutput.alwaysCopiesSampleData = false
         reader.add(videoOutput)
         var audioOutput: AVAssetReaderAudioMixOutput?
-        if let audioTrack = audioTracks.first {
+        if let audioTrack = audioTracks.first, !needsPitchPreservedAudio {
             let output = AVAssetReaderAudioMixOutput(audioTracks: [audioTrack], audioSettings: [
                 AVFormatIDKey: kAudioFormatLinearPCM,
                 AVLinearPCMBitDepthKey: 16,
@@ -645,6 +777,9 @@ enum OfflineZoomRenderer {
         // 须取**双轨最小首 PTS**（R1 F1——见类注释）。音轨存在但零样本时 audioInput
         // 保持 nil：音轨侧拉到 nil 即收尾，按纯视频装配。
         var audioInput: AVAssetWriterInput?
+        /// 变调不变声渲染缓冲（待分包追加；nil = 走 reader 包路径）。
+        var stretchAudioAppender: (samples: [Float], frames: Int, channels: Int,
+                                   rate: Double, description: CMFormatDescription, appendedFrames: Int)?
         var pendingVideoSample: CMSampleBuffer?
         var pendingAudioSample: CMSampleBuffer?
         /// 会话锚点（双轨最小首 PTS——**折叠后**口径；appenders 据此兜底跳过早于锚点的
@@ -696,14 +831,54 @@ enum OfflineZoomRenderer {
 
         var lastKeptTick: Int?
         var videoDone = false
-        var audioDone = audioOutput == nil
+        var audioDone = audioOutput == nil || stretchAudioAppender != nil
         do {
             guard reader.startReading() else {
                 throw RenderError.readerFailed(status: reader.status, underlying: reader.error)
             }
-            // 拉首个**存活** PCM 样本装配 AAC 输入（writer 尚未 startWriting——装配窗口
-            // 合法；剪除段内的样本跳过——剪辑 v1）
-            if let audioOutput, let first = firstKeptSample(from: audioOutput) {
+            // 变调不变声路径：整条成片音轨离线渲染（含裁切/速度/原声音量/淡入淡出），
+            // AAC 输入从渲染格式装配；audioOutput 关闭（不再走 reader 包路径）。
+            if needsPitchPreservedAudio {
+                let stretched = try await renderPitchPreservedAudio(
+                    sourceURL: sourceURL, clips: editDocument.clips,
+                    sourceVolume: editDocument.sourceVolume,
+                    fadeIn: fadeSeconds, fadeOut: fadeSeconds)
+                var asbd = AudioStreamBasicDescription(
+                    mSampleRate: stretched.sampleRate, mFormatID: kAudioFormatLinearPCM,
+                    mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                    mBytesPerPacket: UInt32(stretched.channelCount * 4),
+                    mFramesPerPacket: 1, mBytesPerFrame: UInt32(stretched.channelCount * 4),
+                    mChannelsPerFrame: UInt32(stretched.channelCount),
+                    mBitsPerChannel: 32, mReserved: 0)
+                var descriptionOut: CMFormatDescription?
+                let asbdStatus = CMAudioFormatDescriptionCreate(
+                    allocator: kCFAllocatorDefault, asbd: &asbd, layoutSize: 0, layout: nil,
+                    magicCookieSize: 0, magicCookie: nil, extensions: nil,
+                    formatDescriptionOut: &descriptionOut)
+                guard asbdStatus == noErr, let audioDescription = descriptionOut else {
+                    throw RenderError.cannotAddAudioInput
+                }
+                let channels = Int(asbd.mChannelsPerFrame)
+                let input = AVAssetWriterInput(
+                    mediaType: .audio,
+                    outputSettings: [
+                        AVFormatIDKey: kAudioFormatMPEG4AAC,
+                        AVSampleRateKey: stretched.sampleRate,
+                        AVNumberOfChannelsKey: channels,
+                        AVEncoderBitRateKey: channels >= 2 ? 128_000 : 96_000,
+                        AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+                    ],
+                    sourceFormatHint: audioDescription)
+                input.expectsMediaDataInRealTime = true
+                guard writer.canAdd(input) else { throw RenderError.cannotAddAudioInput }
+                writer.add(input)
+                audioInput = input
+                // 渲染缓冲分包追加（progressive；锚点 = 0——音轨从成片 0 起且覆盖全片）
+                stretchAudioAppender = (samples: stretched.samples, frames: stretched.frameCount,
+                                        channels: stretched.channelCount,
+                                        rate: stretched.sampleRate, description: audioDescription,
+                                        appendedFrames: 0)
+            } else if let audioOutput, let first = firstKeptSample(from: audioOutput) {
                 guard let description = CMSampleBufferGetFormatDescription(first),
                       let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(description)?.pointee
                 else { throw RenderError.cannotAddAudioInput }
@@ -746,6 +921,8 @@ enum OfflineZoomRenderer {
                 sessionAnchor = v
             case let (nil, a?):
                 sessionAnchor = a
+            case (nil, nil) where stretchAudioAppender != nil:
+                sessionAnchor = .zero // 变调路径：音轨从 0 起整条追加，锚点取视频首帧后置 0
             default:
                 throw RenderError.noRenderableSamples
             }
@@ -790,6 +967,26 @@ enum OfflineZoomRenderer {
                     } else {
                         audioDone = true
                     }
+                }
+            }
+            // 变调不变声音轨分包追加（视频流结束后统一写；锚点 0 起PTS 连续递进）
+            if let appender = stretchAudioAppender, let audioInput {
+                let chunkFrames = 4096
+                var appended = 0
+                while appended < appender.frames {
+                    let count = min(chunkFrames, appender.frames - appended)
+                    let pts = CMTime(value: CMTimeValue(appended), timescale: CMTimeScale(appender.rate))
+                    guard let packet = OfflineZoomRenderer.interleavedFloatSample(
+                        samples: appender.samples, chunkStartFrame: appended, chunkFrames: count,
+                        channelCount: appender.channels, sampleRate: appender.rate,
+                        description: appender.description, pts: pts) else {
+                        throw RenderError.appendFailedAudio(underlying: nil)
+                    }
+                    try await waitForReady(audioInput, mediaType: "音频")
+                    guard audioInput.append(packet) else {
+                        throw RenderError.appendFailedAudio(underlying: writer.error)
+                    }
+                    appended += count
                 }
             }
         } catch {
@@ -888,7 +1085,15 @@ enum OfflineZoomRenderer {
             // 速度 ≠ 1 → 线性重采样（最近邻抽帧/复制——变调 v1，声调保持归 4c）；
             // 速度 = 1 → PTS 平移原样透传。重写失败转类型化错误（正常源不可达）。
             let speed = editDocument.speed(atSourceTime: t) ?? 1
-            let sourceVolume = Float(editDocument.sourceVolume)
+            var sourceVolume = Float(editDocument.sourceVolume)
+            // 淡入淡出（成片首尾 0.5s；包中点粒度 ≈23ms 不可感知）
+            if outSeconds < fadeSeconds {
+                sourceVolume *= Float(max(outSeconds, 0) / fadeSeconds)
+            }
+            let fromEnd = outDuration - outSeconds
+            if fromEnd < fadeSeconds {
+                sourceVolume *= Float(max(fromEnd, 0) / fadeSeconds)
+            }
             var outgoing = sample
             if abs(speed - 1) > 1e-6,
                let resampled = OfflineZoomRenderer.resampledAudioSample(
